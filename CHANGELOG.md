@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.2.0] 2026-07-11
+
+### Added
+- **Neighboring system kill monitor** (#73) — Optional async background task polls Zkillboard every 2 minutes for kills in systems within a configurable jump radius (1–5). Per-system 10-minute cooldown prevents alert spam. Posts: `"Adjacent: N kill(s) in [System] (X jumps away)"`.
+- **Route threat assessment** (#74) — "Check Route" button in Settings triggers a BFS path from the current system to a configured destination, checks each hop for kill activity (last hour via Zkillboard), and posts a summary with `[danger]`/`[caution]`/`safe` classification per hop.
+- **Pipe/pocket detection** (#75) — On detection start, posts system type based on gate count: `"dead-end"` (1 gate), `"pipe"` (2 gates), `"crossroads"` (3+ gates). Helps assess whether incoming neutrals are through-traffic or specifically targeting you.
+- **Sovereignty display** (#76) — On start, fetches the current system's sovereignty holder from the ESI bulk sov map and posts: `"Sov: Alliance [Ticker] — IHub: active | TCU: active"`. Re-polls every 5 minutes and posts a yellow `SOV CHANGE` alert if the controlling alliance changes.
+
+### Changed
+- `DEFAULT_SETTINGS` gains an `adjacent` block: `enabled`, `max_jumps`, `poll_interval`, `min_kills`, `destination_system`.
+- Settings window height 1050 → 1200. New "Adjacent System Monitor" section with enable checkbox, max-jumps/min-kills/poll-interval entries, destination system field, and "Check Route" button.
+- `AlertAgent.start()` now creates `_display_system_info()` (one-shot) and `_sov_monitor()` (background poll) tasks automatically.
+
+### New files
+- `evealert/tools/universe.py` — `UniverseCache` with BFS jump-graph, system ID/name resolution, gate counting, sovereignty lookup, route threat assessment; `SovInfo` and `RouteLeg` namedtuples
+- `evealert/tools/neighbor_monitor.py` — `NeighborMonitor` async poll loop
+
 ## [3.1.0] 2026-07-11
 
 ### Added

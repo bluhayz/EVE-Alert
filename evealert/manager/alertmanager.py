@@ -190,6 +190,14 @@ class AlertAgent:
         self._web_ui_port = 8765
         self._web_server = None
 
+        # v3.2: adjacent system awareness
+        self._adjacent_enabled = False
+        self._adjacent_max_jumps = 3
+        self._adjacent_poll_interval = 120
+        self._adjacent_min_kills = 1
+        self._adjacent_destination = ""
+        self._neighbor_monitor = None
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -301,6 +309,26 @@ class AlertAgent:
             self._ui(self.main.write_message, "System: EVE Alert started.", "green")
             # Fire background update check — non-blocking, silent on failure
             self.loop.create_task(self._check_for_update())
+            # v3.2: pipe/pocket classification + sovereignty display (one-shot at start)
+            self.loop.create_task(self._display_system_info())
+            # v3.2: adjacent system kill monitor
+            if self._adjacent_enabled:
+                system_name = self.main.menu.setting.system_name.get().strip()
+                if system_name and system_name != "Enter a System Name":
+                    from evealert.tools.neighbor_monitor import (  # pylint: disable=import-outside-toplevel
+                        NeighborMonitor,
+                    )
+
+                    self._neighbor_monitor = NeighborMonitor(
+                        system_name=system_name,
+                        max_jumps=self._adjacent_max_jumps,
+                        min_kills=self._adjacent_min_kills,
+                        poll_interval=self._adjacent_poll_interval,
+                        callback=lambda msg: self._ui(
+                            self.main.write_message, msg, "yellow"
+                        ),
+                    )
+                    self.loop.create_task(self._neighbor_monitor.run())
             # Start web status server if enabled
             if self._web_ui_enabled:
                 from evealert.tools.web_server import (  # pylint: disable=import-outside-toplevel
@@ -348,6 +376,9 @@ class AlertAgent:
         if self._web_server is not None:
             self._web_server.stop()
             self._web_server = None
+        if self._neighbor_monitor is not None:
+            self._neighbor_monitor.stop()
+            self._neighbor_monitor = None
         if self._intel_watcher is not None:
             self._intel_watcher.stop()
             self._intel_watcher = None
@@ -434,6 +465,14 @@ class AlertAgent:
             web = settings.get("web_ui", {})
             self._web_ui_enabled = bool(web.get("enabled", False))
             self._web_ui_port = int(web.get("port", 8765))
+
+            # Adjacent system monitor settings
+            adj = settings.get("adjacent", {})
+            self._adjacent_enabled = bool(adj.get("enabled", False))
+            self._adjacent_max_jumps = int(adj.get("max_jumps", 3))
+            self._adjacent_poll_interval = int(adj.get("poll_interval", 120))
+            self._adjacent_min_kills = int(adj.get("min_kills", 1))
+            self._adjacent_destination = str(adj.get("destination_system", ""))
 
             # Per-type cooldowns
             self._cooldown_enemy = int(
@@ -764,6 +803,146 @@ class AlertAgent:
 
         except Exception as exc:
             logger.debug("ESI augmentation error: %s", exc)
+
+    async def _display_system_info(self) -> None:
+        """One-shot task: show pipe/pocket classification and sovereignty on start."""
+        try:
+            from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
+                get_universe_cache,
+            )
+
+            system_name = self.main.menu.setting.system_name.get().strip()
+            if not system_name or system_name == "Enter a System Name":
+                return
+
+            cache = get_universe_cache()
+            system_id = await cache.get_system_id(system_name)
+            if system_id is None:
+                return
+
+            # Pipe/pocket classification (#75)
+            classification = await cache.classify_system(system_id)
+            gate_count = await cache.get_gate_count(system_id)
+            self._ui(
+                self.main.write_message,
+                f"System: {system_name} | Type: {classification} ({gate_count} gate(s))",
+                "cyan",
+            )
+
+            # Sovereignty display (#76)
+            sov = await cache.get_sovereignty(system_id)
+            if sov and sov.alliance_name:
+                ihub_str = "IHub: active" if sov.has_ihub else "IHub: none"
+                tcu_str = "TCU: active" if sov.has_tcu else "TCU: none"
+                self._ui(
+                    self.main.write_message,
+                    f"Sov: {sov.alliance_name} — {ihub_str} | {tcu_str}",
+                    "cyan",
+                )
+            elif sov:
+                self._ui(
+                    self.main.write_message,
+                    "Sov: NPC / high-sec — no player sovereignty",
+                    "cyan",
+                )
+
+            # Start the sov change monitor in background
+            self.loop.create_task(
+                self._sov_monitor(system_id, sov.alliance_id if sov else None)
+            )
+
+        except Exception as exc:
+            logger.debug("System info display error: %s", exc)
+
+    async def _sov_monitor(
+        self, system_id: int, initial_alliance_id: int | None
+    ) -> None:
+        """Poll sovereignty every 5 minutes and alert on change."""
+        try:
+            from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
+                get_universe_cache,
+            )
+
+            cache = get_universe_cache()
+            current_holder = initial_alliance_id
+
+            while self.running:
+                await asyncio.sleep(300)  # 5-minute refresh
+                if not self.running:
+                    break
+                try:
+                    sov = await cache.get_sovereignty(system_id)
+                    new_holder = sov.alliance_id if sov else None
+                    if new_holder != current_holder:
+                        new_name = (
+                            sov.alliance_name
+                            if sov and sov.alliance_name
+                            else "NPC/unclaimed"
+                        )
+                        self._ui(
+                            self.main.write_message,
+                            f"SOV CHANGE: {new_name} now controls this system",
+                            "yellow",
+                        )
+                        current_holder = new_holder
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.debug("Sov monitor error: %s", exc)
+
+    async def _run_route_check(self, origin: str, destination: str) -> None:
+        """Compute route threat and post results to the log pane."""
+        try:
+            from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
+                get_universe_cache,
+            )
+
+            cache = get_universe_cache()
+            self._ui(
+                self.main.write_message,
+                f"Route: checking {origin} → {destination}...",
+                "cyan",
+            )
+            origin_id = await cache.get_system_id(origin)
+            dest_id = await cache.get_system_id(destination)
+            if not origin_id or not dest_id:
+                self._ui(
+                    self.main.write_message,
+                    "Route: could not resolve system name(s).",
+                    "red",
+                )
+                return
+
+            legs = await cache.route_threat(origin_id, dest_id)
+            if legs is None:
+                self._ui(
+                    self.main.write_message,
+                    f"Route: no path found to {destination}.",
+                    "red",
+                )
+                return
+
+            hop_count = len(legs)
+            danger_hops = [l for l in legs if l.threat_level == "danger"]
+            caution_hops = [l for l in legs if l.threat_level == "caution"]
+            self._ui(
+                self.main.write_message,
+                f"Route to {destination}: {hop_count} hop(s) — "
+                f"{len(danger_hops)} danger / {len(caution_hops)} caution",
+                "cyan",
+            )
+            for leg in legs:
+                if leg.threat_level != "safe":
+                    icon = "⚠" if leg.threat_level == "danger" else "!"
+                    self._ui(
+                        self.main.write_message,
+                        f"  {icon} {leg.system_name} ({leg.jumps_from_origin}j) "
+                        f"— {leg.kills_last_hour} kill(s)/hr [{leg.threat_level}]",
+                        "red" if leg.threat_level == "danger" else "yellow",
+                    )
+        except Exception as exc:
+            logger.debug("Route check error: %s", exc)
+            self._ui(self.main.write_message, f"Route check failed: {exc}", "red")
 
     async def _check_for_update(self) -> None:
         """Non-blocking startup version check against GitHub Releases."""

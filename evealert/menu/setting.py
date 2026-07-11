@@ -72,6 +72,14 @@ DEFAULT_SETTINGS = {
         "enabled": False,
         "port": 8765,
     },
+    # v3.2: adjacent system awareness
+    "adjacent": {
+        "enabled": False,
+        "max_jumps": 3,
+        "poll_interval": 120,  # seconds between polls
+        "min_kills": 1,  # minimum kills in 15 min to alert
+        "destination_system": "",  # for route threat assessment
+    },
 }
 
 
@@ -318,6 +326,18 @@ class SettingMenu:
             self.web_ui_port_entry.delete(0, customtkinter.END)
             self.web_ui_port_entry.insert(0, str(web.get("port", 8765)))
 
+            # Adjacent system monitor
+            adj = settings.get("adjacent", {})
+            self.adjacent_enabled_var.set(bool(adj.get("enabled", False)))
+            self.adjacent_max_jumps_entry.delete(0, customtkinter.END)
+            self.adjacent_max_jumps_entry.insert(0, str(adj.get("max_jumps", 3)))
+            self.adjacent_poll_entry.delete(0, customtkinter.END)
+            self.adjacent_poll_entry.insert(0, str(adj.get("poll_interval", 120)))
+            self.adjacent_min_kills_entry.delete(0, customtkinter.END)
+            self.adjacent_min_kills_entry.insert(0, str(adj.get("min_kills", 1)))
+            self.adjacent_dest_entry.delete(0, customtkinter.END)
+            self.adjacent_dest_entry.insert(0, adj.get("destination_system", ""))
+
         except KeyError as e:
             logger.exception(e)
             self.main.write_message(
@@ -436,6 +456,19 @@ class SettingMenu:
                     "web_ui": {
                         "enabled": self.web_ui_var.get(),
                         "port": int(self.web_ui_port_entry.get().strip() or 8765),
+                    },
+                    "adjacent": {
+                        "enabled": self.adjacent_enabled_var.get(),
+                        "max_jumps": int(
+                            self.adjacent_max_jumps_entry.get().strip() or 3
+                        ),
+                        "poll_interval": int(
+                            self.adjacent_poll_entry.get().strip() or 120
+                        ),
+                        "min_kills": int(
+                            self.adjacent_min_kills_entry.get().strip() or 1
+                        ),
+                        "destination_system": self.adjacent_dest_entry.get().strip(),
                     },
                 }
             )
@@ -566,6 +599,40 @@ class SettingMenu:
         if key and key in self._threat_tiers_data:
             del self._threat_tiers_data[key]
             self._refresh_threat_tiers_list()
+
+    # ------------------------------------------------------------------
+    # Route check helper (v3.2)
+    # ------------------------------------------------------------------
+
+    def _check_route(self) -> None:
+        """Trigger an async route threat assessment from the current system to the destination."""
+        if not (
+            hasattr(self.main, "alert")
+            and self.main.alert
+            and self.main.alert.is_running
+        ):
+            self.main.write_message("Route check: start detection first.", "yellow")
+            return
+        dest = self.adjacent_dest_entry.get().strip()
+        if not dest:
+            self.main.write_message(
+                "Route check: enter a destination system.", "yellow"
+            )
+            return
+        origin = self.system_name.get().strip()
+        if not origin or origin == "Enter a System Name":
+            self.main.write_message(
+                "Route check: configure your current system in Settings.", "yellow"
+            )
+            return
+        # Schedule the route check on the alert event loop
+        loop = self.main.alert.loop
+        if loop and loop.is_running():
+            import asyncio  # pylint: disable=import-outside-toplevel
+
+            asyncio.run_coroutine_threadsafe(
+                self.main.alert._run_route_check(origin, dest), loop
+            )
 
     # ------------------------------------------------------------------
     # Profile management helpers
@@ -1245,10 +1312,65 @@ class SettingMenu:
         web_port_label.grid(row=39, column=0, padx=(20, 4), sticky="e")
         self.web_ui_port_entry.grid(row=39, column=1, sticky="w", padx=(0, 20))
 
+        # Adjacent System Monitor section
+        adj_section_label = customtkinter.CTkLabel(
+            self.menu_frame,
+            text="Adjacent System Monitor",
+            font=customtkinter.CTkFont(weight="bold"),
+        )
+        adj_section_label.grid(
+            row=40, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
+        )
+
+        self.adjacent_enabled_var = customtkinter.BooleanVar(value=False)
+        self.adjacent_enabled_check = customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Monitor kills in neighboring systems",
+            variable=self.adjacent_enabled_var,
+        )
+        self.adjacent_enabled_check.grid(
+            row=41, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
+        )
+
+        # max jumps + min kills on same row
+        customtkinter.CTkLabel(self.menu_frame, text="Max jumps:", justify="left").grid(
+            row=42, column=0, padx=(20, 4), sticky="e"
+        )
+        self.adjacent_max_jumps_entry = customtkinter.CTkEntry(
+            self.menu_frame, width=50
+        )
+        self.adjacent_max_jumps_entry.grid(row=42, column=1, sticky="w")
+
+        customtkinter.CTkLabel(self.menu_frame, text="Min kills:", justify="left").grid(
+            row=42, column=2, padx=(10, 4), sticky="e"
+        )
+        self.adjacent_min_kills_entry = customtkinter.CTkEntry(
+            self.menu_frame, width=50
+        )
+        self.adjacent_min_kills_entry.grid(row=42, column=3, sticky="w")
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Poll interval (s):", justify="left"
+        ).grid(row=43, column=0, padx=(20, 4), sticky="e")
+        self.adjacent_poll_entry = customtkinter.CTkEntry(self.menu_frame, width=70)
+        self.adjacent_poll_entry.grid(row=43, column=1, sticky="w")
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Destination:", justify="left"
+        ).grid(row=44, column=0, padx=(20, 4), sticky="e")
+        self.adjacent_dest_entry = customtkinter.CTkEntry(
+            self.menu_frame, width=180, placeholder_text="e.g. Jita"
+        )
+        self.adjacent_dest_entry.grid(row=44, column=1, columnspan=2, sticky="w")
+        self.adjacent_check_route_btn = customtkinter.CTkButton(
+            self.menu_frame, text="Check Route", width=110, command=self._check_route
+        )
+        self.adjacent_check_route_btn.grid(row=44, column=3, padx=(4, 20))
+
         # Save / Apply / Close
-        self.save_button.grid(row=40, column=0, pady=10)
-        self.apply_button.grid(row=40, column=1, pady=10)
-        self.close_button.grid(row=40, column=2, pady=10)
+        self.save_button.grid(row=45, column=0, pady=10)
+        self.apply_button.grid(row=45, column=1, pady=10)
+        self.close_button.grid(row=45, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 
@@ -1267,7 +1389,7 @@ class SettingMenu:
             config_menu_height = self.main.winfo_height()
 
             config_window_width = 650
-            config_window_height = 1050
+            config_window_height = 1200
 
             raw_x = config_menu_x + config_menu_width + 10
             raw_y = config_menu_y + config_menu_height + 40
