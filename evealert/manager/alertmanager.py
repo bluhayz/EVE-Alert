@@ -228,6 +228,12 @@ class AlertAgent:
         self._fleet_tracked_ids: list = []
         self._killmail_monitor = None
 
+        # v4.0: ESI OAuth deep integration
+        self._esi_standings_classify = False
+        self._esi_fleet_monitor = False
+        self._esi_structure_alerts = False
+        self._esi_standings_cache: dict = {}  # character_id → standing float
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -410,6 +416,13 @@ class AlertAgent:
                     callback=lambda msg: self._ui(self.main.write_message, msg, "cyan"),
                 )
                 self.loop.create_task(self._killmail_monitor.run())
+            # v4.0: ESI standings + fleet monitor
+            if (
+                self._esi_standings_classify
+                or self._esi_fleet_monitor
+                or self._esi_structure_alerts
+            ):
+                self.loop.create_task(self._esi_deep_integration_start())
             # Notify plugins that detection has started
             try:
                 from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
@@ -576,6 +589,14 @@ class AlertAgent:
             )
             self._fleet_killmail_enabled = bool(fleet.get("killmail_enabled", False))
             self._fleet_tracked_ids = list(fleet.get("tracked_character_ids", []))
+
+            # ESI OAuth deep integration
+            esi = settings.get("esi_oauth", {})
+            self._esi_standings_classify = bool(
+                esi.get("standings_auto_classify", False)
+            )
+            self._esi_fleet_monitor = bool(esi.get("fleet_monitor", False))
+            self._esi_structure_alerts = bool(esi.get("structure_alerts", False))
 
             # Per-type cooldowns
             self._cooldown_enemy = int(
@@ -992,6 +1013,28 @@ class AlertAgent:
                 except Exception:
                     pass
 
+                # ── ESI standings auto-classify (v4.0) ───────────────────────
+                if self._esi_standings_classify and self._esi_standings_cache:
+                    standing = self._esi_standings_cache.get(info.character_id)
+                    if standing is not None:
+                        if standing <= -5.0:
+                            tier_color = "red"
+                            tier_label = "terrible standing"
+                        elif standing < 0:
+                            tier_color = "yellow"
+                            tier_label = f"bad standing ({standing:+.1f})"
+                        elif standing >= 5.0:
+                            tier_color = "green"
+                            tier_label = f"excellent standing ({standing:+.1f})"
+                        else:
+                            tier_color = "cyan"
+                            tier_label = f"standing {standing:+.1f}"
+                        self._ui(
+                            self.main.write_message,
+                            f"    Standing: {info.name} — {tier_label}",
+                            tier_color,
+                        )
+
         except Exception as exc:
             logger.debug("ESI augmentation error: %s", exc)
 
@@ -1130,6 +1173,82 @@ class AlertAgent:
                     pass
         except Exception as exc:
             logger.debug("Sov monitor error: %s", exc)
+
+    async def _esi_deep_integration_start(self) -> None:
+        """On-start ESI tasks: fleet membership, structure fuel, standings monitor."""
+        try:
+            from evealert.tools.esi_auth import (  # pylint: disable=import-outside-toplevel
+                get_esi_auth,
+                get_fleet_membership,
+                get_structure_fuel_warnings,
+            )
+
+            auth = get_esi_auth()
+            if not auth.is_authenticated:
+                return
+
+            # Fleet membership display (#96)
+            if self._esi_fleet_monitor:
+                fleet = await get_fleet_membership(auth)
+                if fleet:
+                    fleet_id = fleet.get("fleet_id", "?")
+                    role = fleet.get("role", "fleet member")
+                    self._ui(
+                        self.main.write_message,
+                        f"Fleet: in fleet #{fleet_id} as {role}",
+                        "cyan",
+                    )
+                else:
+                    self._ui(self.main.write_message, "Fleet: not in fleet.", "gray")
+
+            # Structure fuel warnings (#97)
+            if self._esi_structure_alerts:
+                warnings = await get_structure_fuel_warnings(auth)
+                for warn in warnings:
+                    self._ui(
+                        self.main.write_message,
+                        f"STRUCTURE FUEL: {warn['name']} — {warn['days_left']} days remaining",
+                        "red",
+                    )
+
+            # Standings auto-classify monitor loop (#95)
+            if self._esi_standings_classify:
+                self.loop.create_task(self._esi_standings_monitor())
+        except Exception as exc:
+            logger.debug("ESI deep integration error: %s", exc)
+
+    async def _esi_standings_monitor(self) -> None:
+        """Periodically fetch standings and auto-classify Local pilots."""
+        try:
+            from evealert.tools.esi_auth import (  # pylint: disable=import-outside-toplevel
+                get_esi_auth,
+                get_personal_standings,
+            )
+
+            auth = get_esi_auth()
+            # Build a contact_id → standing dict
+            standings_by_id: dict[int, float] = {}
+            while self.running:
+                try:
+                    standings = await get_personal_standings(auth)
+                    standings_by_id = {
+                        s["from_id"]: s["standing"]
+                        for s in standings
+                        if "from_id" in s and "standing" in s
+                    }
+                except Exception as exc:
+                    logger.debug("Standings poll error: %s", exc)
+                    await asyncio.sleep(300)
+                    continue
+
+                # Classify any known contacts against current Local names
+                # (The actual Local pilot set is not always directly accessible here;
+                #  this stores standings for use by _augment_with_esi when invoked)
+                self._esi_standings_cache = standings_by_id
+
+                await asyncio.sleep(300)  # 5-minute refresh
+        except Exception as exc:
+            logger.debug("ESI standings monitor error: %s", exc)
 
     async def _thera_monitor(self) -> None:
         """Poll Eve-Scout every 15 min for Thera connections near the configured system."""

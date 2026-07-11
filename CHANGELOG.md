@@ -1,6 +1,16 @@
 # Changelog
 
-## [3.2.0] 2026-07-11
+## [4.0.0] 2026-07-11
+
+### Added
+- **v3.3**: D-scan log watcher — tails EVE D-scan files, classifies ships into RED/ORANGE/YELLOW/GREEN threat tiers, fires probe detection alarm, maintains session timeline
+- **v3.4**: KOS checker — auto-queries CVA KOS API and any configured custom KOS endpoints per pilot; local hostile list matching
+- **v3.5**: Push notifications — Telegram Bot, Pushover, and ntfy.sh channels; auto-screenshot on alarm; alarm escalation counter
+- **v3.6**: Wormhole awareness — Thera connection monitor (Eve-Scout API), WH static type inference, WH fleet drop heuristic
+- **v3.7**: Fleet context — hostile fleet composition analysis, timezone activity profiling, killmail notifications for tracked characters
+- **v4.0**: EVE SSO OAuth2 login — full authorization code flow via local callback server; access/refresh token lifecycle with auto-refresh; personal standings auto-classify in Local; fleet membership display on start; structure fuel-expiry warnings; standings-based color coding in pilot intel display
+
+
 
 ### Added
 - **Neighboring system kill monitor** (#73) — Optional async background task polls Zkillboard every 2 minutes for kills in systems within a configurable jump radius (1–5). Per-system 10-minute cooldown prevents alert spam. Posts: `"Adjacent: N kill(s) in [System] (X jumps away)"`.

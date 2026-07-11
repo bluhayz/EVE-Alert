@@ -121,6 +121,13 @@ DEFAULT_SETTINGS = {
         "killmail_enabled": False,  # monitor tracked characters for kills
         "tracked_character_ids": [],  # list of ESI character IDs to track
     },
+    # v4.0: ESI OAuth
+    "esi_oauth": {
+        "client_id": "",  # leave blank for built-in public client
+        "standings_auto_classify": False,  # auto-tier standing contacts in Local
+        "fleet_monitor": False,  # display fleet membership on start
+        "structure_alerts": False,  # warn on low-fuel structures
+    },
 }
 
 
@@ -432,6 +439,14 @@ class SettingMenu:
             char_ids = fleet.get("tracked_character_ids", [])
             self.fleet_char_ids_entry.insert(0, ", ".join(str(c) for c in char_ids))
 
+            # ESI OAuth settings
+            esi = settings.get("esi_oauth", {})
+            self.esi_client_id_entry.delete(0, customtkinter.END)
+            self.esi_client_id_entry.insert(0, esi.get("client_id", ""))
+            self.esi_standings_var.set(bool(esi.get("standings_auto_classify", False)))
+            self.esi_fleet_var.set(bool(esi.get("fleet_monitor", False)))
+            self.esi_structure_var.set(bool(esi.get("structure_alerts", False)))
+
         except KeyError as e:
             logger.exception(e)
             self.main.write_message(
@@ -609,6 +624,12 @@ class SettingMenu:
                             for c in self.fleet_char_ids_entry.get().split(",")
                             if c.strip().isdigit()
                         ],
+                    },
+                    "esi_oauth": {
+                        "client_id": self.esi_client_id_entry.get().strip(),
+                        "standings_auto_classify": self.esi_standings_var.get(),
+                        "fleet_monitor": self.esi_fleet_var.get(),
+                        "structure_alerts": self.esi_structure_var.get(),
                     },
                 }
             )
@@ -924,6 +945,73 @@ class SettingMenu:
     def _clear_faction_sound(self) -> None:
         self._faction_sound_path = ""
         self._update_sound_labels()
+
+    # ------------------------------------------------------------------
+    # ESI OAuth helpers (v4.0)
+    # ------------------------------------------------------------------
+
+    def _esi_refresh_status(self) -> None:
+        """Update the login status label from the EsiAuth singleton."""
+        try:
+            from evealert.tools.esi_auth import (  # pylint: disable=import-outside-toplevel
+                get_esi_auth,
+            )
+
+            auth = get_esi_auth()
+            if auth.is_authenticated:
+                self._esi_status_label.configure(
+                    text=f"Logged in as: {auth.character_name}", text_color="green"
+                )
+            else:
+                self._esi_status_label.configure(
+                    text="Not logged in", text_color="gray"
+                )
+        except Exception:
+            pass
+
+    def _esi_login(self) -> None:
+        """Start the EVE SSO login flow in the background."""
+        try:
+            import threading  # pylint: disable=import-outside-toplevel
+
+            from evealert.tools.esi_auth import (  # pylint: disable=import-outside-toplevel
+                get_esi_auth,
+            )
+
+            auth = get_esi_auth(
+                client_id=self.esi_client_id_entry.get().strip() or None
+            )
+
+            def _run_login():
+                import asyncio  # pylint: disable=import-outside-toplevel
+
+                try:
+                    loop = asyncio.new_event_loop()
+                    result = loop.run_until_complete(auth.login())
+                    loop.close()
+                    if result:
+                        self._esi_refresh_status()
+                except Exception as exc:
+                    logger.debug("ESI login error: %s", exc)
+
+            threading.Thread(target=_run_login, daemon=True).start()
+            self._esi_status_label.configure(
+                text="Browser opened — authorise in EVE Online...", text_color="yellow"
+            )
+        except Exception as exc:
+            logger.debug("ESI login start error: %s", exc)
+
+    def _esi_logout(self) -> None:
+        """Log out and clear the stored ESI token."""
+        try:
+            from evealert.tools.esi_auth import (  # pylint: disable=import-outside-toplevel
+                get_esi_auth,
+            )
+
+            get_esi_auth().logout()
+            self._esi_refresh_status()
+        except Exception as exc:
+            logger.debug("ESI logout error: %s", exc)
 
     def clean_up(self):
         """Cleans up the settings window."""
@@ -1673,10 +1761,65 @@ class SettingMenu:
         )
         self.fleet_char_ids_entry.grid(row=69, column=1, columnspan=2, sticky="w")
 
+        # ESI OAuth section
+        customtkinter.CTkLabel(
+            self.menu_frame,
+            text="EVE SSO / ESI OAuth",
+            font=customtkinter.CTkFont(weight="bold"),
+        ).grid(row=70, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
+
+        customtkinter.CTkLabel(self.menu_frame, text="Client ID:", justify="left").grid(
+            row=71, column=0, padx=(20, 4), sticky="e"
+        )
+        self.esi_client_id_entry = customtkinter.CTkEntry(
+            self.menu_frame,
+            width=280,
+            placeholder_text="Leave blank for built-in public client",
+        )
+        self.esi_client_id_entry.grid(row=71, column=1, columnspan=2, sticky="w")
+
+        # ESI login / logout buttons with status label
+        self._esi_status_label = customtkinter.CTkLabel(
+            self.menu_frame, text="Not logged in", text_color="gray"
+        )
+        self._esi_status_label.grid(
+            row=72, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2
+        )
+        customtkinter.CTkButton(
+            self.menu_frame, text="Login with EVE", command=self._esi_login
+        ).grid(row=72, column=2, padx=(4, 20), pady=2)
+        customtkinter.CTkButton(
+            self.menu_frame, text="Logout", command=self._esi_logout, fg_color="gray"
+        ).grid(row=72, column=3, padx=(0, 20), pady=2)
+
+        self.esi_standings_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Auto-classify standing contacts in Local",
+            variable=self.esi_standings_var,
+        ).grid(row=73, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+
+        self.esi_fleet_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Display fleet membership on start",
+            variable=self.esi_fleet_var,
+        ).grid(row=74, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+
+        self.esi_structure_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Warn on structure fuel < 7 days",
+            variable=self.esi_structure_var,
+        ).grid(row=75, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+
+        # Refresh login status if already authenticated
+        self._esi_refresh_status()
+
         # Save / Apply / Close
-        self.save_button.grid(row=70, column=0, pady=10)
-        self.apply_button.grid(row=70, column=1, pady=10)
-        self.close_button.grid(row=70, column=2, pady=10)
+        self.save_button.grid(row=76, column=0, pady=10)
+        self.apply_button.grid(row=76, column=1, pady=10)
+        self.close_button.grid(row=76, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 
