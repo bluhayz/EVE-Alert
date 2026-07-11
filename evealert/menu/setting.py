@@ -87,6 +87,14 @@ DEFAULT_SETTINGS = {
         "alert_orange": False,  # fire alarm on ORANGE ships
         "alert_probes": True,  # fire alarm on probe detection
     },
+    # v3.4: KOS checker
+    "kos": {
+        "cva_enabled": True,  # query CVA KOS API
+        "custom_urls": [],  # list of additional KOS API URLs
+    },
+    # v3.4: local hostile list {name_or_corp_substring: "red"|"orange"|"yellow"}
+    # (already in threat_tiers — kos.local_list is a flat list of always-KOS names)
+    "kos_list": [],  # list of exact pilot/corp/alliance names that are KOS
 }
 
 
@@ -352,6 +360,12 @@ class SettingMenu:
             self.dscan_orange_var.set(bool(ds.get("alert_orange", False)))
             self.dscan_probes_var.set(bool(ds.get("alert_probes", True)))
 
+            # KOS settings
+            kos = settings.get("kos", {})
+            self.kos_cva_var.set(bool(kos.get("cva_enabled", True)))
+            self.kos_custom_entry.delete(0, customtkinter.END)
+            self.kos_custom_entry.insert(0, ", ".join(kos.get("custom_urls", [])))
+
         except KeyError as e:
             logger.exception(e)
             self.main.write_message(
@@ -489,6 +503,14 @@ class SettingMenu:
                         "alert_red": self.dscan_red_var.get(),
                         "alert_orange": self.dscan_orange_var.get(),
                         "alert_probes": self.dscan_probes_var.get(),
+                    },
+                    "kos": {
+                        "cva_enabled": self.kos_cva_var.get(),
+                        "custom_urls": [
+                            u.strip()
+                            for u in self.kos_custom_entry.get().split(",")
+                            if u.strip()
+                        ],
                     },
                 }
             )
@@ -1423,10 +1445,30 @@ class SettingMenu:
             variable=self.dscan_probes_var,
         ).grid(row=48, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
 
+        # KOS Checker section
+        customtkinter.CTkLabel(
+            self.menu_frame,
+            text="KOS Checker",
+            font=customtkinter.CTkFont(weight="bold"),
+        ).grid(row=49, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
+
+        self.kos_cva_var = customtkinter.BooleanVar(value=True)
+        customtkinter.CTkCheckBox(
+            self.menu_frame, text="Enable CVA KOS API", variable=self.kos_cva_var
+        ).grid(row=50, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Custom KOS URLs:", justify="left"
+        ).grid(row=51, column=0, padx=(20, 4), sticky="e")
+        self.kos_custom_entry = customtkinter.CTkEntry(
+            self.menu_frame, width=340, placeholder_text="comma-separated URLs"
+        )
+        self.kos_custom_entry.grid(row=51, column=1, columnspan=2, sticky="w")
+
         # Save / Apply / Close
-        self.save_button.grid(row=49, column=0, pady=10)
-        self.apply_button.grid(row=49, column=1, pady=10)
-        self.close_button.grid(row=49, column=2, pady=10)
+        self.save_button.grid(row=52, column=0, pady=10)
+        self.apply_button.grid(row=52, column=1, pady=10)
+        self.close_button.grid(row=52, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 

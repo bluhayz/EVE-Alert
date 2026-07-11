@@ -205,6 +205,10 @@ class AlertAgent:
         self._dscan_alert_probes = True
         self._dscan_watcher = None
 
+        # v3.4: KOS checker
+        self._kos_cva_enabled = True
+        self._kos_custom_urls: list = []
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -502,6 +506,11 @@ class AlertAgent:
             self._dscan_alert_red = bool(ds.get("alert_red", True))
             self._dscan_alert_orange = bool(ds.get("alert_orange", False))
             self._dscan_alert_probes = bool(ds.get("alert_probes", True))
+
+            # KOS settings
+            kos = settings.get("kos", {})
+            self._kos_cva_enabled = bool(kos.get("cva_enabled", True))
+            self._kos_custom_urls = list(kos.get("custom_urls", []))
 
             # Per-type cooldowns
             self._cooldown_enemy = int(
@@ -826,6 +835,30 @@ class AlertAgent:
                             f"    ZKB: {zkb.kills_30d}K/{zkb.losses_30d}L "
                             f"[{danger_pct}% danger]{ship_str}",
                             "cyan",
+                        )
+                except Exception:
+                    pass
+
+                # ── KOS check (v3.4) ──────────────────────────────────────────
+                try:
+                    from evealert.tools.kos_checker import (  # pylint: disable=import-outside-toplevel
+                        get_kos_checker,
+                    )
+
+                    kos_checker = get_kos_checker(
+                        cva_enabled=self._kos_cva_enabled,
+                        api_urls=self._kos_custom_urls,
+                    )
+                    kos_result = await kos_checker.check(
+                        info.name,
+                        info.corporation_name or "",
+                        info.alliance_name or "",
+                    )
+                    if kos_result:
+                        self._ui(
+                            self.main.write_message,
+                            f"    ⚠ KOS ({kos_result.source}): {info.name} — {kos_result.label}",
+                            "red",
                         )
                 except Exception:
                     pass
