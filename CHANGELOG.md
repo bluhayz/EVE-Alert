@@ -1,5 +1,26 @@
 # Changelog
 
+## [3.1.0] 2026-07-11
+
+### Added
+- **Pilot background check** (#69) — ESI lookups now include character age (days since creation), total corps held (from corp history), and a cyno-alt heuristic: pilots < 30 days old trigger a "YOUNG PILOT — possible cyno/scout alt" warning.
+- **Kill/death profile** (#70) — Zkillboard stats endpoint queried per pilot: 30-day kills, losses, danger ratio %, and top ship type posted below each pilot's corp/alliance line.
+- **Alliance threat tier** (#71) — New "Threat Tiers" section in Settings. Add name/corp/alliance substrings mapped to red / orange / yellow tiers. Matched pilots are prefixed `⚠ [KOS-RED]`, `⚠ [HOSTILE]`, or `[CAUTION]`, and their log line is coloured accordingly.
+- **Flashy security status alert** (#72) — New "Alert on flashy pilots (sec ≤ -5)" checkbox in Settings > ESI Augmentation. When enabled, pilots with security status ≤ -5.0 trigger a distinct red log line: "FLASHY: Name (sec: -7.2) — attackable in low-sec".
+
+### Changed
+- `CharacterInfo` NamedTuple extended with `age_days`, `security_status`, `corp_history_count`.
+- `EsiLookup._fetch_character()` now makes an additional ESI call to `/v2/characters/{id}/corporationhistory/` to populate `corp_history_count`.
+- `_augment_with_esi()` in `AlertAgent` fully rewritten to format all pilot intelligence into structured per-pilot log output.
+- `DEFAULT_SETTINGS["esi"]` gains `alert_flashy: false`.
+- `DEFAULT_SETTINGS` gains `threat_tiers: {}`.
+- Settings window height 900 → 1050.
+
+### New types/methods
+- `KillProfile` NamedTuple: `kills_30d`, `losses_30d`, `top_ship`, `danger_ratio`
+- `EsiLookup.get_zkillboard_profile(character_id)` — cached Zkillboard stats fetch
+- `_compute_age_days(birthday_str)` — ISO-8601 → age in days helper
+
 ## [3.0.0] 2026-07-11
 
 ### Added

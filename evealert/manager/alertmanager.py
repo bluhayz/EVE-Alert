@@ -166,6 +166,8 @@ class AlertAgent:
         self._esi_enabled = False
         self._esi_show_corp = True
         self._esi_show_alliance = True
+        self._esi_alert_flashy = False
+        self._threat_tiers: dict = {}
 
         # Per-type sound cooldown (seconds)
         self._cooldown_enemy = DEFAULT_COOLDOWN_TIMER
@@ -423,6 +425,10 @@ class AlertAgent:
             self._esi_enabled = bool(esi.get("enabled", False))
             self._esi_show_corp = bool(esi.get("show_corp", True))
             self._esi_show_alliance = bool(esi.get("show_alliance", True))
+            self._esi_alert_flashy = bool(esi.get("alert_flashy", False))
+
+            # Threat tiers {name_substring: tier}
+            self._threat_tiers: dict = dict(settings.get("threat_tiers", {}))
 
             # Web status UI settings
             web = settings.get("web_ui", {})
@@ -643,7 +649,15 @@ class AlertAgent:
             pass
 
     async def _augment_with_esi(self) -> None:
-        """Background task: look up joining characters via ESI and post corp/alliance to log."""
+        """Background task: enriched ESI + Zkillboard pilot intel on Enemy alarm.
+
+        Posts per-pilot lines to the log pane covering:
+          - Corp/alliance (v3.0)
+          - Character age, corp history count (v3.1 #69)
+          - Zkillboard kill profile (v3.1 #70)
+          - Threat tier match (v3.1 #71)
+          - Flashy security status alert (v3.1 #72)
+        """
         try:
             from evealert.tools.esi_standings import (  # pylint: disable=import-outside-toplevel
                 extract_joining_characters,
@@ -658,7 +672,6 @@ class AlertAgent:
             if chatlog_dir is None:
                 return
 
-            # Read the last 50 lines of the Local chat log for recent joins
             local_log = find_intel_log(chatlog_dir, "Local")
             if local_log is None:
                 return
@@ -673,20 +686,81 @@ class AlertAgent:
             if not names:
                 return
 
-            results = await get_esi_client().lookup_many(
-                names[:5]
-            )  # cap at 5 per alarm
+            client = get_esi_client()
+            results = await client.lookup_many(names[:5])
             if not results:
                 return
 
-            self._ui(self.main.write_message, "ESI — Recent Local joiners:", "cyan")
+            self._ui(self.main.write_message, "ESI — Local pilot intel:", "cyan")
+
             for info in results:
-                parts = [f"  {info.name}"]
+                # ── Threat tier check ────────────────────────────────────────
+                tier = None
+                for substr, t in self._threat_tiers.items():
+                    if (
+                        substr.lower() in info.name.lower()
+                        or substr.lower() in (info.corporation_name or "").lower()
+                        or substr.lower() in (info.alliance_name or "").lower()
+                    ):
+                        tier = t
+                        break
+
+                # ── Build header line ─────────────────────────────────────────
+                tier_prefix = {
+                    "red": "⚠ [KOS-RED]",
+                    "orange": "⚠ [HOSTILE]",
+                    "yellow": "[CAUTION]",
+                }.get(tier or "", "")
+
+                parts = [f"  {tier_prefix} {info.name}".strip()]
                 if self._esi_show_corp and info.corporation_name:
                     parts.append(f"[{info.corporation_name}]")
                 if self._esi_show_alliance and info.alliance_name:
                     parts.append(f"<{info.alliance_name}>")
-                self._ui(self.main.write_message, " ".join(parts), "cyan")
+
+                # age and corp history
+                if info.age_days >= 0:
+                    age_str = f"{info.age_days}d old"
+                    corps_str = f"{info.corp_history_count} corp(s)"
+                    parts.append(f"— {age_str}, {corps_str}")
+
+                line_colour = (
+                    "red"
+                    if tier == "red"
+                    else "yellow" if tier in ("orange", "yellow") else "cyan"
+                )
+                self._ui(self.main.write_message, " ".join(parts), line_colour)
+
+                # ── Flashy security status ────────────────────────────────────
+                if self._esi_alert_flashy and info.security_status <= -5.0:
+                    self._ui(
+                        self.main.write_message,
+                        f"    ⚠ FLASHY: {info.name} (sec: {info.security_status:.1f}) — attackable in low-sec",
+                        "red",
+                    )
+
+                # ── Cyno-alt heuristic ────────────────────────────────────────
+                if info.age_days < 30:
+                    self._ui(
+                        self.main.write_message,
+                        f"    ⚠ YOUNG PILOT: {info.name} ({info.age_days}d old) — possible cyno/scout alt",
+                        "yellow",
+                    )
+
+                # ── Zkillboard kill profile ───────────────────────────────────
+                try:
+                    zkb = await client.get_zkillboard_profile(info.character_id)
+                    if zkb and (zkb.kills_30d > 0 or zkb.losses_30d > 0):
+                        danger_pct = int(zkb.danger_ratio * 100)
+                        ship_str = f" | flies {zkb.top_ship}" if zkb.top_ship else ""
+                        self._ui(
+                            self.main.write_message,
+                            f"    ZKB: {zkb.kills_30d}K/{zkb.losses_30d}L "
+                            f"[{danger_pct}% danger]{ship_str}",
+                            "cyan",
+                        )
+                except Exception:
+                    pass
 
         except Exception as exc:
             logger.debug("ESI augmentation error: %s", exc)

@@ -59,7 +59,10 @@ DEFAULT_SETTINGS = {
         "enabled": False,
         "show_corp": True,
         "show_alliance": True,
+        "alert_flashy": False,  # v3.1: flag pilots with sec status ≤ -5
     },
+    # v3.1: user-configurable threat tier list {name_substring: "red"|"orange"|"yellow"}
+    "threat_tiers": {},
     # Plugin system
     "plugins": {
         "enabled": True,  # scan user plugins dir on start
@@ -302,6 +305,12 @@ class SettingMenu:
             self.esi_enabled_var.set(bool(esi.get("enabled", False)))
             self.esi_corp_var.set(bool(esi.get("show_corp", True)))
             self.esi_alliance_var.set(bool(esi.get("show_alliance", True)))
+            self.esi_flashy_var.set(bool(esi.get("alert_flashy", False)))
+
+            # Threat tiers
+            tiers = settings.get("threat_tiers", {})
+            self._threat_tiers_data = dict(tiers)
+            self._refresh_threat_tiers_list()
 
             # Web UI
             web = settings.get("web_ui", {})
@@ -418,7 +427,9 @@ class SettingMenu:
                         "enabled": self.esi_enabled_var.get(),
                         "show_corp": self.esi_corp_var.get(),
                         "show_alliance": self.esi_alliance_var.get(),
+                        "alert_flashy": self.esi_flashy_var.get(),
                     },
+                    "threat_tiers": dict(getattr(self, "_threat_tiers_data", {})),
                     "plugins": {
                         "enabled": True,  # always on; no UI toggle needed
                     },
@@ -507,6 +518,54 @@ class SettingMenu:
         )
 
         ThresholdEditorWindow(self.main)
+
+    # ------------------------------------------------------------------
+    # Threat tier list helpers
+    # ------------------------------------------------------------------
+
+    def _refresh_threat_tiers_list(self) -> None:
+        """Rebuild the scrollable threat tiers list from self._threat_tiers_data."""
+        for widget in self.threat_tiers_list.winfo_children():
+            widget.destroy()
+        self._threat_tier_rows = []
+        self._selected_tier_key = None
+
+        for name, tier in sorted(self._threat_tiers_data.items()):
+            row = customtkinter.CTkFrame(self.threat_tiers_list)
+            row.pack(fill="x", pady=1)
+            colour = {"red": "#8B0000", "orange": "#804000", "yellow": "#806000"}.get(
+                tier, "#333"
+            )
+            customtkinter.CTkLabel(
+                row,
+                text=f"[{tier.upper()}]",
+                width=65,
+                fg_color=colour,
+                corner_radius=4,
+            ).pack(side="left", padx=(4, 6))
+            lbl = customtkinter.CTkLabel(row, text=name, anchor="w")
+            lbl.pack(side="left", fill="x", expand=True)
+            lbl.bind("<Button-1>", lambda e, k=name: self._select_tier_row(k))
+            row.bind("<Button-1>", lambda e, k=name: self._select_tier_row(k))
+            self._threat_tier_rows.append((name, row))
+
+    def _select_tier_row(self, key: str) -> None:
+        self._selected_tier_key = key
+
+    def _add_threat_tier(self) -> None:
+        name = self.threat_tier_name_entry.get().strip()
+        tier = self.threat_tier_level_var.get()
+        if not name:
+            return
+        self._threat_tiers_data[name] = tier
+        self.threat_tier_name_entry.delete(0, customtkinter.END)
+        self._refresh_threat_tiers_list()
+
+    def _remove_threat_tier(self) -> None:
+        key = self._selected_tier_key
+        if key and key in self._threat_tiers_data:
+            del self._threat_tiers_data[key]
+            self._refresh_threat_tiers_list()
 
     # ------------------------------------------------------------------
     # Profile management helpers
@@ -1098,6 +1157,67 @@ class SettingMenu:
         )
         self.esi_alliance_check.grid(row=31, column=1, padx=(4, 20), sticky="w", pady=2)
 
+        self.esi_flashy_var = customtkinter.BooleanVar(value=False)
+        self.esi_flashy_check = customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Alert on flashy pilots (sec status \u2264 -5)",
+            variable=self.esi_flashy_var,
+        )
+        self.esi_flashy_check.grid(
+            row=32, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2
+        )
+
+        # Threat Tiers section
+        threat_section_label = customtkinter.CTkLabel(
+            self.menu_frame,
+            text="Threat Tiers",
+            font=customtkinter.CTkFont(weight="bold"),
+        )
+        threat_section_label.grid(
+            row=33, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
+        )
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Name/Corp/Alliance:", justify="left"
+        ).grid(row=34, column=0, padx=(20, 4), sticky="e")
+        self.threat_tier_name_entry = customtkinter.CTkEntry(self.menu_frame, width=180)
+        self.threat_tier_name_entry.grid(row=34, column=1, sticky="w")
+
+        self.threat_tier_level_var = customtkinter.StringVar(value="red")
+        self.threat_tier_level_menu = customtkinter.CTkOptionMenu(
+            self.menu_frame,
+            variable=self.threat_tier_level_var,
+            values=["red", "orange", "yellow"],
+            width=90,
+        )
+        self.threat_tier_level_menu.grid(row=34, column=2, padx=(4, 20), sticky="w")
+
+        threat_btn_frame = customtkinter.CTkFrame(self.menu_frame)
+        threat_btn_frame.grid(
+            row=35, column=0, columnspan=3, padx=20, pady=(4, 0), sticky="w"
+        )
+        customtkinter.CTkButton(
+            threat_btn_frame, text="Add", width=70, command=self._add_threat_tier
+        ).pack(side="left", padx=(0, 4))
+        customtkinter.CTkButton(
+            threat_btn_frame,
+            text="Remove Selected",
+            width=130,
+            fg_color="#8B0000",
+            hover_color="#660000",
+            command=self._remove_threat_tier,
+        ).pack(side="left")
+
+        self.threat_tiers_list = customtkinter.CTkScrollableFrame(
+            self.menu_frame, height=80
+        )
+        self.threat_tiers_list.grid(
+            row=36, column=0, columnspan=3, padx=20, pady=(4, 0), sticky="ew"
+        )
+        self._threat_tiers_data: dict = {}
+        self._threat_tier_rows: list = []
+        self._selected_tier_key: str | None = None
+
         # Web Status UI section
         web_section_label = customtkinter.CTkLabel(
             self.menu_frame,
@@ -1105,7 +1225,7 @@ class SettingMenu:
             font=customtkinter.CTkFont(weight="bold"),
         )
         web_section_label.grid(
-            row=32, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
+            row=37, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
         )
 
         self.web_ui_var = customtkinter.BooleanVar(value=False)
@@ -1115,20 +1235,20 @@ class SettingMenu:
             variable=self.web_ui_var,
         )
         self.web_ui_check.grid(
-            row=33, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
+            row=38, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
         )
 
         web_port_label = customtkinter.CTkLabel(
             self.menu_frame, text="Port:", justify="left"
         )
         self.web_ui_port_entry = customtkinter.CTkEntry(self.menu_frame, width=70)
-        web_port_label.grid(row=34, column=0, padx=(20, 4), sticky="e")
-        self.web_ui_port_entry.grid(row=34, column=1, sticky="w", padx=(0, 20))
+        web_port_label.grid(row=39, column=0, padx=(20, 4), sticky="e")
+        self.web_ui_port_entry.grid(row=39, column=1, sticky="w", padx=(0, 20))
 
         # Save / Apply / Close
-        self.save_button.grid(row=35, column=0, pady=10)
-        self.apply_button.grid(row=35, column=1, pady=10)
-        self.close_button.grid(row=35, column=2, pady=10)
+        self.save_button.grid(row=40, column=0, pady=10)
+        self.apply_button.grid(row=40, column=1, pady=10)
+        self.close_button.grid(row=40, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 
@@ -1147,7 +1267,7 @@ class SettingMenu:
             config_menu_height = self.main.winfo_height()
 
             config_window_width = 650
-            config_window_height = 900
+            config_window_height = 1050
 
             raw_x = config_menu_x + config_menu_width + 10
             raw_y = config_menu_y + config_menu_height + 40
