@@ -215,6 +215,13 @@ class AlertAgent:
         self._escalation_threshold = 0
         self._local_hostile_count = 0  # track for escalation
 
+        # v3.6: wormhole awareness
+        self._thera_enabled = False
+        self._thera_max_jumps = 5
+        self._wh_drop_enabled = False
+        self._wh_drop_threshold = 3
+        self._wh_drop_detector = None
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -375,6 +382,17 @@ class AlertAgent:
                     f"Web UI: http://127.0.0.1:{self._web_ui_port}/",
                     "green",
                 )
+            # v3.6: wormhole awareness tasks
+            if self._thera_enabled:
+                self.loop.create_task(self._thera_monitor())
+            if self._wh_drop_enabled:
+                from evealert.tools.wormhole import (  # pylint: disable=import-outside-toplevel
+                    WhDropDetector,
+                )
+
+                self._wh_drop_detector = WhDropDetector(
+                    threshold=self._wh_drop_threshold
+                )
             # Notify plugins that detection has started
             try:
                 from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
@@ -523,6 +541,13 @@ class AlertAgent:
             notif = settings.get("notifications", {})
             self._auto_screenshot = bool(notif.get("auto_screenshot", False))
             self._escalation_threshold = int(notif.get("escalation_threshold", 0))
+
+            # Wormhole settings
+            wh = settings.get("wormhole", {})
+            self._thera_enabled = bool(wh.get("thera_enabled", False))
+            self._thera_max_jumps = int(wh.get("thera_max_jumps", 5))
+            self._wh_drop_enabled = bool(wh.get("wh_drop_enabled", False))
+            self._wh_drop_threshold = int(wh.get("wh_drop_threshold", 3))
 
             # Per-type cooldowns
             self._cooldown_enemy = int(
@@ -809,6 +834,18 @@ class AlertAgent:
             if not names:
                 return
 
+            # v3.6: WH drop heuristic — fire on every batch of new joins
+            if self._wh_drop_detector and self._wh_drop_enabled:
+                for _ in names:
+                    if self._wh_drop_detector.record_join():
+                        self._ui(
+                            self.main.write_message,
+                            f"WH DROP WARNING: {len(names)} pilot(s) joined Local rapidly — possible fleet drop",
+                            "red",
+                        )
+                        self._wh_drop_detector.reset()
+                        break
+
             client = get_esi_client()
             results = await client.lookup_many(names[:5])
             if not results:
@@ -1047,6 +1084,41 @@ class AlertAgent:
                     pass
         except Exception as exc:
             logger.debug("Sov monitor error: %s", exc)
+
+    async def _thera_monitor(self) -> None:
+        """Poll Eve-Scout every 15 min for Thera connections near the configured system."""
+        try:
+            from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
+                get_universe_cache,
+            )
+            from evealert.tools.wormhole import (  # pylint: disable=import-outside-toplevel
+                find_nearby_thera_connections,
+            )
+
+            cache = get_universe_cache()
+            system_name = self.main.menu.setting.system_name.get().strip()
+            system_id = await cache.get_system_id(system_name)
+            if not system_id:
+                return
+
+            while self.running:
+                try:
+                    hits = await find_nearby_thera_connections(
+                        system_id, self._thera_max_jumps
+                    )
+                    for conn, dist in hits:
+                        jump_word = "jump" if dist == 1 else "jumps"
+                        self._ui(
+                            self.main.write_message,
+                            f"Thera: {conn.wh_type} connection via {conn.source_system_name}"
+                            f" ({dist} {jump_word} away) — expires {conn.expires_at[:16]}",
+                            "yellow",
+                        )
+                except Exception as exc:
+                    logger.debug("Thera monitor error: %s", exc)
+                await asyncio.sleep(900)  # 15-minute poll
+        except Exception as exc:
+            logger.debug("Thera monitor init error: %s", exc)
 
     async def _run_route_check(self, origin: str, destination: str) -> None:
         """Compute route threat and post results to the log pane."""

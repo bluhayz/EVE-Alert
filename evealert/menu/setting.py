@@ -108,6 +108,13 @@ DEFAULT_SETTINGS = {
         "auto_screenshot": False,  # capture alert region on alarm
         "escalation_threshold": 0,  # escalate if hostile count >= this (0 = off)
     },
+    # v3.6: wormhole awareness
+    "wormhole": {
+        "thera_enabled": False,
+        "thera_max_jumps": 5,
+        "wh_drop_enabled": False,
+        "wh_drop_threshold": 3,
+    },
 }
 
 
@@ -400,6 +407,15 @@ class SettingMenu:
                 0, str(notif.get("escalation_threshold", 0))
             )
 
+            # Wormhole settings
+            wh = settings.get("wormhole", {})
+            self.thera_enabled_var.set(bool(wh.get("thera_enabled", False)))
+            self.thera_max_jumps_entry.delete(0, customtkinter.END)
+            self.thera_max_jumps_entry.insert(0, str(wh.get("thera_max_jumps", 5)))
+            self.wh_drop_enabled_var.set(bool(wh.get("wh_drop_enabled", False)))
+            self.wh_drop_threshold_entry.delete(0, customtkinter.END)
+            self.wh_drop_threshold_entry.insert(0, str(wh.get("wh_drop_threshold", 3)))
+
         except KeyError as e:
             logger.exception(e)
             self.main.write_message(
@@ -557,6 +573,16 @@ class SettingMenu:
                         "auto_screenshot": self.auto_screenshot_var.get(),
                         "escalation_threshold": int(
                             self.escalation_threshold_entry.get().strip() or 0
+                        ),
+                    },
+                    "wormhole": {
+                        "thera_enabled": self.thera_enabled_var.get(),
+                        "thera_max_jumps": int(
+                            self.thera_max_jumps_entry.get().strip() or 5
+                        ),
+                        "wh_drop_enabled": self.wh_drop_enabled_var.get(),
+                        "wh_drop_threshold": int(
+                            self.wh_drop_threshold_entry.get().strip() or 3
                         ),
                     },
                 }
@@ -1558,10 +1584,43 @@ class SettingMenu:
             row=60, column=2, padx=(4, 20), sticky="w"
         )
 
+        # Wormhole Awareness section
+        customtkinter.CTkLabel(
+            self.menu_frame,
+            text="Wormhole Awareness",
+            font=customtkinter.CTkFont(weight="bold"),
+        ).grid(row=61, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
+
+        self.thera_enabled_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Monitor Thera connections (Eve-Scout)",
+            variable=self.thera_enabled_var,
+        ).grid(row=62, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Thera max jumps:", justify="left"
+        ).grid(row=63, column=0, padx=(20, 4), sticky="e")
+        self.thera_max_jumps_entry = customtkinter.CTkEntry(self.menu_frame, width=60)
+        self.thera_max_jumps_entry.grid(row=63, column=1, sticky="w")
+
+        self.wh_drop_enabled_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Alert on WH drop pattern",
+            variable=self.wh_drop_enabled_var,
+        ).grid(row=64, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Drop threshold (pilots):", justify="left"
+        ).grid(row=65, column=0, padx=(20, 4), sticky="e")
+        self.wh_drop_threshold_entry = customtkinter.CTkEntry(self.menu_frame, width=60)
+        self.wh_drop_threshold_entry.grid(row=65, column=1, sticky="w")
+
         # Save / Apply / Close
-        self.save_button.grid(row=61, column=0, pady=10)
-        self.apply_button.grid(row=61, column=1, pady=10)
-        self.close_button.grid(row=61, column=2, pady=10)
+        self.save_button.grid(row=66, column=0, pady=10)
+        self.apply_button.grid(row=66, column=1, pady=10)
+        self.close_button.grid(row=66, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 
