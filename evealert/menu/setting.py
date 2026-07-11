@@ -95,6 +95,19 @@ DEFAULT_SETTINGS = {
     # v3.4: local hostile list {name_or_corp_substring: "red"|"orange"|"yellow"}
     # (already in threat_tiers — kos.local_list is a flat list of always-KOS names)
     "kos_list": [],  # list of exact pilot/corp/alliance names that are KOS
+    # v3.5: push notifications
+    "push": {
+        "telegram_token": "",
+        "telegram_chat_id": "",
+        "pushover_user": "",
+        "pushover_token": "",
+        "ntfy_url": "",
+    },
+    # v3.5: auto-screenshot + alarm escalation
+    "notifications": {
+        "auto_screenshot": False,  # capture alert region on alarm
+        "escalation_threshold": 0,  # escalate if hostile count >= this (0 = off)
+    },
 }
 
 
@@ -366,6 +379,27 @@ class SettingMenu:
             self.kos_custom_entry.delete(0, customtkinter.END)
             self.kos_custom_entry.insert(0, ", ".join(kos.get("custom_urls", [])))
 
+            # Push notifications
+            push = settings.get("push", {})
+            self.telegram_token_entry.delete(0, customtkinter.END)
+            self.telegram_token_entry.insert(0, push.get("telegram_token", ""))
+            self.telegram_chat_entry.delete(0, customtkinter.END)
+            self.telegram_chat_entry.insert(0, push.get("telegram_chat_id", ""))
+            self.pushover_user_entry.delete(0, customtkinter.END)
+            self.pushover_user_entry.insert(0, push.get("pushover_user", ""))
+            self.pushover_token_entry.delete(0, customtkinter.END)
+            self.pushover_token_entry.insert(0, push.get("pushover_token", ""))
+            self.ntfy_url_entry.delete(0, customtkinter.END)
+            self.ntfy_url_entry.insert(0, push.get("ntfy_url", ""))
+
+            # Notification options
+            notif = settings.get("notifications", {})
+            self.auto_screenshot_var.set(bool(notif.get("auto_screenshot", False)))
+            self.escalation_threshold_entry.delete(0, customtkinter.END)
+            self.escalation_threshold_entry.insert(
+                0, str(notif.get("escalation_threshold", 0))
+            )
+
         except KeyError as e:
             logger.exception(e)
             self.main.write_message(
@@ -511,6 +545,19 @@ class SettingMenu:
                             for u in self.kos_custom_entry.get().split(",")
                             if u.strip()
                         ],
+                    },
+                    "push": {
+                        "telegram_token": self.telegram_token_entry.get().strip(),
+                        "telegram_chat_id": self.telegram_chat_entry.get().strip(),
+                        "pushover_user": self.pushover_user_entry.get().strip(),
+                        "pushover_token": self.pushover_token_entry.get().strip(),
+                        "ntfy_url": self.ntfy_url_entry.get().strip(),
+                    },
+                    "notifications": {
+                        "auto_screenshot": self.auto_screenshot_var.get(),
+                        "escalation_threshold": int(
+                            self.escalation_threshold_entry.get().strip() or 0
+                        ),
                     },
                 }
             )
@@ -1465,10 +1512,56 @@ class SettingMenu:
         )
         self.kos_custom_entry.grid(row=51, column=1, columnspan=2, sticky="w")
 
+        # Push Notifications section
+        customtkinter.CTkLabel(
+            self.menu_frame,
+            text="Push Notifications",
+            font=customtkinter.CTkFont(weight="bold"),
+        ).grid(row=52, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
+
+        push_fields = [
+            ("Telegram Token:", "telegram_token_entry", 53),
+            ("Telegram Chat ID:", "telegram_chat_entry", 54),
+            ("Pushover User:", "pushover_user_entry", 55),
+            ("Pushover Token:", "pushover_token_entry", 56),
+            ("ntfy.sh URL:", "ntfy_url_entry", 57),
+        ]
+        for label_text, attr, row_n in push_fields:
+            customtkinter.CTkLabel(
+                self.menu_frame, text=label_text, justify="left"
+            ).grid(row=row_n, column=0, padx=(20, 4), sticky="e")
+            entry = customtkinter.CTkEntry(self.menu_frame, width=280)
+            entry.grid(row=row_n, column=1, columnspan=2, sticky="w")
+            setattr(self, attr, entry)
+
+        customtkinter.CTkLabel(
+            self.menu_frame,
+            text="Alarm Options",
+            font=customtkinter.CTkFont(weight="bold"),
+        ).grid(row=58, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
+
+        self.auto_screenshot_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Auto-screenshot on alarm",
+            variable=self.auto_screenshot_var,
+        ).grid(row=59, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Escalate at N hostiles:", justify="left"
+        ).grid(row=60, column=0, padx=(20, 4), sticky="e")
+        self.escalation_threshold_entry = customtkinter.CTkEntry(
+            self.menu_frame, width=60
+        )
+        self.escalation_threshold_entry.grid(row=60, column=1, sticky="w")
+        customtkinter.CTkLabel(self.menu_frame, text="(0 = off)", justify="left").grid(
+            row=60, column=2, padx=(4, 20), sticky="w"
+        )
+
         # Save / Apply / Close
-        self.save_button.grid(row=52, column=0, pady=10)
-        self.apply_button.grid(row=52, column=1, pady=10)
-        self.close_button.grid(row=52, column=2, pady=10)
+        self.save_button.grid(row=61, column=0, pady=10)
+        self.apply_button.grid(row=61, column=1, pady=10)
+        self.close_button.grid(row=61, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 

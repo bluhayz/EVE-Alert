@@ -209,6 +209,12 @@ class AlertAgent:
         self._kos_cva_enabled = True
         self._kos_custom_urls: list = []
 
+        # v3.5: push notifications + alarm options
+        self._push_config: dict = {}
+        self._auto_screenshot = False
+        self._escalation_threshold = 0
+        self._local_hostile_count = 0  # track for escalation
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -512,6 +518,12 @@ class AlertAgent:
             self._kos_cva_enabled = bool(kos.get("cva_enabled", True))
             self._kos_custom_urls = list(kos.get("custom_urls", []))
 
+            # Push notifications + alarm options
+            self._push_config = dict(settings.get("push", {}))
+            notif = settings.get("notifications", {})
+            self._auto_screenshot = bool(notif.get("auto_screenshot", False))
+            self._escalation_threshold = int(notif.get("escalation_threshold", 0))
+
             # Per-type cooldowns
             self._cooldown_enemy = int(
                 settings.get("cooldown_timer_enemy", {}).get(
@@ -625,6 +637,8 @@ class AlertAgent:
         if alarm_type in self.alarm_trigger_counts:
             self.alarm_trigger_counts[alarm_type] = 0
             self.cooldown_timers[alarm_type] = 0
+        if alarm_type == "Enemy":
+            self._local_hostile_count = 0  # v3.5: reset escalation counter
 
         if self.main.webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
@@ -645,6 +659,38 @@ class AlertAgent:
         save_lifetime_stats(self.statistics)
         await self.play_sound(sound, alarm_type)
         await self.send_webhook_message(alarm_type)
+
+        # v3.5: push notifications (Telegram / Pushover / ntfy)
+        if self._push_config:
+            try:
+                from evealert.tools.push_notifier import (  # pylint: disable=import-outside-toplevel
+                    get_push_notifier,
+                )
+
+                notifier = get_push_notifier(**self._push_config)
+                if notifier.is_configured():
+                    system = self.main.menu.setting.system_name.get()
+                    msg = f"{alarm_type} alarm in {system}" if system else alarm_type
+                    asyncio.ensure_future(notifier.send(msg))
+            except Exception:
+                pass
+
+        # v3.5: auto-screenshot on alarm
+        if self._auto_screenshot:
+            try:
+                self._capture_alarm_screenshot()
+            except Exception:
+                pass
+
+        # v3.5: escalation check
+        if self._escalation_threshold > 0:
+            self._local_hostile_count += 1
+            if self._local_hostile_count >= self._escalation_threshold:
+                self._ui(
+                    self.main.write_message,
+                    f"ESCALATION: {self._local_hostile_count} hostile(s) detected — elevated threat",
+                    "red",
+                )
 
         # Notify plugins
         try:
@@ -869,6 +915,30 @@ class AlertAgent:
     # ------------------------------------------------------------------
     # D-scan callbacks (v3.3) — called from DscanWatcher on the alert thread
     # ------------------------------------------------------------------
+
+    def _capture_alarm_screenshot(self) -> None:
+        """Save a screenshot of the alert region to the sessions directory."""
+        try:
+            import mss  # pylint: disable=import-outside-toplevel
+
+            from evealert.settings.stats_store import (  # pylint: disable=import-outside-toplevel
+                get_sessions_dir,
+            )
+
+            fname = time.strftime("screenshot_%Y%m%d_%H%M%S.png")
+            dest = get_sessions_dir() / fname
+            region = {
+                "top": self.y1,
+                "left": self.x1,
+                "width": max(1, self.x2 - self.x1),
+                "height": max(1, self.y2 - self.y1),
+            }
+            with mss.mss() as sct:
+                img = sct.grab(region)
+                mss.tools.to_png(img.rgb, img.size, output=str(dest))
+            logger.info("Alarm screenshot saved: %s", dest)
+        except Exception as exc:
+            logger.debug("Screenshot failed: %s", exc)
 
     def _on_dscan_threat(self, tier: str, name: str) -> None:
         """Called when a RED or ORANGE ship appears on D-scan."""
