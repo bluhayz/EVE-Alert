@@ -1,0 +1,24 @@
+name: Suggestion Request
+description: Suggest a new feature or improvement.
+title: "[SUGGESTION]: "
+labels: ["suggestion"]
+assignees:
+  - bluhayz
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to submit a suggestion!
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Describe your suggestion
+      description: What should EVE Alert do, and why would it be useful?
+      placeholder: Describe your idea here.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, mockups, or anything else that helps explain the suggestion.

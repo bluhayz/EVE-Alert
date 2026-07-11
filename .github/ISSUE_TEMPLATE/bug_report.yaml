@@ -1,0 +1,33 @@
+name: Bug Report
+description: File a bug report.
+title: "[BUG]: "
+labels: ["bug"]
+assignees:
+  - bluhayz
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Also tell us what you expected to happen.
+      placeholder: Describe the bug here.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Copy and paste any relevant log output from `~/Library/Application Support/evealert/logs/` (macOS) or `%APPDATA%\evealert\logs\` (Windows).
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version (if running from source), and EVE Alert version.
+      placeholder: "e.g. Windows 11, EVE Alert v2.5.0"
+    validations:
+      required: true

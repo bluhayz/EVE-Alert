@@ -1,0 +1,876 @@
+import asyncio
+import logging
+import os
+import random
+import time
+from typing import TYPE_CHECKING, Callable
+
+import numpy as np
+import soundfile as sf
+
+try:
+    import sounddevice as sd
+
+    _SOUNDDEVICE_AVAILABLE = True
+except OSError:
+    # PortAudio library not found (common on macOS without `brew install portaudio`)
+    sd = None  # type: ignore[assignment]
+    _SOUNDDEVICE_AVAILABLE = False
+
+from evealert.constants import (
+    ALARM_SOUND_FILE,
+    ALERT_IMAGE_PREFIX,
+    AUDIO_CHANNELS,
+    DEFAULT_COOLDOWN_TIMER,
+    FACTION_IMAGE_PREFIX,
+    FACTION_SOUND_FILE,
+    IMG_FOLDER,
+    MAIN_CHECK_SLEEP_MAX,
+    MAIN_CHECK_SLEEP_MIN,
+    MAX_SOUND_TRIGGERS,
+    SOUND_FOLDER,
+    VISION_SLEEP_INTERVAL,
+    WEBHOOK_COOLDOWN,
+)
+from evealert.settings.helper import get_resource_path, get_user_img_path
+from evealert.settings.stats_store import (
+    load_lifetime_stats,
+    save_lifetime_stats,
+    save_session_report,
+)
+from evealert.settings.validator import ConfigValidator
+from evealert.statistics import AlarmStatistics
+from evealert.tools.vision import Vision
+from evealert.tools.windowscapture import WindowCapture
+
+if TYPE_CHECKING:
+    from evealert.menu.main import MainMenu
+
+# Sound file paths (safe to resolve at import time — no directory listing)
+ALARM_SOUND = get_resource_path(f"{SOUND_FOLDER}/{ALARM_SOUND_FILE}")
+FACTION_SOUND = get_resource_path(f"{SOUND_FOLDER}/{FACTION_SOUND_FILE}")
+
+logger = logging.getLogger("alert")
+
+
+def _load_image_files() -> tuple[list[str], list[str]]:
+    """Resolve template image paths from both the bundled and user img/ directories.
+
+    Scans the bundled evealert/img/ (or _MEIPASS/img/ when frozen) AND the
+    user-writable img/ directory alongside settings.json so users can add
+    custom templates without modifying the application install.
+    """
+    locations = [get_resource_path(IMG_FOLDER), str(get_user_img_path())]
+    alert_files: list[str] = []
+    faction_files: list[str] = []
+
+    for folder in locations:
+        if not os.path.isdir(folder):
+            continue
+        for f in sorted(os.listdir(folder)):
+            path = os.path.join(folder, f)
+            if f.startswith(ALERT_IMAGE_PREFIX):
+                alert_files.append(path)
+            elif f.startswith(FACTION_IMAGE_PREFIX):
+                faction_files.append(path)
+
+    return alert_files, faction_files
+
+
+class AlertAgent:
+    """Alert Agent for EVE Online local chat monitoring.
+
+    Runs three asyncio tasks in a background daemon thread:
+      - vision_thread: enemy detection loop
+      - vision_faction_thread: faction detection loop
+      - run: alarm trigger, cooldown, webhook dispatch
+
+    THREAD SAFETY: This class is instantiated on the main (GUI) thread but
+    start() runs on a daemon thread.  All Tkinter widget calls must be
+    dispatched via self._ui() to avoid non-deterministic crashes.
+    """
+
+    def __init__(self, main: "MainMenu"):
+        self.main = main
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.wincap = WindowCapture(self.main)
+
+        # Coordinate sentinels — will be overwritten by load_settings()
+        self.x1 = self.y1 = self.x2 = self.y2 = 0
+        self.x1_faction = self.y1_faction = self.x2_faction = self.y2_faction = 0
+
+        # Detection settings
+        self.detection = 90
+        self.detection_faction = 90
+
+        # Load template images with a user-facing error on failure
+        try:
+            alert_files, faction_files = _load_image_files()
+        except OSError as e:
+            err_msg = f"Error: Cannot load images: {e}"
+            logger.error("Failed to load template images: %s", e)
+            self.main.after(0, lambda: self.main.write_message(err_msg, "red"))
+            alert_files, faction_files = [], []
+
+        self.alert_vision = Vision(alert_files)
+        self.alert_vision_faction = Vision(faction_files)
+        self._alert_files = alert_files
+        self._faction_files = faction_files
+
+        # Main state
+        self.running = False
+        self.check = False
+
+        # Vision flags (written by vision tasks, read by run task)
+        self.enemy = False
+        self.faction = False
+
+        # Alarm settings
+        self.cooldown_timers: dict = {}
+        self.cooldowntimer = DEFAULT_COOLDOWN_TIMER
+        self.alarm_detected = False
+        self.mute = False
+        self.volume = 1.0
+
+        # Webhook
+        self.webhook_cooldown_timer = 0
+        self.webhook_sent = False
+
+        # Sound
+        self.alarm_trigger_counts: dict = {}
+        self.max_sound_triggers = MAX_SOUND_TRIGGERS
+        self.currently_playing_sounds: dict = {}
+
+        # Statistics
+        self.statistics = AlarmStatistics()
+        lifetime_data = load_lifetime_stats()
+        if lifetime_data:
+            self.statistics.load_lifetime(lifetime_data)
+
+        # Sound paths (set by load_settings; default to bundled files)
+        self._alarm_sound = ALARM_SOUND
+        self._faction_sound = FACTION_SOUND
+
+        # Per-image threshold overrides (set by load_settings)
+        self.image_thresholds: dict = {}
+
+        # Intelligence settings
+        self._zkillboard_enabled = False
+        self._zkillboard_cooldown = 300
+        self._zkillboard_next_lookup: float = 0.0
+        self._intel_log_enabled = False
+        self._intel_log_channel = ""
+        self._intel_watcher = None  # IntelWatcher instance
+
+        # ESI augmentation
+        self._esi_enabled = False
+        self._esi_show_corp = True
+        self._esi_show_alliance = True
+
+        # Per-type sound cooldown (seconds)
+        self._cooldown_enemy = DEFAULT_COOLDOWN_TIMER
+        self._cooldown_faction = DEFAULT_COOLDOWN_TIMER
+
+        # Webhook template and per-type webhook targets
+        self._webhook_template = (
+            "{alarm_type} detected in {system} at {time} (session #{count})"
+        )
+        self._webhook_enemy_url = ""
+        self._webhook_enemy_min = 0
+        self._webhook_faction_url = ""
+        self._webhook_faction_min = 0
+
+        # Plugin manager — load plugins after settings so dir is known
+        self._plugins_enabled = True
+
+        # Web status server
+        self._web_ui_enabled = False
+        self._web_ui_port = 8765
+        self._web_server = None
+
+        self.load_settings()
+        self._load_plugins()
+        self._validate_audio_files()
+
+    # ------------------------------------------------------------------
+    # Thread safety helper
+    # ------------------------------------------------------------------
+
+    def _ui(self, fn: Callable, *args, **kwargs) -> None:
+        """Schedule a GUI call on the main Tkinter thread.
+
+        Use this for ALL widget mutations that originate from the alert
+        daemon thread (vision tasks, run loop, play_sound, etc.).
+        """
+        self.main.after(0, lambda: fn(*args, **kwargs))
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        return self.running
+
+    @property
+    def is_alarm(self) -> bool:
+        return self.alarm_detected
+
+    @property
+    def is_enemy(self) -> bool:
+        return self.enemy
+
+    @property
+    def is_faction(self) -> bool:
+        return self.faction
+
+    def get_statistics(self) -> AlarmStatistics:
+        return self.statistics
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def _load_plugins(self) -> None:
+        """Discover and load user plugins from the plugins directory."""
+        if not self._plugins_enabled:
+            return
+        try:
+            from evealert.settings.helper import (  # pylint: disable=import-outside-toplevel
+                get_user_plugins_path,
+            )
+            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
+                get_plugin_manager,
+            )
+
+            pm = get_plugin_manager()
+            plugin_dir = get_user_plugins_path()
+            count = pm.load_plugins(plugin_dir)
+            if count:
+                self._ui(
+                    self.main.write_message,
+                    f"Plugins: loaded {count} plugin(s) from {plugin_dir}",
+                    "green",
+                )
+        except Exception as exc:
+            logger.warning("Plugin load error: %s", exc)
+
+    def _validate_audio_files(self) -> None:
+        """Validate that required audio files exist."""
+        valid_alarm, error_alarm = ConfigValidator.validate_audio_file(
+            ALARM_SOUND, "Alarm sound"
+        )
+        valid_faction, error_faction = ConfigValidator.validate_audio_file(
+            FACTION_SOUND, "Faction sound"
+        )
+
+        if not valid_alarm:
+            logger.warning(error_alarm)
+            self.main.write_message(f"Warning: {error_alarm}", "red")
+
+        if not valid_faction:
+            logger.warning(error_faction)
+            self.main.write_message(f"Warning: {error_faction}", "red")
+
+    def start(self) -> bool:
+        """Start the detection engine in this (daemon) thread."""
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+        self.loop.run_until_complete(self.vision_check())
+        if self.check:
+            self.vision_t = self.loop.create_task(self.vision_thread())
+            self.vision_faction_t = self.loop.create_task(self.vision_faction_thread())
+            self.alert_t = self.loop.create_task(self.run())
+
+            # Start intel log watcher if configured
+            if self._intel_log_enabled and self._intel_log_channel:
+                from evealert.tools.intel_watcher import (  # pylint: disable=import-outside-toplevel
+                    IntelWatcher,
+                )
+
+                self._intel_watcher = IntelWatcher(
+                    channel_pattern=self._intel_log_channel,
+                    callback=self._on_intel_line,
+                )
+                self.loop.create_task(self._intel_watcher.run())
+
+            self.running = True
+            self._ui(self.main.write_message, "System: EVE Alert started.", "green")
+            # Fire background update check — non-blocking, silent on failure
+            self.loop.create_task(self._check_for_update())
+            # Start web status server if enabled
+            if self._web_ui_enabled:
+                from evealert.tools.web_server import (  # pylint: disable=import-outside-toplevel
+                    WebStatusServer,
+                )
+
+                self._web_server = WebStatusServer(
+                    port=self._web_ui_port,
+                    stats_ref=self.statistics,
+                    running_ref=[self.running],
+                )
+                self.loop.create_task(self._web_server.serve())
+                self._ui(
+                    self.main.write_message,
+                    f"Web UI: http://127.0.0.1:{self._web_ui_port}/",
+                    "green",
+                )
+            # Notify plugins that detection has started
+            try:
+                from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
+                    get_plugin_manager,
+                )
+
+                get_plugin_manager().call("on_start")
+            except Exception:
+                pass
+            self.loop.run_forever()
+            logger.debug("Alert loop terminated.")
+            return True
+        return False
+
+    def stop(self) -> None:
+        """Stop the detection engine. Safe to call from any thread."""
+        if self.loop is not None and self.loop.is_running():
+            self.loop.stop()
+        self.running = False
+        try:
+            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
+                get_plugin_manager,
+            )
+
+            get_plugin_manager().call("on_stop")
+        except Exception:
+            pass
+        if self._web_server is not None:
+            self._web_server.stop()
+            self._web_server = None
+        if self._intel_watcher is not None:
+            self._intel_watcher.stop()
+            self._intel_watcher = None
+        self.wincap.close()
+        self.currently_playing_sounds.clear()
+        self.alarm_trigger_counts.clear()
+        self.cooldown_timers.clear()
+        self.alert_vision.debug_mode = False
+        self.alert_vision_faction.debug_mode_faction = False
+        self._ui(self.main.update_alert_button)
+        self._ui(self.main.update_faction_button)
+        # Persist stats on every stop so totals survive crashes / forced exits
+        save_lifetime_stats(self.statistics)
+        save_session_report(self.statistics, time.time())
+
+    def clean_up(self) -> None:
+        self.stop()
+
+    def load_settings(self) -> None:
+        settings = self.main.menu.setting.load_settings()
+
+        if settings:
+            is_valid, errors = ConfigValidator.validate_settings_dict(settings)
+            if not is_valid:
+                error_msg = "Configuration validation failed:\n" + "\n".join(errors)
+                logger.error(error_msg)
+                self._ui(
+                    self.main.write_message,
+                    "Settings validation failed. Check logs.",
+                    "red",
+                )
+                for error in errors:
+                    self._ui(self.main.write_message, f"  - {error}", "red")
+                return
+
+            self.x1 = int(settings["alert_region_1"]["x"])
+            self.y1 = int(settings["alert_region_1"]["y"])
+            self.x2 = int(settings["alert_region_2"]["x"])
+            self.y2 = int(settings["alert_region_2"]["y"])
+            self.x1_faction = int(settings["faction_region_1"]["x"])
+            self.y1_faction = int(settings["faction_region_1"]["y"])
+            self.x2_faction = int(settings["faction_region_2"]["x"])
+            self.y2_faction = int(settings["faction_region_2"]["y"])
+            self.detection = int(settings["detectionscale"]["value"])
+            self.detection_faction = int(settings["faction_scale"]["value"])
+            self.cooldowntimer = int(settings["cooldown_timer"]["value"])
+            self.volume = settings.get("volume", {}).get("value", 100) / 100.0
+            self.mute = settings["server"]["mute"]
+
+            # Resolve sound paths: use user-specified file if it exists, else bundled default
+            sounds = settings.get("sounds", {})
+            user_alarm = sounds.get("alarm", "")
+            user_faction = sounds.get("faction", "")
+            self._alarm_sound = (
+                user_alarm if user_alarm and os.path.isfile(user_alarm) else ALARM_SOUND
+            )
+            self._faction_sound = (
+                user_faction
+                if user_faction and os.path.isfile(user_faction)
+                else FACTION_SOUND
+            )
+
+            # Per-image threshold overrides: {basename: int 0-100 or null}
+            self.image_thresholds = settings.get("image_thresholds", {})
+
+            # Intelligence settings
+            intel = settings.get("intelligence", {})
+            self._zkillboard_enabled = bool(intel.get("zkillboard_enabled", False))
+            self._zkillboard_cooldown = int(intel.get("zkillboard_cooldown", 300))
+            self._intel_log_enabled = bool(intel.get("intel_log_enabled", False))
+            self._intel_log_channel = str(intel.get("intel_log_channel", ""))
+
+            # ESI augmentation settings
+            esi = settings.get("esi", {})
+            self._esi_enabled = bool(esi.get("enabled", False))
+            self._esi_show_corp = bool(esi.get("show_corp", True))
+            self._esi_show_alliance = bool(esi.get("show_alliance", True))
+
+            # Web status UI settings
+            web = settings.get("web_ui", {})
+            self._web_ui_enabled = bool(web.get("enabled", False))
+            self._web_ui_port = int(web.get("port", 8765))
+
+            # Per-type cooldowns
+            self._cooldown_enemy = int(
+                settings.get("cooldown_timer_enemy", {}).get(
+                    "value", self.cooldowntimer
+                )
+            )
+            self._cooldown_faction = int(
+                settings.get("cooldown_timer_faction", {}).get(
+                    "value", self.cooldowntimer
+                )
+            )
+
+            # Webhook template
+            self._webhook_template = settings.get("server", {}).get(
+                "webhook_template",
+                "{alarm_type} detected in {system} at {time} (session #{count})",
+            )
+
+            # Per-type webhook targets
+            wh = settings.get("webhooks", {})
+            self._webhook_enemy_url = wh.get("enemy", {}).get("url", "")
+            self._webhook_enemy_min = int(wh.get("enemy", {}).get("min_count", 0))
+            self._webhook_faction_url = wh.get("faction", {}).get("url", "")
+            self._webhook_faction_min = int(wh.get("faction", {}).get("min_count", 0))
+
+            if self.main.menu.setting.is_changed:
+                vision_opened = self.alert_vision.is_vision_open
+                faction_vision_opened = self.alert_vision_faction.is_faction_vision_open
+
+                # Reload image file lists in case templates were added/removed
+                try:
+                    alert_files, faction_files = _load_image_files()
+                    self._alert_files = alert_files
+                    self._faction_files = faction_files
+                except OSError as e:
+                    logger.error("Failed to reload template images: %s", e)
+                    alert_files = self._alert_files
+                    faction_files = self._faction_files
+
+                self.alert_vision = Vision(alert_files)
+                self.alert_vision_faction = Vision(faction_files)
+                if vision_opened:
+                    self.set_vision()
+                if faction_vision_opened:
+                    self.set_vision_faction()
+                self._ui(self.main.write_message, "Settings: Loaded.", "green")
+
+    def set_vision(self) -> None:
+        if self.is_running:
+            self.alert_vision.debug_mode = not self.alert_vision.debug_mode
+            self._ui(self.main.update_alert_button)
+
+    def set_vision_faction(self) -> None:
+        if self.is_running:
+            self.alert_vision_faction.debug_mode_faction = (
+                not self.alert_vision_faction.debug_mode_faction
+            )
+            self._ui(self.main.update_faction_button)
+
+    # ------------------------------------------------------------------
+    # Async detection tasks (run on the alert daemon thread's event loop)
+    # ------------------------------------------------------------------
+
+    async def vision_check(self) -> None:
+        """Validate that screenshot capture works for the configured alert region."""
+        self.load_settings()
+        screenshot, _ = self.wincap.get_screenshot_value(
+            self.y1, self.x1, self.x2, self.y2
+        )
+        if screenshot is not None:
+            self.check = True
+        else:
+            self._ui(self.main.write_message, "Wrong Alert Settings.", "red")
+            self.check = False
+
+    async def vision_thread(self) -> None:
+        """Continuously check for enemy detection in the alert region."""
+        while True:
+            screenshot, _ = self.wincap.get_screenshot_value(
+                self.y1, self.x1, self.x2, self.y2
+            )
+            if screenshot is not None:
+                enemy = self.alert_vision.find(
+                    screenshot, self.detection, self.image_thresholds
+                )
+                self.enemy = bool(enemy)
+            else:
+                self.enemy = False
+                self._ui(self.main.write_message, "Wrong Alert Settings.", "red")
+                self.clean_up()
+            await asyncio.sleep(VISION_SLEEP_INTERVAL)
+
+    async def vision_faction_thread(self) -> None:
+        """Continuously check for faction detection in the faction region."""
+        while True:
+            screenshot_faction, _ = self.wincap.get_screenshot_value(
+                self.y1_faction, self.x1_faction, self.x2_faction, self.y2_faction
+            )
+            if screenshot_faction is not None:
+                faction = self.alert_vision_faction.find_faction(
+                    screenshot_faction, self.detection_faction, self.image_thresholds
+                )
+                self.faction = bool(faction)
+            else:
+                # Reset flag on capture failure so stale True doesn't loop alarms
+                self.faction = False
+            await asyncio.sleep(VISION_SLEEP_INTERVAL)
+
+    async def reset_alarm(self, alarm_type: str) -> None:
+        """Reset alarm counters and webhook state when detection clears."""
+        if alarm_type in self.alarm_trigger_counts:
+            self.alarm_trigger_counts[alarm_type] = 0
+            self.cooldown_timers[alarm_type] = 0
+
+        if self.main.webhook and alarm_type == "Enemy" and self.webhook_sent:
+            try:
+                reset_msg = (
+                    f"Alarm cleared in {self.main.menu.setting.system_name.get()}"
+                )
+                self.main.webhook.execute(reset_msg)
+            except Exception as e:
+                logger.error("Error sending reset webhook: %s", e)
+            self.webhook_sent = False
+
+    async def alarm_detection(
+        self, alarm_text: str, sound: str = ALARM_SOUND, alarm_type: str = "Enemy"
+    ) -> None:
+        """Trigger an alarm: log message, statistics, sound, webhook."""
+        self._ui(self.main.write_message, alarm_text, "red")
+        self.statistics.add_alarm(alarm_type)
+        save_lifetime_stats(self.statistics)
+        await self.play_sound(sound, alarm_type)
+        await self.send_webhook_message(alarm_type)
+
+        # Notify plugins
+        try:
+            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
+                get_plugin_manager,
+            )
+
+            system = self.main.menu.setting.system_name.get()
+            ts = time.strftime("%H:%M:%S")
+            hook = "on_enemy" if alarm_type == "Enemy" else "on_faction"
+            get_plugin_manager().call(hook, system=system, timestamp=ts)
+        except Exception:
+            pass
+
+        # Zkillboard lookup — Enemy alarms only, subject to cooldown
+        if alarm_type == "Enemy" and self._zkillboard_enabled:
+            now = time.time()
+            if now >= self._zkillboard_next_lookup:
+                self._zkillboard_next_lookup = now + self._zkillboard_cooldown
+                system_name = self.main.menu.setting.system_name.get().strip()
+                if system_name:
+                    asyncio.ensure_future(self._fetch_and_report_kills(system_name))
+
+        # ESI augmentation — show corp/alliance of recent Local joiners
+        if alarm_type == "Enemy" and self._esi_enabled:
+            asyncio.ensure_future(self._augment_with_esi())
+
+    async def _send_typed_webhook(self, alarm_type: str, msg: str) -> None:
+        """Fire the per-type webhook URL if configured and min-count threshold is met."""
+        if alarm_type == "Enemy":
+            url = self._webhook_enemy_url
+            min_count = self._webhook_enemy_min
+            count = self.statistics.session_by_type.get("Enemy", 0)
+        elif alarm_type == "Faction":
+            url = self._webhook_faction_url
+            min_count = self._webhook_faction_min
+            count = self.statistics.session_by_type.get("Faction", 0)
+        else:
+            return
+
+        if not url:
+            return
+        if count < min_count:
+            logger.debug(
+                "Skipping typed webhook: count %d < min_count %d", count, min_count
+            )
+            return
+
+        try:
+            from dhooks_lite import (
+                Webhook as _Webhook,  # pylint: disable=import-outside-toplevel
+            )
+
+            hook = _Webhook(url, username="EVE Alert")
+            hook.execute(msg)
+        except Exception as e:
+            logger.error("Error sending %s webhook: %s", alarm_type, e)
+
+    def _on_intel_line(self, line: str) -> None:
+        """Called from IntelWatcher for each new chat-log line.
+
+        Posts the line to the GUI log on the main Tkinter thread.
+        Only lines that look like player chat (not system messages) are forwarded.
+        """
+        # EVE chat log system messages start with "  " (two spaces) or specific tokens
+        stripped = line.strip()
+        # Skip empty lines and EVE session-header lines (start with "--")
+        if not stripped or stripped.startswith("-------"):
+            return
+        self._ui(self.main.write_message, f"Intel: {stripped}", "cyan")
+        # Notify plugins
+        try:
+            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
+                get_plugin_manager,
+            )
+
+            get_plugin_manager().call("on_intel", line=stripped)
+        except Exception:
+            pass
+
+    async def _augment_with_esi(self) -> None:
+        """Background task: look up joining characters via ESI and post corp/alliance to log."""
+        try:
+            from evealert.tools.esi_standings import (  # pylint: disable=import-outside-toplevel
+                extract_joining_characters,
+                get_esi_client,
+            )
+            from evealert.tools.intel_watcher import (  # pylint: disable=import-outside-toplevel
+                find_intel_log,
+                get_eve_chatlog_dir,
+            )
+
+            chatlog_dir = get_eve_chatlog_dir()
+            if chatlog_dir is None:
+                return
+
+            # Read the last 50 lines of the Local chat log for recent joins
+            local_log = find_intel_log(chatlog_dir, "Local")
+            if local_log is None:
+                return
+
+            try:
+                with open(local_log, encoding="utf-8", errors="replace") as fh:
+                    lines = fh.readlines()[-50:]
+            except OSError:
+                return
+
+            names = extract_joining_characters(lines)
+            if not names:
+                return
+
+            results = await get_esi_client().lookup_many(
+                names[:5]
+            )  # cap at 5 per alarm
+            if not results:
+                return
+
+            self._ui(self.main.write_message, "ESI — Recent Local joiners:", "cyan")
+            for info in results:
+                parts = [f"  {info.name}"]
+                if self._esi_show_corp and info.corporation_name:
+                    parts.append(f"[{info.corporation_name}]")
+                if self._esi_show_alliance and info.alliance_name:
+                    parts.append(f"<{info.alliance_name}>")
+                self._ui(self.main.write_message, " ".join(parts), "cyan")
+
+        except Exception as exc:
+            logger.debug("ESI augmentation error: %s", exc)
+
+    async def _check_for_update(self) -> None:
+        """Non-blocking startup version check against GitHub Releases."""
+        try:
+            from evealert import __version__  # pylint: disable=import-outside-toplevel
+            from evealert.tools.update_checker import (  # pylint: disable=import-outside-toplevel
+                check_for_update,
+            )
+
+            tag = await check_for_update(__version__)
+            if tag:
+                url = "https://github.com/bluhayz/EVE-Alert/releases/latest"
+                self._ui(
+                    self.main.write_message,
+                    f"Update available: {tag} — {url}",
+                    "yellow",
+                )
+        except Exception as exc:
+            logger.debug("Update check error: %s", exc)
+
+    async def _fetch_and_report_kills(self, system_name: str) -> None:
+        """Background task: fetch Zkillboard data and post results to the log."""
+        try:
+            from evealert.tools.zkillboard import (  # pylint: disable=import-outside-toplevel
+                get_client,
+            )
+
+            kills = await get_client().get_recent_kills(system_name, limit=3)
+        except Exception as exc:
+            logger.debug("Zkillboard lookup failed: %s", exc)
+            return
+
+        if not kills:
+            self._ui(
+                self.main.write_message,
+                f"Intel: No recent kills found for {system_name}.",
+                "yellow",
+            )
+            return
+
+        self._ui(
+            self.main.write_message,
+            f"Intel: Recent kills in {system_name} ({len(kills)}):",
+            "yellow",
+        )
+        for k in kills:
+            isk_m = k.total_value / 1_000_000
+            msg = f"  [{k.kill_time[:16]}] {k.victim_name} ({k.victim_ship}) — {isk_m:.1f}M ISK"
+            self._ui(self.main.write_message, msg, "yellow")
+
+    async def send_webhook_message(self, alarm_type: str) -> None:
+        """Send Discord webhook notification(s) with template formatting and multi-target support."""
+        current_time = time.time()
+        if current_time < self.webhook_cooldown_timer:
+            logger.info("Webhook is in cooldown period. Message not sent.")
+            return
+
+        system = self.main.menu.setting.system_name.get()
+        msg = self._webhook_template.format(
+            alarm_type=alarm_type,
+            system=system,
+            time=time.strftime("%H:%M:%S"),
+            count=self.statistics.session_alarms,
+        )
+
+        # 1. "All events" webhook (server.webhook) — fires for every alarm type
+        if self.main.webhook and not self.webhook_sent:
+            try:
+                self.main.webhook.execute(msg)
+                self.webhook_cooldown_timer = current_time + WEBHOOK_COOLDOWN
+                self.webhook_sent = True
+            except Exception as e:
+                logger.error("Error sending all-events webhook: %s", e)
+
+        # 2. Per-type webhooks (enemy / faction) with optional min-count gate
+        await self._send_typed_webhook(alarm_type, msg)
+
+    async def play_sound(self, sound: str, alarm_type: str) -> None:
+        """Play alarm sound with trigger limits and cooldown management."""
+        if self.mute:
+            return
+
+        if not _SOUNDDEVICE_AVAILABLE:
+            self._ui(
+                self.main.write_message,
+                "Audio disabled: PortAudio not found. On macOS run: brew install portaudio",
+                "red",
+            )
+            return
+
+        if alarm_type not in self.alarm_trigger_counts:
+            self.alarm_trigger_counts[alarm_type] = 0
+        if alarm_type not in self.cooldown_timers:
+            self.cooldown_timers[alarm_type] = 0
+
+        current_time = time.time()
+        if current_time < self.cooldown_timers[alarm_type]:
+            self._ui(
+                self.main.write_message,
+                f"{alarm_type} Sound is in cooldown period.",
+                "red",
+            )
+            return
+
+        self.alarm_trigger_counts[alarm_type] += 1
+
+        if self.alarm_trigger_counts[alarm_type] > self.max_sound_triggers:
+            # Pick the cooldown limit for this alarm type
+            cooldown_limit = (
+                self._cooldown_enemy
+                if alarm_type == "Enemy"
+                else self._cooldown_faction
+            )
+            self.cooldown_timers[alarm_type] = current_time + cooldown_limit
+            self.alarm_trigger_counts[alarm_type] = 0
+            self._ui(
+                self.main.write_message,
+                f"{alarm_type} Sound is now in cooldown for {cooldown_limit} seconds.",
+                "red",
+            )
+            return
+
+        if alarm_type not in self.currently_playing_sounds:
+            self.currently_playing_sounds[alarm_type] = True
+            try:
+                data, samplerate = sf.read(sound, dtype="int16")
+
+                if data.ndim == 1:
+                    data = np.stack([data, data], axis=-1)
+                elif data.ndim == 2 and data.shape[1] == 1:
+                    data = np.repeat(data, AUDIO_CHANNELS, axis=1)
+
+                data_with_volume = (data * self.volume).astype("int16")
+
+                # Non-blocking play; wait in executor so vision tasks continue
+                loop = asyncio.get_running_loop()
+                sd.play(data_with_volume, samplerate)
+                await loop.run_in_executor(None, sd.wait)
+            except Exception as e:
+                if self.alarm_trigger_counts.get(alarm_type, 0) <= 1:
+                    self._ui(
+                        self.main.open_error_window,
+                        "Error Playing Sound. Check Logs for more information.",
+                    )
+                logger.exception("Error Playing Sound: %s", e)
+            finally:
+                self.currently_playing_sounds.pop(alarm_type, None)
+
+    async def run(self) -> None:
+        """Main alarm-trigger loop."""
+        while True:
+            if self.main.menu.setting.is_changed:
+                self.load_settings()
+                self.main.menu.setting.changed = False
+
+            self.alarm_detected = False
+
+            try:
+                if self.faction:
+                    self.alarm_detected = True
+                    await self.alarm_detection(
+                        "Faction Spawn!", self._faction_sound, "Faction"
+                    )
+                if self.enemy:
+                    self.alarm_detected = True
+                    await self.alarm_detection(
+                        "Enemy Appears!", self._alarm_sound, "Enemy"
+                    )
+            except Exception as e:
+                logger.error("Alert System Error: %s", e, exc_info=True)
+                self.stop()
+                self._ui(
+                    self.main.write_message, "Alert system error — check logs.", "red"
+                )
+                return
+
+            if not self.faction:
+                await self.reset_alarm("Faction")
+            if not self.enemy:
+                await self.reset_alarm("Enemy")
+
+            await asyncio.sleep(
+                random.uniform(MAIN_CHECK_SLEEP_MIN, MAIN_CHECK_SLEEP_MAX)
+            )
