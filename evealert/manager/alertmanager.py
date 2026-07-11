@@ -222,6 +222,12 @@ class AlertAgent:
         self._wh_drop_threshold = 3
         self._wh_drop_detector = None
 
+        # v3.7: fleet context
+        self._fleet_composition_enabled = False
+        self._fleet_killmail_enabled = False
+        self._fleet_tracked_ids: list = []
+        self._killmail_monitor = None
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -393,6 +399,17 @@ class AlertAgent:
                 self._wh_drop_detector = WhDropDetector(
                     threshold=self._wh_drop_threshold
                 )
+            # v3.7: killmail monitor
+            if self._fleet_killmail_enabled and self._fleet_tracked_ids:
+                from evealert.tools.fleet_context import (  # pylint: disable=import-outside-toplevel
+                    KillmailMonitor,
+                )
+
+                self._killmail_monitor = KillmailMonitor(
+                    character_ids=self._fleet_tracked_ids,
+                    callback=lambda msg: self._ui(self.main.write_message, msg, "cyan"),
+                )
+                self.loop.create_task(self._killmail_monitor.run())
             # Notify plugins that detection has started
             try:
                 from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
@@ -429,6 +446,9 @@ class AlertAgent:
         if self._dscan_watcher is not None:
             self._dscan_watcher.stop()
             self._dscan_watcher = None
+        if self._killmail_monitor is not None:
+            self._killmail_monitor.stop()
+            self._killmail_monitor = None
         if self._intel_watcher is not None:
             self._intel_watcher.stop()
             self._intel_watcher = None
@@ -548,6 +568,14 @@ class AlertAgent:
             self._thera_max_jumps = int(wh.get("thera_max_jumps", 5))
             self._wh_drop_enabled = bool(wh.get("wh_drop_enabled", False))
             self._wh_drop_threshold = int(wh.get("wh_drop_threshold", 3))
+
+            # Fleet context settings
+            fleet = settings.get("fleet", {})
+            self._fleet_composition_enabled = bool(
+                fleet.get("composition_enabled", False)
+            )
+            self._fleet_killmail_enabled = bool(fleet.get("killmail_enabled", False))
+            self._fleet_tracked_ids = list(fleet.get("tracked_character_ids", []))
 
             # Per-type cooldowns
             self._cooldown_enemy = int(
@@ -850,6 +878,24 @@ class AlertAgent:
             results = await client.lookup_many(names[:5])
             if not results:
                 return
+
+            # v3.7: fleet composition analysis (3+ hostiles)
+            if self._fleet_composition_enabled and len(results) >= 3:
+                try:
+                    from evealert.tools.fleet_context import (  # pylint: disable=import-outside-toplevel
+                        analyze_fleet_composition,
+                    )
+
+                    char_ids = [info.character_id for info in results]
+                    composition = await analyze_fleet_composition(char_ids)
+                    if composition:
+                        self._ui(
+                            self.main.write_message,
+                            f"Fleet analysis: {composition.threat_summary}",
+                            "red",
+                        )
+                except Exception:
+                    pass
 
             self._ui(self.main.write_message, "ESI — Local pilot intel:", "cyan")
 

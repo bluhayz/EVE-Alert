@@ -115,6 +115,12 @@ DEFAULT_SETTINGS = {
         "wh_drop_enabled": False,
         "wh_drop_threshold": 3,
     },
+    # v3.7: fleet context + killmail tracking
+    "fleet": {
+        "composition_enabled": False,  # analyse fleet when 3+ hostiles
+        "killmail_enabled": False,  # monitor tracked characters for kills
+        "tracked_character_ids": [],  # list of ESI character IDs to track
+    },
 }
 
 
@@ -416,6 +422,16 @@ class SettingMenu:
             self.wh_drop_threshold_entry.delete(0, customtkinter.END)
             self.wh_drop_threshold_entry.insert(0, str(wh.get("wh_drop_threshold", 3)))
 
+            # Fleet context settings
+            fleet = settings.get("fleet", {})
+            self.fleet_composition_var.set(
+                bool(fleet.get("composition_enabled", False))
+            )
+            self.fleet_killmail_var.set(bool(fleet.get("killmail_enabled", False)))
+            self.fleet_char_ids_entry.delete(0, customtkinter.END)
+            char_ids = fleet.get("tracked_character_ids", [])
+            self.fleet_char_ids_entry.insert(0, ", ".join(str(c) for c in char_ids))
+
         except KeyError as e:
             logger.exception(e)
             self.main.write_message(
@@ -584,6 +600,15 @@ class SettingMenu:
                         "wh_drop_threshold": int(
                             self.wh_drop_threshold_entry.get().strip() or 3
                         ),
+                    },
+                    "fleet": {
+                        "composition_enabled": self.fleet_composition_var.get(),
+                        "killmail_enabled": self.fleet_killmail_var.get(),
+                        "tracked_character_ids": [
+                            int(c.strip())
+                            for c in self.fleet_char_ids_entry.get().split(",")
+                            if c.strip().isdigit()
+                        ],
                     },
                 }
             )
@@ -1617,10 +1642,41 @@ class SettingMenu:
         self.wh_drop_threshold_entry = customtkinter.CTkEntry(self.menu_frame, width=60)
         self.wh_drop_threshold_entry.grid(row=65, column=1, sticky="w")
 
+        # Fleet Context section
+        customtkinter.CTkLabel(
+            self.menu_frame,
+            text="Fleet Context",
+            font=customtkinter.CTkFont(weight="bold"),
+        ).grid(row=66, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
+
+        self.fleet_composition_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Analyse fleet composition (3+ hostiles)",
+            variable=self.fleet_composition_var,
+        ).grid(row=67, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
+
+        self.fleet_killmail_var = customtkinter.BooleanVar(value=False)
+        customtkinter.CTkCheckBox(
+            self.menu_frame,
+            text="Notify on tracked character kills/losses",
+            variable=self.fleet_killmail_var,
+        ).grid(row=68, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+
+        customtkinter.CTkLabel(
+            self.menu_frame, text="Tracked char IDs:", justify="left"
+        ).grid(row=69, column=0, padx=(20, 4), sticky="e")
+        self.fleet_char_ids_entry = customtkinter.CTkEntry(
+            self.menu_frame,
+            width=300,
+            placeholder_text="comma-separated ESI character IDs",
+        )
+        self.fleet_char_ids_entry.grid(row=69, column=1, columnspan=2, sticky="w")
+
         # Save / Apply / Close
-        self.save_button.grid(row=66, column=0, pady=10)
-        self.apply_button.grid(row=66, column=1, pady=10)
-        self.close_button.grid(row=66, column=2, pady=10)
+        self.save_button.grid(row=70, column=0, pady=10)
+        self.apply_button.grid(row=70, column=1, pady=10)
+        self.close_button.grid(row=70, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 
