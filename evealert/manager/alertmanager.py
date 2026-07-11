@@ -198,6 +198,13 @@ class AlertAgent:
         self._adjacent_destination = ""
         self._neighbor_monitor = None
 
+        # v3.3: D-scan monitor
+        self._dscan_enabled = False
+        self._dscan_alert_red = True
+        self._dscan_alert_orange = False
+        self._dscan_alert_probes = True
+        self._dscan_watcher = None
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -329,6 +336,18 @@ class AlertAgent:
                         ),
                     )
                     self.loop.create_task(self._neighbor_monitor.run())
+            # v3.3: D-scan watcher
+            if self._dscan_enabled:
+                from evealert.tools.dscan_watcher import (  # pylint: disable=import-outside-toplevel
+                    DscanWatcher,
+                )
+
+                self._dscan_watcher = DscanWatcher(
+                    on_threat=self._on_dscan_threat,
+                    on_probe=self._on_dscan_probe,
+                    on_entry=self._on_dscan_entry,
+                )
+                self.loop.create_task(self._dscan_watcher.run())
             # Start web status server if enabled
             if self._web_ui_enabled:
                 from evealert.tools.web_server import (  # pylint: disable=import-outside-toplevel
@@ -379,6 +398,9 @@ class AlertAgent:
         if self._neighbor_monitor is not None:
             self._neighbor_monitor.stop()
             self._neighbor_monitor = None
+        if self._dscan_watcher is not None:
+            self._dscan_watcher.stop()
+            self._dscan_watcher = None
         if self._intel_watcher is not None:
             self._intel_watcher.stop()
             self._intel_watcher = None
@@ -473,6 +495,13 @@ class AlertAgent:
             self._adjacent_poll_interval = int(adj.get("poll_interval", 120))
             self._adjacent_min_kills = int(adj.get("min_kills", 1))
             self._adjacent_destination = str(adj.get("destination_system", ""))
+
+            # D-scan monitor settings
+            ds = settings.get("dscan", {})
+            self._dscan_enabled = bool(ds.get("enabled", False))
+            self._dscan_alert_red = bool(ds.get("alert_red", True))
+            self._dscan_alert_orange = bool(ds.get("alert_orange", False))
+            self._dscan_alert_probes = bool(ds.get("alert_probes", True))
 
             # Per-type cooldowns
             self._cooldown_enemy = int(
@@ -803,6 +832,32 @@ class AlertAgent:
 
         except Exception as exc:
             logger.debug("ESI augmentation error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # D-scan callbacks (v3.3) — called from DscanWatcher on the alert thread
+    # ------------------------------------------------------------------
+
+    def _on_dscan_threat(self, tier: str, name: str) -> None:
+        """Called when a RED or ORANGE ship appears on D-scan."""
+        if tier == "red" and self._dscan_alert_red:
+            self._ui(self.main.write_message, f"D-SCAN RED: {name}", "red")
+        elif tier == "orange" and self._dscan_alert_orange:
+            self._ui(self.main.write_message, f"D-SCAN ORANGE: {name}", "yellow")
+
+    def _on_dscan_probe(self) -> None:
+        """Called when probes are detected on D-scan."""
+        if self._dscan_alert_probes:
+            self._ui(
+                self.main.write_message,
+                "D-SCAN: PROBES DETECTED — someone is scanning!",
+                "red",
+            )
+
+    def _on_dscan_entry(self, entry) -> None:
+        """Called for every D-scan entry (for the session timeline)."""
+        # Timeline is stored on the DscanWatcher itself; nothing to do here
+        # unless the Statistics window requests it.
+        pass
 
     async def _display_system_info(self) -> None:
         """One-shot task: show pipe/pocket classification and sovereignty on start."""
