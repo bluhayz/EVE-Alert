@@ -2,6 +2,7 @@
 
 import base64
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -10,6 +11,7 @@ from evealert.tools.esi_auth import (
     _DEFAULT_CLIENT_ID,
     _SCOPES,
     EsiAuth,
+    TokenInfo,
     _decode_character_from_jwt,
     get_esi_auth,
 )
@@ -94,6 +96,60 @@ class PkceParamsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("code_challenge_method=S256", opened["url"])
         # A verifier must have been generated for the token exchange
         self.assertTrue(auth._code_verifier)
+
+
+class GetTokenExpiryTests(unittest.IsolatedAsyncioTestCase):
+    def _auth(self):
+        with mock.patch.object(EsiAuth, "_load_token", lambda self: None):
+            return EsiAuth(client_id="x")
+
+    async def test_no_token_returns_none(self):
+        auth = self._auth()
+        auth._token = None
+        self.assertIsNone(await auth.get_token())
+
+    async def test_valid_token_returned_without_refresh(self):
+        auth = self._auth()
+        auth._token = TokenInfo("access-123", "refresh", time.time() + 600, 1, "P")
+        refreshed = {"called": False}
+
+        async def fake_refresh():
+            refreshed["called"] = True
+
+        auth._refresh = fake_refresh
+        token = await auth.get_token()
+        self.assertEqual(token, "access-123")
+        self.assertFalse(refreshed["called"])
+
+    async def test_expired_token_triggers_refresh(self):
+        auth = self._auth()
+        auth._token = TokenInfo("old", "refresh", time.time() + 5, 1, "P")  # within 30s
+        refreshed = {"called": False}
+
+        async def fake_refresh():
+            refreshed["called"] = True
+
+        auth._refresh = fake_refresh
+        await auth.get_token()
+        self.assertTrue(refreshed["called"])
+
+
+class TokenRoundTripTests(unittest.TestCase):
+    def test_save_then_load(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "esi_token.json"
+            with mock.patch("evealert.tools.esi_auth._token_path", return_value=path):
+                with mock.patch.object(EsiAuth, "_load_token", lambda self: None):
+                    a = EsiAuth(client_id="x")
+                a._token = TokenInfo("acc", "ref", 9e18, 42, "Pilot")
+                a._save_token()
+                # Fresh instance loads it back
+                b = EsiAuth(client_id="x")
+        self.assertEqual(b.character_id, 42)
+        self.assertEqual(b.character_name, "Pilot")
 
 
 if __name__ == "__main__":

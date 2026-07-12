@@ -1,13 +1,19 @@
 """Tests for wormhole / Eve-Scout parsing (issue #101)."""
 
 import asyncio
+import time
 import unittest
 
 import respx
 from httpx import Response
 
 from evealert.tools import wormhole
-from evealert.tools.wormhole import _infer_wh_class, get_thera_connections
+from evealert.tools.wormhole import (
+    WhDropDetector,
+    _infer_wh_class,
+    get_thera_connections,
+    is_wormhole_system,
+)
 
 _SIG_URL = "https://api.eve-scout.com/v2/public/signatures"
 
@@ -65,6 +71,34 @@ class WhClassTests(unittest.TestCase):
 
     def test_kspace_is_not_wh(self):
         self.assertEqual(_infer_wh_class(30000142), "k-space")
+
+
+class IsWormholeSystemTests(unittest.TestCase):
+    def test_wh_range(self):
+        self.assertTrue(is_wormhole_system(31000005))
+        self.assertTrue(is_wormhole_system(31001614))
+
+    def test_kspace_and_bounds(self):
+        self.assertFalse(is_wormhole_system(30000142))  # Jita
+        self.assertFalse(is_wormhole_system(30999999))  # just below range
+        self.assertFalse(is_wormhole_system(32000001))  # just above range
+
+
+class WhDropDetectorTests(unittest.TestCase):
+    def test_threshold_and_reset(self):
+        d = WhDropDetector(threshold=3, window_seconds=60.0)
+        self.assertFalse(d.record_join())
+        self.assertFalse(d.record_join())
+        self.assertTrue(d.record_join())  # 3rd join within window trips it
+        d.reset()
+        self.assertFalse(d.record_join())  # counter cleared
+
+    def test_stale_joins_pruned_from_window(self):
+        d = WhDropDetector(threshold=3, window_seconds=60.0)
+        # Simulate two old joins outside the window + one fresh join.
+        now = time.time()
+        d._join_times = [now - 120, now - 90]  # both stale
+        self.assertFalse(d.record_join())  # only the fresh one remains
 
 
 if __name__ == "__main__":

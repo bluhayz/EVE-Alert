@@ -7,7 +7,12 @@ import respx
 from httpx import Response
 
 from evealert.tools import fleet_context
-from evealert.tools.fleet_context import KillmailMonitor, _zkb_get
+from evealert.tools.fleet_context import (
+    ActivityProfile,
+    KillmailMonitor,
+    _classify_fleet,
+    _zkb_get,
+)
 
 
 class ZkbGetTests(unittest.TestCase):
@@ -60,6 +65,52 @@ class KillmailDedupTests(unittest.TestCase):
         # The set never grows beyond the deque cap
         self.assertLessEqual(len(m._seen_ids), maxlen)
         self.assertEqual(len(m._seen_order), maxlen)
+
+
+import collections
+
+
+class ClassifyFleetTests(unittest.TestCase):
+    def _counter(self, *ships):
+        return collections.Counter(ships)
+
+    def test_capital_fleet(self):
+        self.assertEqual(
+            _classify_fleet(self._counter("Nyx", "Carrier")), "Capital fleet"
+        )
+
+    def test_bomber_fleet(self):
+        self.assertEqual(
+            _classify_fleet(self._counter("Stealth Bomber")), "Bomber fleet"
+        )
+
+    def test_interceptor_gang(self):
+        self.assertEqual(_classify_fleet(self._counter("Sabre")), "Interceptor gang")
+
+    def test_battleship_fleet(self):
+        self.assertEqual(
+            _classify_fleet(self._counter("Battleship")), "Battleship fleet"
+        )
+
+    def test_mixed_composition_when_unrecognized(self):
+        self.assertEqual(_classify_fleet(self._counter("Venture")), "Mixed composition")
+
+
+class ActivityProfileTests(unittest.TestCase):
+    def test_records_and_reports_peak_hours(self):
+        prof = ActivityProfile()
+        kills = [
+            {"killmail_time": "2026-07-12T18:15:00Z"},
+            {"killmail_time": "2026-07-12T18:45:00Z"},
+            {"killmail_time": "2026-07-12T03:05:00Z"},
+        ]
+        prof.record_kills(30000142, kills)
+        peaks = prof.peak_hours(30000142)
+        self.assertEqual(peaks[0], (18, 2))  # 18:00 is the busiest hour
+        self.assertIn("Peak hours", prof.summary(30000142))
+
+    def test_summary_when_no_data(self):
+        self.assertEqual(ActivityProfile().summary(999), "No activity data yet.")
 
 
 if __name__ == "__main__":
