@@ -248,6 +248,10 @@ class AlertAgent:
         self._esi_structure_alerts = False
         self._esi_standings_cache: dict = {}  # character_id → standing float
 
+        # v4.1: OCR pilot-name detection (#98)
+        self._ocr_enabled = False
+        self._ocr_region = (0, 0, 0, 0)
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -633,6 +637,17 @@ class AlertAgent:
             self._esi_fleet_monitor = bool(esi.get("fleet_monitor", False))
             self._esi_structure_alerts = bool(esi.get("structure_alerts", False))
 
+            # OCR name detection (#98)
+            ocr = settings.get("ocr", {})
+            self._ocr_enabled = bool(ocr.get("enabled", False))
+            reg = ocr.get("region", {})
+            self._ocr_region = (
+                int(reg.get("x1", 0)),
+                int(reg.get("y1", 0)),
+                int(reg.get("x2", 0)),
+                int(reg.get("y2", 0)),
+            )
+
             # Per-type cooldowns
             self._cooldown_enemy = int(
                 settings.get("cooldown_timer_enemy", {}).get(
@@ -863,8 +878,10 @@ class AlertAgent:
                 if system_name:
                     asyncio.ensure_future(self._fetch_and_report_kills(system_name))
 
-        # ESI augmentation — show corp/alliance of recent Local joiners
-        if alarm_type == "Enemy" and self._esi_enabled:
+        # ESI augmentation — show corp/alliance of recent Local joiners.
+        # Also runs when OCR name detection is on, so OCR'd names flow into the
+        # KOS / ESI / Zkillboard pipeline (#98).
+        if alarm_type == "Enemy" and (self._esi_enabled or self._ocr_enabled):
             asyncio.ensure_future(self._augment_with_esi())
 
     async def _send_typed_webhook(self, alarm_type: str, msg: str) -> None:
@@ -941,20 +958,42 @@ class AlertAgent:
             )
 
             chatlog_dir = get_eve_chatlog_dir()
-            if chatlog_dir is None:
-                return
 
-            local_log = find_intel_log(chatlog_dir, "Local")
-            if local_log is None:
-                return
+            # Gather Local names from the chat log (best-effort — may be absent).
+            names: list = []
+            local_log = find_intel_log(chatlog_dir, "Local") if chatlog_dir else None
+            if local_log is not None:
+                try:
+                    with open(local_log, encoding="utf-8", errors="replace") as fh:
+                        lines = fh.readlines()[-50:]
+                    names = extract_joining_characters(lines)
+                except OSError:
+                    names = []
 
-            try:
-                with open(local_log, encoding="utf-8", errors="replace") as fh:
-                    lines = fh.readlines()[-50:]
-            except OSError:
-                return
+            # v4.1: OCR the configured region and merge detected names (#98).
+            if self._ocr_enabled:
+                try:
+                    from evealert.tools.ocr_local import (  # pylint: disable=import-outside-toplevel
+                        read_local_names,
+                        resolve_region,
+                    )
 
-            names = extract_joining_characters(lines)
+                    region = resolve_region(
+                        self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
+                    )
+                    ocr_names = read_local_names(region) if region else []
+                    if ocr_names:
+                        self._ui(
+                            self.main.write_message,
+                            f"OCR detected: {', '.join(ocr_names)}",
+                            "cyan",
+                        )
+                        for name in ocr_names:
+                            if name not in names:
+                                names.append(name)
+                except Exception as exc:
+                    logger.debug("OCR name detection failed: %s", exc)
+
             if not names:
                 return
 

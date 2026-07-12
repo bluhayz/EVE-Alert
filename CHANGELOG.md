@@ -1,5 +1,20 @@
 # Changelog
 
+## [4.1.0] 2026-07-12
+
+### Added
+- **OCR pilot-name detection (#98)** — optionally reads pilot names from a configured Local-chat screen region on each Enemy alarm (via Tesseract/pytesseract) and merges them into the existing KOS / ESI / zKillboard intel pipeline. Off by default and import-guarded: degrades to a no-op with a log message when the Tesseract engine is not installed. New settings under **Intel & ESI → OCR Name Detection** (enable toggle + capture region x1/y1/x2/y2). Requires installing the Tesseract OCR engine separately.
+
+### Fixed / Changed (post-4.0 hardening)
+- Settings save no longer wipes saved profiles / per-image thresholds / active profile (#99, #108); settings UI writes now round-trip.
+- Settings window rearchitected into a tabbed, scrollable layout with a persistent Save/Apply/Close footer and a declarative field registry (#107).
+- ESI name→ID resolution migrated to `POST /universe/ids/` (removed public `/search/` endpoints) — restores zKillboard/pilot-intel/adjacent/route/sov features (#110).
+- EVE SSO OAuth now works: PKCE, corp-structures scope, single-client structure fetch, JWT-based character identity, and per-login state validation (#104, #115, #105).
+- External-API integrations fixed against real response shapes: Eve-Scout v2, embedded ZKB attackers, kills+losses feeds, honest WH class, KOS corp/alliance checks, D-scan UTF-16/type-column parsing (#101).
+- Vision robustness: skips unreadable template images, correct debug window name, guarded error path (#111, #112, #113).
+- Duplicate enemy alarms deduped by quantized position (#100); asyncio monitors cancelled cleanly on stop (#102); settings hot-reload no longer mutates Tk from the alert thread (#114); web dashboard HTML renders (#109); credential/SSRF hardening (#105); robustness polish incl. rate limiting and bounded caches (#106).
+- Test suite expanded to 237 tests covering the v3.3–v4.1 modules (#103).
+
 ## [4.0.0] 2026-07-11
 
 ### Added

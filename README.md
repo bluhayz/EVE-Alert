@@ -67,6 +67,7 @@ A second, independent region (Faction Region) watches for faction spawn or other
 - **Web status dashboard** — optional localhost HTTP server with a live status page and JSON API (`/api/status`, `/api/log`)
 - **Plugin system** — drop `.py` files into the user plugins directory; hooks for `on_start`, `on_stop`, `on_enemy`, `on_faction`, `on_intel`
 - **EVE SSO login (v4.0)** — OAuth2 authorization-code flow; personal standings auto-classification of Local pilots, fleet membership display, and structure fuel-expiry warnings (requires registering your own EVE developer application client ID)
+- **OCR name detection (v4.1)** — optionally reads pilot names from a configured Local-chat screen region on each Enemy alarm and feeds them into the KOS / ESI / zKillboard pipeline. Off by default; requires the [Tesseract OCR engine](https://github.com/tesseract-ocr/tesseract) installed separately (`brew install tesseract` on macOS, or the UB-Mannheim installer on Windows). Configure the capture region in **Settings → Intel & ESI → OCR Name Detection**.
 - Platform-aware settings storage: `%APPDATA%\evealert` on Windows, `~/Library/Application Support/evealert` on macOS
 - Rotating log files (5 MB x 3 backups) with configurable log level
 - Support for multiple UI scaling variants of template images (e.g. `image_1_90%.png`, `image_1_100%.png`)

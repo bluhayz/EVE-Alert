@@ -130,6 +130,11 @@ DEFAULT_SETTINGS = {
         "fleet_monitor": False,  # display fleet membership on start
         "structure_alerts": False,  # warn on low-fuel structures
     },
+    # v4.1: OCR pilot-name detection on alarm (#98)
+    "ocr": {
+        "enabled": False,  # off by default; requires Tesseract installed
+        "region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},  # 0s = use alert region
+    },
 }
 
 
@@ -355,6 +360,51 @@ FIELDS: list = [
         "Warn on structure fuel < 7 days",
         "esi_structure_var",
         False,
+    ),
+    FieldSpec(
+        "ocr.enabled",
+        "bool",
+        "Intel & ESI",
+        "OCR Name Detection",
+        "Read pilot names from Local on alarm (needs Tesseract)",
+        "ocr_enabled_var",
+        False,
+    ),
+    FieldSpec(
+        "ocr.region.x1",
+        "int",
+        "Intel & ESI",
+        "OCR Name Detection",
+        "Region X1 (0 = use alert region)",
+        "ocr_x1_entry",
+        0,
+    ),
+    FieldSpec(
+        "ocr.region.y1",
+        "int",
+        "Intel & ESI",
+        "OCR Name Detection",
+        "Region Y1",
+        "ocr_y1_entry",
+        0,
+    ),
+    FieldSpec(
+        "ocr.region.x2",
+        "int",
+        "Intel & ESI",
+        "OCR Name Detection",
+        "Region X2",
+        "ocr_x2_entry",
+        0,
+    ),
+    FieldSpec(
+        "ocr.region.y2",
+        "int",
+        "Intel & ESI",
+        "OCR Name Detection",
+        "Region Y2",
+        "ocr_y2_entry",
+        0,
     ),
     # --- Notifications tab -----------------------------------------------
     FieldSpec(
@@ -1702,6 +1752,10 @@ class SettingMenu:
             intel, text="Logout", command=self._esi_logout, fg_color="gray"
         ).grid(row=r, column=3, padx=(0, 20), pady=2)
         r += 1
+
+        _hdr(intel, "OCR Name Detection", r)
+        r += 1
+        r = self._build_registry_section(intel, "Intel & ESI", "OCR Name Detection", r)
 
         # ==================================================================
         # Tab: Notifications

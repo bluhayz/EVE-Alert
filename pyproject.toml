@@ -54,13 +54,20 @@ dev = [
 windows = [
     "pygetwindow>=0.0.9",
 ]
+# OCR name detection (#98). NOTE: also requires the Tesseract engine binary
+# installed separately (e.g. `brew install tesseract` / the Windows installer).
+ocr = [
+    "pytesseract>=0.3.10",
+]
 # Install Windows build tools: pip install ".[build-windows]"
 build-windows = [
     "pyinstaller==6.11.0",
+    "pytesseract>=0.3.10",
 ]
 # Install macOS build tools: pip install ".[build-macos]"
 build-macos = [
     "pyinstaller==6.11.0",
+    "pytesseract>=0.3.10",
 ]
 # Install all extras (use on macOS only): pip install ".[dev,build-macos]"
 build = [
