@@ -46,7 +46,7 @@ h1 {{ color:#00d4ff; }}
 <h1>EVE Alert v{version} — Status</h1>
 <div class="card">
   <b>Detection:</b>
-  <span class="{'running' if running else 'stopped'}">{status}</span>
+  <span class="{status_class}">{status}</span>
   &nbsp;|&nbsp; <b>Uptime:</b> {uptime}
 </div>
 <div class="card">
@@ -160,7 +160,7 @@ class WebStatusServer:
 
         return _HTML.format(
             version=__version__,
-            running=running,
+            status_class="running" if running else "stopped",
             status=status_str,
             uptime=f"{h:02d}:{m:02d}:{s:02d}",
             session_alarms=self._stats.session_alarms,
