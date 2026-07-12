@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import tempfile
+from collections import namedtuple
 from typing import TYPE_CHECKING
 
 import customtkinter
@@ -130,6 +131,378 @@ DEFAULT_SETTINGS = {
         "structure_alerts": False,  # warn on low-fuel structures
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Declarative field registry (#107)
+#
+# Each FieldSpec drives BUILD (create widget in a tab section), APPLY
+# (settings dict -> widget) and SAVE (widget -> settings dict) for a simple
+# scalar setting, so adding a new toggle/entry touches exactly one place.
+# Nested/list/bespoke sections (regions, sliders, sounds, webhooks, threat
+# tiers, profiles, kos.custom_urls, fleet.tracked_character_ids, OAuth login)
+# stay hand-written in create_menu/apply_settings/save.
+# ---------------------------------------------------------------------------
+FieldSpec = namedtuple("FieldSpec", "path kind tab section label attr default")
+
+FIELDS: list = [
+    # --- Detection tab ---------------------------------------------------
+    FieldSpec(
+        "dscan.enabled",
+        "bool",
+        "Detection",
+        "D-Scan Monitor",
+        "Enable D-scan log monitoring",
+        "dscan_enabled_var",
+        False,
+    ),
+    FieldSpec(
+        "dscan.alert_red",
+        "bool",
+        "Detection",
+        "D-Scan Monitor",
+        "Alert on RED ships",
+        "dscan_red_var",
+        True,
+    ),
+    FieldSpec(
+        "dscan.alert_orange",
+        "bool",
+        "Detection",
+        "D-Scan Monitor",
+        "Alert on ORANGE ships",
+        "dscan_orange_var",
+        False,
+    ),
+    FieldSpec(
+        "dscan.alert_probes",
+        "bool",
+        "Detection",
+        "D-Scan Monitor",
+        "Alert on probes detected",
+        "dscan_probes_var",
+        True,
+    ),
+    # --- Alerts & Sound tab ----------------------------------------------
+    FieldSpec(
+        "notifications.auto_screenshot",
+        "bool",
+        "Alerts & Sound",
+        "Alarm Options",
+        "Auto-screenshot on alarm",
+        "auto_screenshot_var",
+        False,
+    ),
+    FieldSpec(
+        "notifications.escalation_threshold",
+        "int",
+        "Alerts & Sound",
+        "Alarm Options",
+        "Escalate at N hostiles (0 = off)",
+        "escalation_threshold_entry",
+        0,
+    ),
+    # --- Intel & ESI tab -------------------------------------------------
+    FieldSpec(
+        "intelligence.zkillboard_enabled",
+        "bool",
+        "Intel & ESI",
+        "Intelligence",
+        "Enable Zkillboard lookup on alarm",
+        "zkillboard_var",
+        False,
+    ),
+    FieldSpec(
+        "intelligence.intel_log_enabled",
+        "bool",
+        "Intel & ESI",
+        "Intelligence",
+        "Watch EVE intel chat log",
+        "intel_log_var",
+        False,
+    ),
+    FieldSpec(
+        "intelligence.intel_log_channel",
+        "str",
+        "Intel & ESI",
+        "Intelligence",
+        "Intel Channel",
+        "intel_channel_entry",
+        "",
+    ),
+    FieldSpec(
+        "esi.enabled",
+        "bool",
+        "Intel & ESI",
+        "ESI Augmentation",
+        "Show corp/alliance on Enemy alarm",
+        "esi_enabled_var",
+        False,
+    ),
+    FieldSpec(
+        "esi.show_corp",
+        "bool",
+        "Intel & ESI",
+        "ESI Augmentation",
+        "Show corporation",
+        "esi_corp_var",
+        True,
+    ),
+    FieldSpec(
+        "esi.show_alliance",
+        "bool",
+        "Intel & ESI",
+        "ESI Augmentation",
+        "Show alliance",
+        "esi_alliance_var",
+        True,
+    ),
+    FieldSpec(
+        "esi.alert_flashy",
+        "bool",
+        "Intel & ESI",
+        "ESI Augmentation",
+        "Alert on flashy pilots (sec status \u2264 -5)",
+        "esi_flashy_var",
+        False,
+    ),
+    FieldSpec(
+        "kos.cva_enabled",
+        "bool",
+        "Intel & ESI",
+        "KOS Checker",
+        "Enable CVA KOS API",
+        "kos_cva_var",
+        True,
+    ),
+    FieldSpec(
+        "adjacent.enabled",
+        "bool",
+        "Intel & ESI",
+        "Adjacent System Monitor",
+        "Monitor kills in neighboring systems",
+        "adjacent_enabled_var",
+        False,
+    ),
+    FieldSpec(
+        "adjacent.max_jumps",
+        "int",
+        "Intel & ESI",
+        "Adjacent System Monitor",
+        "Max jumps",
+        "adjacent_max_jumps_entry",
+        3,
+    ),
+    FieldSpec(
+        "adjacent.min_kills",
+        "int",
+        "Intel & ESI",
+        "Adjacent System Monitor",
+        "Min kills",
+        "adjacent_min_kills_entry",
+        1,
+    ),
+    FieldSpec(
+        "adjacent.poll_interval",
+        "int",
+        "Intel & ESI",
+        "Adjacent System Monitor",
+        "Poll interval (s)",
+        "adjacent_poll_entry",
+        120,
+    ),
+    FieldSpec(
+        "adjacent.destination_system",
+        "str",
+        "Intel & ESI",
+        "Adjacent System Monitor",
+        "Destination",
+        "adjacent_dest_entry",
+        "",
+    ),
+    FieldSpec(
+        "esi_oauth.client_id",
+        "str",
+        "Intel & ESI",
+        "EVE SSO / ESI OAuth",
+        "Client ID",
+        "esi_client_id_entry",
+        "",
+    ),
+    FieldSpec(
+        "esi_oauth.standings_auto_classify",
+        "bool",
+        "Intel & ESI",
+        "EVE SSO / ESI OAuth",
+        "Auto-classify standing contacts in Local",
+        "esi_standings_var",
+        False,
+    ),
+    FieldSpec(
+        "esi_oauth.fleet_monitor",
+        "bool",
+        "Intel & ESI",
+        "EVE SSO / ESI OAuth",
+        "Display fleet membership on start",
+        "esi_fleet_var",
+        False,
+    ),
+    FieldSpec(
+        "esi_oauth.structure_alerts",
+        "bool",
+        "Intel & ESI",
+        "EVE SSO / ESI OAuth",
+        "Warn on structure fuel < 7 days",
+        "esi_structure_var",
+        False,
+    ),
+    # --- Notifications tab -----------------------------------------------
+    FieldSpec(
+        "push.telegram_token",
+        "str",
+        "Notifications",
+        "Push Notifications",
+        "Telegram Token",
+        "telegram_token_entry",
+        "",
+    ),
+    FieldSpec(
+        "push.telegram_chat_id",
+        "str",
+        "Notifications",
+        "Push Notifications",
+        "Telegram Chat ID",
+        "telegram_chat_entry",
+        "",
+    ),
+    FieldSpec(
+        "push.pushover_user",
+        "str",
+        "Notifications",
+        "Push Notifications",
+        "Pushover User",
+        "pushover_user_entry",
+        "",
+    ),
+    FieldSpec(
+        "push.pushover_token",
+        "str",
+        "Notifications",
+        "Push Notifications",
+        "Pushover Token",
+        "pushover_token_entry",
+        "",
+    ),
+    FieldSpec(
+        "push.ntfy_url",
+        "str",
+        "Notifications",
+        "Push Notifications",
+        "ntfy.sh URL",
+        "ntfy_url_entry",
+        "",
+    ),
+    FieldSpec(
+        "web_ui.enabled",
+        "bool",
+        "Notifications",
+        "Web Status UI",
+        "Enable web status server (localhost)",
+        "web_ui_var",
+        False,
+    ),
+    FieldSpec(
+        "web_ui.port",
+        "int",
+        "Notifications",
+        "Web Status UI",
+        "Port",
+        "web_ui_port_entry",
+        8765,
+    ),
+    # --- Wormhole & Fleet tab --------------------------------------------
+    FieldSpec(
+        "wormhole.thera_enabled",
+        "bool",
+        "Wormhole & Fleet",
+        "Wormhole Awareness",
+        "Monitor Thera connections (Eve-Scout)",
+        "thera_enabled_var",
+        False,
+    ),
+    FieldSpec(
+        "wormhole.thera_max_jumps",
+        "int",
+        "Wormhole & Fleet",
+        "Wormhole Awareness",
+        "Thera max jumps",
+        "thera_max_jumps_entry",
+        5,
+    ),
+    FieldSpec(
+        "wormhole.wh_drop_enabled",
+        "bool",
+        "Wormhole & Fleet",
+        "Wormhole Awareness",
+        "Alert on WH drop pattern",
+        "wh_drop_enabled_var",
+        False,
+    ),
+    FieldSpec(
+        "wormhole.wh_drop_threshold",
+        "int",
+        "Wormhole & Fleet",
+        "Wormhole Awareness",
+        "Drop threshold (pilots)",
+        "wh_drop_threshold_entry",
+        3,
+    ),
+    FieldSpec(
+        "fleet.composition_enabled",
+        "bool",
+        "Wormhole & Fleet",
+        "Fleet Context",
+        "Analyse fleet composition (3+ hostiles)",
+        "fleet_composition_var",
+        False,
+    ),
+    FieldSpec(
+        "fleet.killmail_enabled",
+        "bool",
+        "Wormhole & Fleet",
+        "Fleet Context",
+        "Notify on tracked character kills/losses",
+        "fleet_killmail_var",
+        False,
+    ),
+]
+
+# Tab display order for the CTkTabview.
+TAB_ORDER = [
+    "Detection",
+    "Alerts & Sound",
+    "Intel & ESI",
+    "Notifications",
+    "Wormhole & Fleet",
+]
+
+
+def _set_by_path(settings: dict, path: str, value) -> None:
+    """Set a dotted-path leaf, creating intermediate dicts as needed."""
+    parts = path.split(".")
+    node = settings
+    for part in parts[:-1]:
+        node = node.setdefault(part, {})
+    node[parts[-1]] = value
+
+
+def _get_by_path(settings: dict, path: str, default=None):
+    node = settings
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
 
 
 class SettingMenu:
@@ -370,103 +743,23 @@ class SettingMenu:
             self._faction_sound_path = sounds.get("faction", "")
             self._update_sound_labels()
 
-            # Intelligence
-            intel = settings.get("intelligence", {})
-            self.zkillboard_var.set(bool(intel.get("zkillboard_enabled", False)))
-            self.intel_log_var.set(bool(intel.get("intel_log_enabled", False)))
-            self.intel_channel_entry.delete(0, customtkinter.END)
-            self.intel_channel_entry.insert(0, intel.get("intel_log_channel", ""))
-
-            # ESI
-            esi = settings.get("esi", {})
-            self.esi_enabled_var.set(bool(esi.get("enabled", False)))
-            self.esi_corp_var.set(bool(esi.get("show_corp", True)))
-            self.esi_alliance_var.set(bool(esi.get("show_alliance", True)))
-            self.esi_flashy_var.set(bool(esi.get("alert_flashy", False)))
-
-            # Threat tiers
+            # Threat tiers (bespoke — dict of name -> tier)
             tiers = settings.get("threat_tiers", {})
             self._threat_tiers_data = dict(tiers)
             self._refresh_threat_tiers_list()
 
-            # Web UI
-            web = settings.get("web_ui", {})
-            self.web_ui_var.set(bool(web.get("enabled", False)))
-            self.web_ui_port_entry.delete(0, customtkinter.END)
-            self.web_ui_port_entry.insert(0, str(web.get("port", 8765)))
+            # Registry-driven scalar fields (intelligence/esi/dscan/kos.cva/
+            # push/notifications/wormhole/fleet/web_ui/adjacent/esi_oauth)
+            self._apply_registry_fields(settings)
 
-            # Adjacent system monitor
-            adj = settings.get("adjacent", {})
-            self.adjacent_enabled_var.set(bool(adj.get("enabled", False)))
-            self.adjacent_max_jumps_entry.delete(0, customtkinter.END)
-            self.adjacent_max_jumps_entry.insert(0, str(adj.get("max_jumps", 3)))
-            self.adjacent_poll_entry.delete(0, customtkinter.END)
-            self.adjacent_poll_entry.insert(0, str(adj.get("poll_interval", 120)))
-            self.adjacent_min_kills_entry.delete(0, customtkinter.END)
-            self.adjacent_min_kills_entry.insert(0, str(adj.get("min_kills", 1)))
-            self.adjacent_dest_entry.delete(0, customtkinter.END)
-            self.adjacent_dest_entry.insert(0, adj.get("destination_system", ""))
-
-            # D-scan monitor
-            ds = settings.get("dscan", {})
-            self.dscan_enabled_var.set(bool(ds.get("enabled", False)))
-            self.dscan_red_var.set(bool(ds.get("alert_red", True)))
-            self.dscan_orange_var.set(bool(ds.get("alert_orange", False)))
-            self.dscan_probes_var.set(bool(ds.get("alert_probes", True)))
-
-            # KOS settings
+            # List-valued fields (bespoke)
             kos = settings.get("kos", {})
-            self.kos_cva_var.set(bool(kos.get("cva_enabled", True)))
             self.kos_custom_entry.delete(0, customtkinter.END)
             self.kos_custom_entry.insert(0, ", ".join(kos.get("custom_urls", [])))
-
-            # Push notifications
-            push = settings.get("push", {})
-            self.telegram_token_entry.delete(0, customtkinter.END)
-            self.telegram_token_entry.insert(0, push.get("telegram_token", ""))
-            self.telegram_chat_entry.delete(0, customtkinter.END)
-            self.telegram_chat_entry.insert(0, push.get("telegram_chat_id", ""))
-            self.pushover_user_entry.delete(0, customtkinter.END)
-            self.pushover_user_entry.insert(0, push.get("pushover_user", ""))
-            self.pushover_token_entry.delete(0, customtkinter.END)
-            self.pushover_token_entry.insert(0, push.get("pushover_token", ""))
-            self.ntfy_url_entry.delete(0, customtkinter.END)
-            self.ntfy_url_entry.insert(0, push.get("ntfy_url", ""))
-
-            # Notification options
-            notif = settings.get("notifications", {})
-            self.auto_screenshot_var.set(bool(notif.get("auto_screenshot", False)))
-            self.escalation_threshold_entry.delete(0, customtkinter.END)
-            self.escalation_threshold_entry.insert(
-                0, str(notif.get("escalation_threshold", 0))
-            )
-
-            # Wormhole settings
-            wh = settings.get("wormhole", {})
-            self.thera_enabled_var.set(bool(wh.get("thera_enabled", False)))
-            self.thera_max_jumps_entry.delete(0, customtkinter.END)
-            self.thera_max_jumps_entry.insert(0, str(wh.get("thera_max_jumps", 5)))
-            self.wh_drop_enabled_var.set(bool(wh.get("wh_drop_enabled", False)))
-            self.wh_drop_threshold_entry.delete(0, customtkinter.END)
-            self.wh_drop_threshold_entry.insert(0, str(wh.get("wh_drop_threshold", 3)))
-
-            # Fleet context settings
             fleet = settings.get("fleet", {})
-            self.fleet_composition_var.set(
-                bool(fleet.get("composition_enabled", False))
-            )
-            self.fleet_killmail_var.set(bool(fleet.get("killmail_enabled", False)))
             self.fleet_char_ids_entry.delete(0, customtkinter.END)
             char_ids = fleet.get("tracked_character_ids", [])
             self.fleet_char_ids_entry.insert(0, ", ".join(str(c) for c in char_ids))
-
-            # ESI OAuth settings
-            esi = settings.get("esi_oauth", {})
-            self.esi_client_id_entry.delete(0, customtkinter.END)
-            self.esi_client_id_entry.insert(0, esi.get("client_id", ""))
-            self.esi_standings_var.set(bool(esi.get("standings_auto_classify", False)))
-            self.esi_fleet_var.set(bool(esi.get("fleet_monitor", False)))
-            self.esi_structure_var.set(bool(esi.get("structure_alerts", False)))
 
         except KeyError as e:
             logger.exception(e)
@@ -574,14 +867,6 @@ class SettingMenu:
                         "alarm": getattr(self, "_alarm_sound_path", ""),
                         "faction": getattr(self, "_faction_sound_path", ""),
                     },
-                    "intelligence": {
-                        "zkillboard_enabled": self.zkillboard_var.get(),
-                        "zkillboard_cooldown": DEFAULT_SETTINGS["intelligence"][
-                            "zkillboard_cooldown"
-                        ],
-                        "intel_log_enabled": self.intel_log_var.get(),
-                        "intel_log_channel": self.intel_channel_entry.get().strip(),
-                    },
                     "webhooks": {
                         "enemy": {
                             "url": self.enemy_webhook_entry.get().strip(),
@@ -592,87 +877,22 @@ class SettingMenu:
                             "min_count": int(self.faction_webhook_mincount.get() or 0),
                         },
                     },
-                    "esi": {
-                        "enabled": self.esi_enabled_var.get(),
-                        "show_corp": self.esi_corp_var.get(),
-                        "show_alliance": self.esi_alliance_var.get(),
-                        "alert_flashy": self.esi_flashy_var.get(),
-                    },
                     "threat_tiers": dict(getattr(self, "_threat_tiers_data", {})),
-                    "plugins": {
-                        "enabled": True,  # always on; no UI toggle needed
-                    },
-                    "web_ui": {
-                        "enabled": self.web_ui_var.get(),
-                        "port": int(self.web_ui_port_entry.get().strip() or 8765),
-                    },
-                    "adjacent": {
-                        "enabled": self.adjacent_enabled_var.get(),
-                        "max_jumps": int(
-                            self.adjacent_max_jumps_entry.get().strip() or 3
-                        ),
-                        "poll_interval": int(
-                            self.adjacent_poll_entry.get().strip() or 120
-                        ),
-                        "min_kills": int(
-                            self.adjacent_min_kills_entry.get().strip() or 1
-                        ),
-                        "destination_system": self.adjacent_dest_entry.get().strip(),
-                    },
-                    "dscan": {
-                        "enabled": self.dscan_enabled_var.get(),
-                        "alert_red": self.dscan_red_var.get(),
-                        "alert_orange": self.dscan_orange_var.get(),
-                        "alert_probes": self.dscan_probes_var.get(),
-                    },
-                    "kos": {
-                        "cva_enabled": self.kos_cva_var.get(),
-                        "custom_urls": [
-                            u.strip()
-                            for u in self.kos_custom_entry.get().split(",")
-                            if u.strip()
-                        ],
-                    },
-                    "push": {
-                        "telegram_token": self.telegram_token_entry.get().strip(),
-                        "telegram_chat_id": self.telegram_chat_entry.get().strip(),
-                        "pushover_user": self.pushover_user_entry.get().strip(),
-                        "pushover_token": self.pushover_token_entry.get().strip(),
-                        "ntfy_url": self.ntfy_url_entry.get().strip(),
-                    },
-                    "notifications": {
-                        "auto_screenshot": self.auto_screenshot_var.get(),
-                        "escalation_threshold": int(
-                            self.escalation_threshold_entry.get().strip() or 0
-                        ),
-                    },
-                    "wormhole": {
-                        "thera_enabled": self.thera_enabled_var.get(),
-                        "thera_max_jumps": int(
-                            self.thera_max_jumps_entry.get().strip() or 5
-                        ),
-                        "wh_drop_enabled": self.wh_drop_enabled_var.get(),
-                        "wh_drop_threshold": int(
-                            self.wh_drop_threshold_entry.get().strip() or 3
-                        ),
-                    },
-                    "fleet": {
-                        "composition_enabled": self.fleet_composition_var.get(),
-                        "killmail_enabled": self.fleet_killmail_var.get(),
-                        "tracked_character_ids": [
-                            int(c.strip())
-                            for c in self.fleet_char_ids_entry.get().split(",")
-                            if c.strip().isdigit()
-                        ],
-                    },
-                    "esi_oauth": {
-                        "client_id": self.esi_client_id_entry.get().strip(),
-                        "standings_auto_classify": self.esi_standings_var.get(),
-                        "fleet_monitor": self.esi_fleet_var.get(),
-                        "structure_alerts": self.esi_structure_var.get(),
-                    },
                 }
             )
+            # Registry-driven scalar fields (intelligence/esi/dscan/kos.cva/
+            # push/notifications/wormhole/fleet/web_ui/adjacent/esi_oauth).
+            self._save_registry_fields(settings)
+            # List-valued fields (bespoke)
+            settings.setdefault("kos", {})["custom_urls"] = [
+                u.strip() for u in self.kos_custom_entry.get().split(",") if u.strip()
+            ]
+            settings.setdefault("fleet", {})["tracked_character_ids"] = [
+                int(c.strip())
+                for c in self.fleet_char_ids_entry.get().split(",")
+                if c.strip().isdigit()
+            ]
+
             self.save_settings(settings)
             self.main.write_message("Settings: Saved to disk.", "green")
         except ValueError as e:
@@ -1061,90 +1281,169 @@ class SettingMenu:
             if self._window_created:
                 self.setting_window.withdraw()
 
+    # ------------------------------------------------------------------
+    # Registry-driven scalar fields (#107)
+    # ------------------------------------------------------------------
+
+    def _build_registry_section(
+        self, parent, tab: str, section: str, start_row: int
+    ) -> int:
+        """Build all FIELDS matching (tab, section) onto *parent* starting at
+        *start_row*. Returns the next free row. Widgets are stored under their
+        FieldSpec.attr so apply/save keep working by attribute name."""
+        specs = [f for f in FIELDS if f.tab == tab and f.section == section]
+        row = start_row
+        for spec in specs:
+            if spec.kind == "bool":
+                var = customtkinter.BooleanVar(value=bool(spec.default))
+                setattr(self, spec.attr, var)
+                customtkinter.CTkCheckBox(parent, text=spec.label, variable=var).grid(
+                    row=row, column=0, columnspan=3, padx=(20, 4), sticky="w", pady=3
+                )
+            else:  # int / str -> label + entry
+                customtkinter.CTkLabel(
+                    parent, text=f"{spec.label}:", justify="left"
+                ).grid(row=row, column=0, padx=(20, 4), sticky="e")
+                entry = customtkinter.CTkEntry(parent, width=260)
+                setattr(self, spec.attr, entry)
+                entry.grid(row=row, column=1, columnspan=2, sticky="w", pady=2)
+            row += 1
+        return row
+
+    def _apply_registry_fields(self, settings: dict) -> None:
+        """Populate registry-backed widgets from *settings* (settings -> widget)."""
+        for spec in FIELDS:
+            widget = getattr(self, spec.attr, None)
+            if widget is None:
+                continue
+            value = _get_by_path(settings, spec.path, spec.default)
+            if spec.kind == "bool":
+                widget.set(bool(value))
+            else:
+                widget.delete(0, customtkinter.END)
+                widget.insert(0, str(value))
+
+    def _save_registry_fields(self, settings: dict) -> None:
+        """Write registry-backed widget values into *settings* (widget -> settings)."""
+        for spec in FIELDS:
+            widget = getattr(self, spec.attr, None)
+            if widget is None:
+                continue
+            if spec.kind == "bool":
+                value = bool(widget.get())
+            elif spec.kind == "int":
+                raw = str(widget.get()).strip()
+                value = int(raw) if raw.lstrip("-").isdigit() else int(spec.default)
+            else:  # str
+                value = str(widget.get()).strip()
+            _set_by_path(settings, spec.path, value)
+
     def create_menu(self):
-        """Load the settings from the settings file."""
+        """Build the settings window: profile header, tabbed scrollable body,
+        and a persistent Save/Apply/Close footer (#107)."""
 
-        # Use a separate frame for the menu
-        self.menu_frame = customtkinter.CTkFrame(self.setting_window)
-        self.menu_frame.pack(side="left", padx=20, pady=20)
+        win = self.setting_window
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(1, weight=1)  # tabview row expands
 
-        # Row -1: Detection Profiles
-        profile_label = customtkinter.CTkLabel(self.menu_frame, text="Profile:")
+        def _hdr(parent, text, row):
+            customtkinter.CTkLabel(
+                parent, text=text, font=customtkinter.CTkFont(weight="bold")
+            ).grid(row=row, column=0, columnspan=4, pady=(10, 0), sticky="w", padx=20)
+
+        # ── Header: profile bar ──────────────────────────────────────────
+        header = customtkinter.CTkFrame(win)
+        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
+
+        customtkinter.CTkLabel(header, text="Profile:").grid(
+            row=0, column=0, padx=(10, 4), sticky="e"
+        )
         self.profile_var = customtkinter.StringVar(value="Default")
         self.profile_dropdown = customtkinter.CTkOptionMenu(
-            self.menu_frame,
-            variable=self.profile_var,
-            values=["Default"],
-            width=150,
+            header, variable=self.profile_var, values=["Default"], width=150
         )
-        save_profile_btn = customtkinter.CTkButton(
-            self.menu_frame, text="Save", width=60, command=self._save_profile
-        )
-        new_profile_btn = customtkinter.CTkButton(
-            self.menu_frame, text="New...", width=60, command=self._new_profile
-        )
-        load_profile_btn = customtkinter.CTkButton(
-            self.menu_frame, text="Load", width=60, command=self._load_profile
-        )
-        delete_profile_btn = customtkinter.CTkButton(
-            self.menu_frame, text="Delete", width=60, command=self._delete_profile
-        )
-        profile_label.grid(row=0, column=0, padx=(20, 4), sticky="e")
         self.profile_dropdown.grid(row=0, column=1, padx=(0, 4))
-        save_profile_btn.grid(row=0, column=2, padx=2)
-        new_profile_btn.grid(row=0, column=3, padx=2)
-        load_profile_btn.grid(row=0, column=4, padx=2)
-        delete_profile_btn.grid(row=0, column=5, padx=2)
+        customtkinter.CTkButton(
+            header, text="Save", width=60, command=self._save_profile
+        ).grid(row=0, column=2, padx=2)
+        customtkinter.CTkButton(
+            header, text="New...", width=60, command=self._new_profile
+        ).grid(row=0, column=3, padx=2)
+        customtkinter.CTkButton(
+            header, text="Load", width=60, command=self._load_profile
+        ).grid(row=0, column=4, padx=2)
+        customtkinter.CTkButton(
+            header, text="Delete", width=60, command=self._delete_profile
+        ).grid(row=0, column=5, padx=2)
 
-        separator = customtkinter.CTkFrame(self.menu_frame, height=2, fg_color="gray40")
-        separator.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(4, 8), padx=10)
+        # Hidden holder for log_level (no visible widget, round-trips via save)
+        self.logging = customtkinter.CTkEntry(win)
 
-        self.logging = customtkinter.CTkEntry(self.menu_frame)
+        # ── Tabview with a scrollable frame per tab ──────────────────────
+        self.tabview = customtkinter.CTkTabview(win, width=680, height=560)
+        self.tabview.grid(row=1, column=0, sticky="nsew", padx=10, pady=0)
+        self._tab_frames = {}
+        for name in TAB_ORDER:
+            self.tabview.add(name)
+            frame = customtkinter.CTkScrollableFrame(self.tabview.tab(name))
+            frame.pack(fill="both", expand=True)
+            self._tab_frames[name] = frame
 
-        # 1 Row - Init
-        self.label_x_axis = customtkinter.CTkLabel(self.menu_frame, text="X-Axis")
-        self.label_y_axis = customtkinter.CTkLabel(self.menu_frame, text="Y-Axis")
-
-        # 2 Row - Init
-        # Alert Region Position 1
+        # ==================================================================
+        # Tab: Detection
+        # ==================================================================
+        det = self._tab_frames["Detection"]
+        r = 0
+        _hdr(det, "Detection Regions", r)
+        r += 1
+        self.label_x_axis = customtkinter.CTkLabel(det, text="X-Axis")
+        self.label_y_axis = customtkinter.CTkLabel(det, text="Y-Axis")
+        self.label_x_axis.grid(row=r, column=1)
+        self.label_y_axis.grid(row=r, column=2)
+        r += 1
         self.alert_region_label_1 = customtkinter.CTkLabel(
-            self.menu_frame, text="Alert Region Left Upper Corner:", justify="left"
+            det, text="Alert Region Left Upper Corner:", justify="left"
         )
-        self.alert_region_x_first = customtkinter.CTkEntry(self.menu_frame)
-        self.alert_region_y_first = customtkinter.CTkEntry(self.menu_frame)
-
-        # 3 Row - Init
-        # Alert Region Position 2
+        self.alert_region_x_first = customtkinter.CTkEntry(det)
+        self.alert_region_y_first = customtkinter.CTkEntry(det)
+        self.alert_region_label_1.grid(row=r, column=0, padx=20, sticky="e")
+        self.alert_region_x_first.grid(row=r, column=1)
+        self.alert_region_y_first.grid(row=r, column=2)
+        r += 1
         self.alert_region_label_2 = customtkinter.CTkLabel(
-            self.menu_frame, text="Alert Region Right Lower Corner:", justify="left"
+            det, text="Alert Region Right Lower Corner:", justify="left"
         )
-        self.alert_region_x_second = customtkinter.CTkEntry(self.menu_frame)
-        self.alert_region_y_second = customtkinter.CTkEntry(self.menu_frame)
-
-        # 4 Row - Init
-        # Alert Region Position 1
+        self.alert_region_x_second = customtkinter.CTkEntry(det)
+        self.alert_region_y_second = customtkinter.CTkEntry(det)
+        self.alert_region_label_2.grid(row=r, column=0, padx=20, sticky="e")
+        self.alert_region_x_second.grid(row=r, column=1)
+        self.alert_region_y_second.grid(row=r, column=2)
+        r += 1
         self.faction_region_label_1 = customtkinter.CTkLabel(
-            self.menu_frame, text="Faction Region Left Upper Corner:", justify="left"
+            det, text="Faction Region Left Upper Corner:", justify="left"
         )
-        self.faction_region_x_first = customtkinter.CTkEntry(self.menu_frame)
-        self.faction_region_y_first = customtkinter.CTkEntry(self.menu_frame)
-
-        # 5 Row - Init
-        # Alert Region Position 2
+        self.faction_region_x_first = customtkinter.CTkEntry(det)
+        self.faction_region_y_first = customtkinter.CTkEntry(det)
+        self.faction_region_label_1.grid(row=r, column=0, padx=20, sticky="e")
+        self.faction_region_x_first.grid(row=r, column=1)
+        self.faction_region_y_first.grid(row=r, column=2)
+        r += 1
         self.faction_region_label_2 = customtkinter.CTkLabel(
-            self.menu_frame, text="Faction Region Right Lower Corner:", justify="left"
+            det, text="Faction Region Right Lower Corner:", justify="left"
         )
-        self.faction_region_x_second = customtkinter.CTkEntry(self.menu_frame)
-        self.faction_region_y_second = customtkinter.CTkEntry(self.menu_frame)
+        self.faction_region_x_second = customtkinter.CTkEntry(det)
+        self.faction_region_y_second = customtkinter.CTkEntry(det)
+        self.faction_region_label_2.grid(row=r, column=0, padx=20, sticky="e")
+        self.faction_region_x_second.grid(row=r, column=1)
+        self.faction_region_y_second.grid(row=r, column=2)
+        r += 1
 
-        # Row 6 - Init
-        # Slider
-        self.slider_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Detection Threshold"
-        )
+        _hdr(det, "Detection Thresholds", r)
+        r += 1
+        self.slider_label = customtkinter.CTkLabel(det, text="Detection Threshold")
         self.detectionscale = customtkinter.DoubleVar()
         self.slider = customtkinter.CTkSlider(
-            self.menu_frame,
+            det,
             from_=1,
             to=100,
             orientation="horizontal",
@@ -1152,15 +1451,23 @@ class SettingMenu:
             variable=self.detectionscale,
             command=self.slider_event,
         )
-
-        # Row 7 - Init
-        # Slider
+        self.empty_label_1 = customtkinter.CTkLabel(det, text=self.slider.get())
+        self.slider_label.grid(row=r, column=0)
+        self.slider.grid(row=r, column=1)
+        self.empty_label_1.grid(row=r, column=2)
+        customtkinter.CTkButton(
+            det,
+            text="Per-Image Thresholds...",
+            width=180,
+            command=self._open_threshold_editor,
+        ).grid(row=r, column=3, padx=(8, 0))
+        r += 1
         self.faction_slider_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Faction Detection Threshold"
+            det, text="Faction Detection Threshold"
         )
         self.faction_scale = customtkinter.DoubleVar()
         self.slider2 = customtkinter.CTkSlider(
-            self.menu_frame,
+            det,
             from_=1,
             to=100,
             orientation="horizontal",
@@ -1168,366 +1475,59 @@ class SettingMenu:
             variable=self.faction_scale,
             command=self.factionslider_event,
         )
+        self.empty_label_2 = customtkinter.CTkLabel(det, text=self.slider2.get())
+        self.faction_slider_label.grid(row=r, column=0)
+        self.slider2.grid(row=r, column=1)
+        self.empty_label_2.grid(row=r, column=2)
+        r += 1
 
-        # Row 8 - Init
-        # Volume Slider
-        self.volume_slider_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Volume"
-        )
-        self.volume_scale = customtkinter.DoubleVar()
-        self.volume_slider = customtkinter.CTkSlider(
-            self.menu_frame,
-            from_=0,
-            to=100,
-            orientation="horizontal",
-            number_of_steps=100,
-            variable=self.volume_scale,
-            command=self.volumeslider_event,
-        )
-
+        _hdr(det, "Cooldown Timers", r)
+        r += 1
         self.cooldown_timer_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Cooldown Timer:", justify="left"
+            det, text="Cooldown Timer:", justify="left"
         )
-        self.cooldown_timer = customtkinter.CTkEntry(self.menu_frame)
+        self.cooldown_timer = customtkinter.CTkEntry(det)
         self.cooldown_timer_text = customtkinter.CTkLabel(
-            self.menu_frame, text="Seconds", justify="left"
+            det, text="Seconds", justify="left"
         )
-
-        # Per-type cooldown entries
+        self.cooldown_timer_label.grid(row=r, column=0, padx=20, sticky="e")
+        self.cooldown_timer.grid(row=r, column=1)
+        self.cooldown_timer_text.grid(row=r, column=2)
+        r += 1
         self.cooldown_enemy_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Enemy Cooldown:", justify="left"
+            det, text="Enemy Cooldown:", justify="left"
         )
-        self.cooldown_timer_enemy = customtkinter.CTkEntry(self.menu_frame, width=70)
+        self.cooldown_timer_enemy = customtkinter.CTkEntry(det, width=70)
+        self.cooldown_enemy_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.cooldown_timer_enemy.grid(row=r, column=1, sticky="w", padx=(0, 4))
+        r += 1
         self.cooldown_faction_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Faction Cooldown:", justify="left"
+            det, text="Faction Cooldown:", justify="left"
         )
-        self.cooldown_timer_faction_entry = customtkinter.CTkEntry(
-            self.menu_frame, width=70
+        self.cooldown_timer_faction_entry = customtkinter.CTkEntry(det, width=70)
+        self.cooldown_faction_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.cooldown_timer_faction_entry.grid(row=r, column=1, sticky="w", padx=(0, 4))
+        r += 1
+
+        _hdr(det, "Threat Tiers", r)
+        r += 1
+        customtkinter.CTkLabel(det, text="Name/Corp/Alliance:", justify="left").grid(
+            row=r, column=0, padx=(20, 4), sticky="e"
         )
-
-        self.save_button = customtkinter.CTkButton(
-            self.menu_frame, text="Save", command=self.save
-        )
-
-        self.apply_button = customtkinter.CTkButton(
-            self.menu_frame, text="Apply", command=self.apply_settings_runtime
-        )
-
-        self.close_button = customtkinter.CTkButton(
-            self.menu_frame, text="Close", command=self.clean_up
-        )
-
-        self.empty_label_1 = customtkinter.CTkLabel(
-            self.menu_frame, text=self.slider.get()
-        )
-
-        self.empty_label_2 = customtkinter.CTkLabel(
-            self.menu_frame, text=self.slider2.get()
-        )
-
-        self.empty_label_3 = customtkinter.CTkLabel(
-            self.menu_frame, text=f"{int(self.volume_slider.get())}%"
-        )
-
-        self.webhook_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Webhook (all):", justify="left"
-        )
-        self.webhook = customtkinter.CTkEntry(self.menu_frame)
-
-        # Webhook message template
-        self.webhook_template_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Msg Template:", justify="left"
-        )
-        self.webhook_template_entry = customtkinter.CTkEntry(self.menu_frame, width=340)
-
-        # Per-type webhook targets
-        self.enemy_webhook_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Enemy Webhook:", justify="left"
-        )
-        self.enemy_webhook_entry = customtkinter.CTkEntry(self.menu_frame, width=260)
-        self.enemy_mincount_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Min#:", justify="left"
-        )
-        self.enemy_webhook_mincount = customtkinter.CTkEntry(self.menu_frame, width=40)
-        self.faction_webhook_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Faction Webhook:", justify="left"
-        )
-        self.faction_webhook_entry = customtkinter.CTkEntry(self.menu_frame, width=260)
-        self.faction_mincount_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Min#:", justify="left"
-        )
-        self.faction_webhook_mincount = customtkinter.CTkEntry(
-            self.menu_frame, width=40
-        )
-        self.system_name_label = customtkinter.CTkLabel(
-            self.menu_frame, text="System Name:", justify="left"
-        )
-        self.system_name = customtkinter.CTkEntry(self.menu_frame)
-
-        self.play_alarm_checkbox = customtkinter.CTkCheckBox(
-            self.menu_frame, text="Mute Alarm", variable=self.play_alarm
-        )
-
-        self.test_alarm_button = customtkinter.CTkButton(
-            self.menu_frame, text="Test Alarm Sound", command=self.test_alarm_sound
-        )
-
-        self.test_faction_button = customtkinter.CTkButton(
-            self.menu_frame, text="Test Faction Sound", command=self.test_faction_sound
-        )
-
-        # Init Visuals
-
-        self.label_x_axis.grid(row=2, column=1)
-        self.label_y_axis.grid(row=2, column=2)
-
-        # Alert Region 1 Visual
-        self.alert_region_label_1.grid(row=3, column=0, padx=20)
-        self.alert_region_x_first.grid(row=3, column=1)
-        self.alert_region_y_first.grid(row=3, column=2)
-
-        # Alert Region 2 Visual
-        self.alert_region_label_2.grid(row=4, column=0, padx=20)
-        self.alert_region_x_second.grid(row=4, column=1, padx=20)
-        self.alert_region_y_second.grid(row=4, column=2, padx=20)
-
-        # Faction Region 1 Visual
-        self.faction_region_label_1.grid(row=5, column=0, padx=20)
-        self.faction_region_x_first.grid(row=5, column=1, padx=20)
-        self.faction_region_y_first.grid(row=5, column=2, padx=20)
-
-        # Faction Region 2 Visual
-        self.faction_region_label_2.grid(row=6, column=0, padx=20)
-        self.faction_region_x_second.grid(row=6, column=1, padx=20)
-        self.faction_region_y_second.grid(row=6, column=2, padx=20)
-
-        # Cooldown
-        self.cooldown_timer_label.grid(row=7, column=0, padx=20)
-        self.cooldown_timer.grid(row=7, column=1, padx=20)
-        self.cooldown_timer_text.grid(row=7, column=2)
-
-        # Per-type cooldowns
-        self.cooldown_enemy_label.grid(row=8, column=0, padx=(20, 4), sticky="e")
-        self.cooldown_timer_enemy.grid(row=8, column=1, sticky="w", padx=(0, 4))
-        self.cooldown_faction_label.grid(row=9, column=0, padx=(20, 4), sticky="e")
-        self.cooldown_timer_faction_entry.grid(row=9, column=1, sticky="w", padx=(0, 4))
-
-        # Detection Threshold Slider
-        self.empty_label_1.grid(row=10, column=2)
-        self.slider_label.grid(row=10, column=0)
-        self.slider.grid(row=10, column=1)
-
-        # Per-image threshold editor button
-        threshold_btn = customtkinter.CTkButton(
-            self.menu_frame,
-            text="Per-Image Thresholds...",
-            width=180,
-            command=self._open_threshold_editor,
-        )
-        threshold_btn.grid(row=10, column=3, padx=(8, 0))
-
-        # Faction Threshold Slider
-        self.empty_label_2.grid(row=11, column=2)
-        self.faction_slider_label.grid(row=11, column=0)
-        self.slider2.grid(row=11, column=1)
-
-        # Volume Slider
-        self.empty_label_3.grid(row=12, column=2)
-        self.volume_slider_label.grid(row=12, column=0)
-        self.volume_slider.grid(row=12, column=1)
-
-        # Webhook (all events)
-        self.webhook_label.grid(row=13, column=0)
-        self.webhook.grid(row=13, column=1)
-
-        # Webhook message template
-        self.webhook_template_label.grid(row=14, column=0, padx=(20, 4), sticky="e")
-        self.webhook_template_entry.grid(
-            row=14, column=1, columnspan=2, padx=(0, 20), sticky="w"
-        )
-
-        # Per-type webhook targets
-        self.enemy_webhook_label.grid(row=15, column=0, padx=(20, 4), sticky="e")
-        self.enemy_webhook_entry.grid(row=15, column=1, sticky="w")
-        self.enemy_mincount_label.grid(row=15, column=2, sticky="w")
-        self.enemy_webhook_mincount.grid(row=15, column=3, sticky="w")
-        self.faction_webhook_label.grid(row=16, column=0, padx=(20, 4), sticky="e")
-        self.faction_webhook_entry.grid(row=16, column=1, sticky="w")
-        self.faction_mincount_label.grid(row=16, column=2, sticky="w")
-        self.faction_webhook_mincount.grid(row=16, column=3, sticky="w")
-
-        # System Name
-        self.system_name_label.grid(row=17, column=0)
-        self.system_name.grid(row=17, column=1)
-        self.play_alarm_checkbox.grid(row=17, column=2)
-
-        # Test Audio Buttons
-        self.test_alarm_button.grid(row=18, column=0, pady=(10, 0))
-        self.test_faction_button.grid(row=18, column=1, pady=(10, 0))
-
-        # Sound library — browse buttons for custom sounds
-        sound_section_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Custom Sounds (WAV files):", justify="left"
-        )
-        sound_section_label.grid(
-            row=19, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
-
-        self.alarm_sound_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Default", justify="left", width=180
-        )
-        self.browse_alarm_button = customtkinter.CTkButton(
-            self.menu_frame,
-            text="Browse Alarm...",
-            width=120,
-            command=self._browse_alarm_sound,
-        )
-
-        self.faction_sound_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Default", justify="left", width=180
-        )
-        self.browse_faction_button = customtkinter.CTkButton(
-            self.menu_frame,
-            text="Browse Faction...",
-            width=120,
-            command=self._browse_faction_sound,
-        )
-
-        self.browse_alarm_button.grid(row=20, column=0, padx=(20, 4), sticky="e")
-        self.alarm_sound_label.grid(row=20, column=1, columnspan=2, sticky="w")
-        self.browse_faction_button.grid(row=21, column=0, padx=(20, 4), sticky="e")
-        self.faction_sound_label.grid(row=21, column=1, columnspan=2, sticky="w")
-
-        # Hotkey section
-        hotkey_section_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Hotkeys (e.g. f1, f2, esc, g)", justify="left"
-        )
-        hotkey_section_label.grid(
-            row=22, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
-
-        self.hotkey_alert_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Alert Region Key:", justify="left"
-        )
-        self.hotkey_alert_entry = customtkinter.CTkEntry(self.menu_frame, width=80)
-
-        self.hotkey_faction_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Faction Region Key:", justify="left"
-        )
-        self.hotkey_faction_entry = customtkinter.CTkEntry(self.menu_frame, width=80)
-
-        self.hotkey_alert_label.grid(row=23, column=0, padx=(20, 4), sticky="e")
-        self.hotkey_alert_entry.grid(row=23, column=1, padx=(0, 20))
-        self.hotkey_faction_label.grid(row=24, column=0, padx=(20, 4), sticky="e")
-        self.hotkey_faction_entry.grid(row=24, column=1, padx=(0, 20))
-
-        # Intelligence section
-        intel_section_label = customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Intelligence",
-            font=customtkinter.CTkFont(weight="bold"),
-        )
-        intel_section_label.grid(
-            row=25, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
-
-        self.zkillboard_var = customtkinter.BooleanVar(value=False)
-        self.zkillboard_check = customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Enable Zkillboard lookup on alarm",
-            variable=self.zkillboard_var,
-        )
-        self.zkillboard_check.grid(
-            row=26, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
-        )
-
-        self.intel_log_var = customtkinter.BooleanVar(value=False)
-        self.intel_log_check = customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Watch EVE intel chat log",
-            variable=self.intel_log_var,
-        )
-        self.intel_log_check.grid(
-            row=27, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
-        )
-
-        intel_channel_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Intel Channel:", justify="left"
-        )
-        self.intel_channel_entry = customtkinter.CTkEntry(self.menu_frame, width=160)
-        intel_channel_label.grid(row=28, column=0, padx=(20, 4), sticky="e")
-        self.intel_channel_entry.grid(row=28, column=1, padx=(0, 20))
-
-        # ESI section
-        esi_section_label = customtkinter.CTkLabel(
-            self.menu_frame,
-            text="ESI Augmentation",
-            font=customtkinter.CTkFont(weight="bold"),
-        )
-        esi_section_label.grid(
-            row=29, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
-
-        self.esi_enabled_var = customtkinter.BooleanVar(value=False)
-        self.esi_enabled_check = customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Show corp/alliance on Enemy alarm",
-            variable=self.esi_enabled_var,
-        )
-        self.esi_enabled_check.grid(
-            row=30, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
-        )
-
-        self.esi_corp_var = customtkinter.BooleanVar(value=True)
-        self.esi_corp_check = customtkinter.CTkCheckBox(
-            self.menu_frame, text="Show corporation", variable=self.esi_corp_var
-        )
-        self.esi_corp_check.grid(row=31, column=0, padx=(20, 4), sticky="w", pady=2)
-
-        self.esi_alliance_var = customtkinter.BooleanVar(value=True)
-        self.esi_alliance_check = customtkinter.CTkCheckBox(
-            self.menu_frame, text="Show alliance", variable=self.esi_alliance_var
-        )
-        self.esi_alliance_check.grid(row=31, column=1, padx=(4, 20), sticky="w", pady=2)
-
-        self.esi_flashy_var = customtkinter.BooleanVar(value=False)
-        self.esi_flashy_check = customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Alert on flashy pilots (sec status \u2264 -5)",
-            variable=self.esi_flashy_var,
-        )
-        self.esi_flashy_check.grid(
-            row=32, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2
-        )
-
-        # Threat Tiers section
-        threat_section_label = customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Threat Tiers",
-            font=customtkinter.CTkFont(weight="bold"),
-        )
-        threat_section_label.grid(
-            row=33, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Name/Corp/Alliance:", justify="left"
-        ).grid(row=34, column=0, padx=(20, 4), sticky="e")
-        self.threat_tier_name_entry = customtkinter.CTkEntry(self.menu_frame, width=180)
-        self.threat_tier_name_entry.grid(row=34, column=1, sticky="w")
-
+        self.threat_tier_name_entry = customtkinter.CTkEntry(det, width=180)
+        self.threat_tier_name_entry.grid(row=r, column=1, sticky="w")
         self.threat_tier_level_var = customtkinter.StringVar(value="red")
         self.threat_tier_level_menu = customtkinter.CTkOptionMenu(
-            self.menu_frame,
+            det,
             variable=self.threat_tier_level_var,
             values=["red", "orange", "yellow"],
             width=90,
         )
-        self.threat_tier_level_menu.grid(row=34, column=2, padx=(4, 20), sticky="w")
-
-        threat_btn_frame = customtkinter.CTkFrame(self.menu_frame)
+        self.threat_tier_level_menu.grid(row=r, column=2, padx=(4, 20), sticky="w")
+        r += 1
+        threat_btn_frame = customtkinter.CTkFrame(det)
         threat_btn_frame.grid(
-            row=35, column=0, columnspan=3, padx=20, pady=(4, 0), sticky="w"
+            row=r, column=0, columnspan=3, padx=20, pady=(4, 0), sticky="w"
         )
         customtkinter.CTkButton(
             threat_btn_frame, text="Add", width=70, command=self._add_threat_tier
@@ -1540,324 +1540,270 @@ class SettingMenu:
             hover_color="#660000",
             command=self._remove_threat_tier,
         ).pack(side="left")
-
-        self.threat_tiers_list = customtkinter.CTkScrollableFrame(
-            self.menu_frame, height=80
-        )
+        r += 1
+        self.threat_tiers_list = customtkinter.CTkScrollableFrame(det, height=80)
         self.threat_tiers_list.grid(
-            row=36, column=0, columnspan=3, padx=20, pady=(4, 0), sticky="ew"
+            row=r, column=0, columnspan=3, padx=20, pady=(4, 0), sticky="ew"
         )
-        self._threat_tiers_data: dict = {}
-        self._threat_tier_rows: list = []
-        self._selected_tier_key: str | None = None
+        self._threat_tiers_data = {}
+        self._threat_tier_rows = []
+        self._selected_tier_key = None
+        r += 1
 
-        # Web Status UI section
-        web_section_label = customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Web Status UI",
-            font=customtkinter.CTkFont(weight="bold"),
-        )
-        web_section_label.grid(
-            row=37, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
+        _hdr(det, "D-Scan Monitor", r)
+        r += 1
+        r = self._build_registry_section(det, "Detection", "D-Scan Monitor", r)
 
-        self.web_ui_var = customtkinter.BooleanVar(value=False)
-        self.web_ui_check = customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Enable web status server (localhost)",
-            variable=self.web_ui_var,
+        # ==================================================================
+        # Tab: Alerts & Sound
+        # ==================================================================
+        snd = self._tab_frames["Alerts & Sound"]
+        r = 0
+        _hdr(snd, "Volume", r)
+        r += 1
+        self.volume_slider_label = customtkinter.CTkLabel(snd, text="Volume")
+        self.volume_scale = customtkinter.DoubleVar()
+        self.volume_slider = customtkinter.CTkSlider(
+            snd,
+            from_=0,
+            to=100,
+            orientation="horizontal",
+            number_of_steps=100,
+            variable=self.volume_scale,
+            command=self.volumeslider_event,
         )
-        self.web_ui_check.grid(
-            row=38, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
+        self.empty_label_3 = customtkinter.CTkLabel(
+            snd, text=f"{int(self.volume_slider.get())}%"
         )
+        self.volume_slider_label.grid(row=r, column=0)
+        self.volume_slider.grid(row=r, column=1)
+        self.empty_label_3.grid(row=r, column=2)
+        r += 1
 
-        web_port_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Port:", justify="left"
+        _hdr(snd, "System", r)
+        r += 1
+        self.system_name_label = customtkinter.CTkLabel(
+            snd, text="System Name:", justify="left"
         )
-        self.web_ui_port_entry = customtkinter.CTkEntry(self.menu_frame, width=70)
-        web_port_label.grid(row=39, column=0, padx=(20, 4), sticky="e")
-        self.web_ui_port_entry.grid(row=39, column=1, sticky="w", padx=(0, 20))
-
-        # Adjacent System Monitor section
-        adj_section_label = customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Adjacent System Monitor",
-            font=customtkinter.CTkFont(weight="bold"),
+        self.system_name = customtkinter.CTkEntry(snd)
+        self.play_alarm_checkbox = customtkinter.CTkCheckBox(
+            snd, text="Mute Alarm", variable=self.play_alarm
         )
-        adj_section_label.grid(
-            row=40, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
+        self.system_name_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.system_name.grid(row=r, column=1)
+        self.play_alarm_checkbox.grid(row=r, column=2, padx=(8, 0))
+        r += 1
+
+        _hdr(snd, "Test Audio", r)
+        r += 1
+        self.test_alarm_button = customtkinter.CTkButton(
+            snd, text="Test Alarm Sound", command=self.test_alarm_sound
         )
-
-        self.adjacent_enabled_var = customtkinter.BooleanVar(value=False)
-        self.adjacent_enabled_check = customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Monitor kills in neighboring systems",
-            variable=self.adjacent_enabled_var,
+        self.test_faction_button = customtkinter.CTkButton(
+            snd, text="Test Faction Sound", command=self.test_faction_sound
         )
-        self.adjacent_enabled_check.grid(
-            row=41, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4
+        self.test_alarm_button.grid(row=r, column=0, pady=(4, 0), padx=(20, 4))
+        self.test_faction_button.grid(row=r, column=1, pady=(4, 0))
+        r += 1
+
+        _hdr(snd, "Custom Sounds (WAV files)", r)
+        r += 1
+        self.browse_alarm_button = customtkinter.CTkButton(
+            snd, text="Browse Alarm...", width=120, command=self._browse_alarm_sound
         )
-
-        # max jumps + min kills on same row
-        customtkinter.CTkLabel(self.menu_frame, text="Max jumps:", justify="left").grid(
-            row=42, column=0, padx=(20, 4), sticky="e"
+        self.alarm_sound_label = customtkinter.CTkLabel(
+            snd, text="Default", justify="left", width=180
         )
-        self.adjacent_max_jumps_entry = customtkinter.CTkEntry(
-            self.menu_frame, width=50
+        self.browse_alarm_button.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.alarm_sound_label.grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
+        self.browse_faction_button = customtkinter.CTkButton(
+            snd, text="Browse Faction...", width=120, command=self._browse_faction_sound
         )
-        self.adjacent_max_jumps_entry.grid(row=42, column=1, sticky="w")
-
-        customtkinter.CTkLabel(self.menu_frame, text="Min kills:", justify="left").grid(
-            row=42, column=2, padx=(10, 4), sticky="e"
+        self.faction_sound_label = customtkinter.CTkLabel(
+            snd, text="Default", justify="left", width=180
         )
-        self.adjacent_min_kills_entry = customtkinter.CTkEntry(
-            self.menu_frame, width=50
+        self.browse_faction_button.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.faction_sound_label.grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
+
+        _hdr(snd, "Hotkeys (e.g. f1, f2, esc, g)", r)
+        r += 1
+        self.hotkey_alert_label = customtkinter.CTkLabel(
+            snd, text="Alert Region Key:", justify="left"
         )
-        self.adjacent_min_kills_entry.grid(row=42, column=3, sticky="w")
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Poll interval (s):", justify="left"
-        ).grid(row=43, column=0, padx=(20, 4), sticky="e")
-        self.adjacent_poll_entry = customtkinter.CTkEntry(self.menu_frame, width=70)
-        self.adjacent_poll_entry.grid(row=43, column=1, sticky="w")
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Destination:", justify="left"
-        ).grid(row=44, column=0, padx=(20, 4), sticky="e")
-        self.adjacent_dest_entry = customtkinter.CTkEntry(
-            self.menu_frame, width=180, placeholder_text="e.g. Jita"
+        self.hotkey_alert_entry = customtkinter.CTkEntry(snd, width=80)
+        self.hotkey_alert_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.hotkey_alert_entry.grid(row=r, column=1, sticky="w")
+        r += 1
+        self.hotkey_faction_label = customtkinter.CTkLabel(
+            snd, text="Faction Region Key:", justify="left"
         )
-        self.adjacent_dest_entry.grid(row=44, column=1, columnspan=2, sticky="w")
-        self.adjacent_check_route_btn = customtkinter.CTkButton(
-            self.menu_frame, text="Check Route", width=110, command=self._check_route
+        self.hotkey_faction_entry = customtkinter.CTkEntry(snd, width=80)
+        self.hotkey_faction_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.hotkey_faction_entry.grid(row=r, column=1, sticky="w")
+        r += 1
+
+        _hdr(snd, "Alarm Options", r)
+        r += 1
+        r = self._build_registry_section(snd, "Alerts & Sound", "Alarm Options", r)
+
+        # ==================================================================
+        # Tab: Intel & ESI
+        # ==================================================================
+        intel = self._tab_frames["Intel & ESI"]
+        r = 0
+        _hdr(intel, "Intelligence", r)
+        r += 1
+        r = self._build_registry_section(intel, "Intel & ESI", "Intelligence", r)
+
+        _hdr(intel, "ESI Augmentation", r)
+        r += 1
+        r = self._build_registry_section(intel, "Intel & ESI", "ESI Augmentation", r)
+
+        _hdr(intel, "KOS Checker", r)
+        r += 1
+        r = self._build_registry_section(intel, "Intel & ESI", "KOS Checker", r)
+        customtkinter.CTkLabel(intel, text="Custom KOS URLs:", justify="left").grid(
+            row=r, column=0, padx=(20, 4), sticky="e"
         )
-        self.adjacent_check_route_btn.grid(row=44, column=3, padx=(4, 20))
-
-        # D-scan Monitor section
-        dscan_section_label = customtkinter.CTkLabel(
-            self.menu_frame,
-            text="D-Scan Monitor",
-            font=customtkinter.CTkFont(weight="bold"),
-        )
-        dscan_section_label.grid(
-            row=45, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20
-        )
-
-        self.dscan_enabled_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Enable D-scan log monitoring",
-            variable=self.dscan_enabled_var,
-        ).grid(row=46, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
-
-        self.dscan_red_var = customtkinter.BooleanVar(value=True)
-        customtkinter.CTkCheckBox(
-            self.menu_frame, text="Alert on RED ships", variable=self.dscan_red_var
-        ).grid(row=47, column=0, padx=(20, 4), sticky="w", pady=2)
-
-        self.dscan_orange_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Alert on ORANGE ships",
-            variable=self.dscan_orange_var,
-        ).grid(row=47, column=1, padx=(4, 20), sticky="w", pady=2)
-
-        self.dscan_probes_var = customtkinter.BooleanVar(value=True)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Alert on probes detected",
-            variable=self.dscan_probes_var,
-        ).grid(row=48, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
-
-        # KOS Checker section
-        customtkinter.CTkLabel(
-            self.menu_frame,
-            text="KOS Checker",
-            font=customtkinter.CTkFont(weight="bold"),
-        ).grid(row=49, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
-
-        self.kos_cva_var = customtkinter.BooleanVar(value=True)
-        customtkinter.CTkCheckBox(
-            self.menu_frame, text="Enable CVA KOS API", variable=self.kos_cva_var
-        ).grid(row=50, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Custom KOS URLs:", justify="left"
-        ).grid(row=51, column=0, padx=(20, 4), sticky="e")
         self.kos_custom_entry = customtkinter.CTkEntry(
-            self.menu_frame, width=340, placeholder_text="comma-separated URLs"
+            intel, width=340, placeholder_text="comma-separated URLs"
         )
-        self.kos_custom_entry.grid(row=51, column=1, columnspan=2, sticky="w")
+        self.kos_custom_entry.grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
 
-        # Push Notifications section
-        customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Push Notifications",
-            font=customtkinter.CTkFont(weight="bold"),
-        ).grid(row=52, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
-
-        push_fields = [
-            ("Telegram Token:", "telegram_token_entry", 53),
-            ("Telegram Chat ID:", "telegram_chat_entry", 54),
-            ("Pushover User:", "pushover_user_entry", 55),
-            ("Pushover Token:", "pushover_token_entry", 56),
-            ("ntfy.sh URL:", "ntfy_url_entry", 57),
-        ]
-        for label_text, attr, row_n in push_fields:
-            customtkinter.CTkLabel(
-                self.menu_frame, text=label_text, justify="left"
-            ).grid(row=row_n, column=0, padx=(20, 4), sticky="e")
-            entry = customtkinter.CTkEntry(self.menu_frame, width=280)
-            entry.grid(row=row_n, column=1, columnspan=2, sticky="w")
-            setattr(self, attr, entry)
-
-        customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Alarm Options",
-            font=customtkinter.CTkFont(weight="bold"),
-        ).grid(row=58, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
-
-        self.auto_screenshot_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Auto-screenshot on alarm",
-            variable=self.auto_screenshot_var,
-        ).grid(row=59, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Escalate at N hostiles:", justify="left"
-        ).grid(row=60, column=0, padx=(20, 4), sticky="e")
-        self.escalation_threshold_entry = customtkinter.CTkEntry(
-            self.menu_frame, width=60
+        _hdr(intel, "Adjacent System Monitor", r)
+        r += 1
+        r = self._build_registry_section(
+            intel, "Intel & ESI", "Adjacent System Monitor", r
         )
-        self.escalation_threshold_entry.grid(row=60, column=1, sticky="w")
-        customtkinter.CTkLabel(self.menu_frame, text="(0 = off)", justify="left").grid(
-            row=60, column=2, padx=(4, 20), sticky="w"
+        self.adjacent_check_route_btn = customtkinter.CTkButton(
+            intel, text="Check Route", width=110, command=self._check_route
         )
-
-        # Wormhole Awareness section
-        customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Wormhole Awareness",
-            font=customtkinter.CTkFont(weight="bold"),
-        ).grid(row=61, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
-
-        self.thera_enabled_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Monitor Thera connections (Eve-Scout)",
-            variable=self.thera_enabled_var,
-        ).grid(row=62, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Thera max jumps:", justify="left"
-        ).grid(row=63, column=0, padx=(20, 4), sticky="e")
-        self.thera_max_jumps_entry = customtkinter.CTkEntry(self.menu_frame, width=60)
-        self.thera_max_jumps_entry.grid(row=63, column=1, sticky="w")
-
-        self.wh_drop_enabled_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Alert on WH drop pattern",
-            variable=self.wh_drop_enabled_var,
-        ).grid(row=64, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Drop threshold (pilots):", justify="left"
-        ).grid(row=65, column=0, padx=(20, 4), sticky="e")
-        self.wh_drop_threshold_entry = customtkinter.CTkEntry(self.menu_frame, width=60)
-        self.wh_drop_threshold_entry.grid(row=65, column=1, sticky="w")
-
-        # Fleet Context section
-        customtkinter.CTkLabel(
-            self.menu_frame,
-            text="Fleet Context",
-            font=customtkinter.CTkFont(weight="bold"),
-        ).grid(row=66, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
-
-        self.fleet_composition_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Analyse fleet composition (3+ hostiles)",
-            variable=self.fleet_composition_var,
-        ).grid(row=67, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=4)
-
-        self.fleet_killmail_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Notify on tracked character kills/losses",
-            variable=self.fleet_killmail_var,
-        ).grid(row=68, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
-
-        customtkinter.CTkLabel(
-            self.menu_frame, text="Tracked char IDs:", justify="left"
-        ).grid(row=69, column=0, padx=(20, 4), sticky="e")
-        self.fleet_char_ids_entry = customtkinter.CTkEntry(
-            self.menu_frame,
-            width=300,
-            placeholder_text="comma-separated ESI character IDs",
+        self.adjacent_check_route_btn.grid(
+            row=r, column=0, columnspan=2, padx=20, pady=(2, 0), sticky="w"
         )
-        self.fleet_char_ids_entry.grid(row=69, column=1, columnspan=2, sticky="w")
+        r += 1
 
-        # ESI OAuth section
-        customtkinter.CTkLabel(
-            self.menu_frame,
-            text="EVE SSO / ESI OAuth",
-            font=customtkinter.CTkFont(weight="bold"),
-        ).grid(row=70, column=0, columnspan=3, pady=(10, 0), sticky="w", padx=20)
-
-        customtkinter.CTkLabel(self.menu_frame, text="Client ID:", justify="left").grid(
-            row=71, column=0, padx=(20, 4), sticky="e"
-        )
-        self.esi_client_id_entry = customtkinter.CTkEntry(
-            self.menu_frame,
-            width=280,
-            placeholder_text="Leave blank for built-in public client",
-        )
-        self.esi_client_id_entry.grid(row=71, column=1, columnspan=2, sticky="w")
-
-        # ESI login / logout buttons with status label
+        _hdr(intel, "EVE SSO / ESI OAuth", r)
+        r += 1
+        r = self._build_registry_section(intel, "Intel & ESI", "EVE SSO / ESI OAuth", r)
         self._esi_status_label = customtkinter.CTkLabel(
-            self.menu_frame, text="Not logged in", text_color="gray"
+            intel, text="Not logged in", text_color="gray"
         )
         self._esi_status_label.grid(
-            row=72, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2
+            row=r, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2
         )
         customtkinter.CTkButton(
-            self.menu_frame, text="Login with EVE", command=self._esi_login
-        ).grid(row=72, column=2, padx=(4, 20), pady=2)
+            intel, text="Login with EVE", command=self._esi_login
+        ).grid(row=r, column=2, padx=(4, 20), pady=2)
         customtkinter.CTkButton(
-            self.menu_frame, text="Logout", command=self._esi_logout, fg_color="gray"
-        ).grid(row=72, column=3, padx=(0, 20), pady=2)
+            intel, text="Logout", command=self._esi_logout, fg_color="gray"
+        ).grid(row=r, column=3, padx=(0, 20), pady=2)
+        r += 1
 
-        self.esi_standings_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Auto-classify standing contacts in Local",
-            variable=self.esi_standings_var,
-        ).grid(row=73, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+        # ==================================================================
+        # Tab: Notifications
+        # ==================================================================
+        notif = self._tab_frames["Notifications"]
+        r = 0
+        _hdr(notif, "Webhook", r)
+        r += 1
+        self.webhook_label = customtkinter.CTkLabel(
+            notif, text="Webhook (all):", justify="left"
+        )
+        self.webhook = customtkinter.CTkEntry(notif, width=300)
+        self.webhook_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.webhook.grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
+        self.webhook_template_label = customtkinter.CTkLabel(
+            notif, text="Msg Template:", justify="left"
+        )
+        self.webhook_template_entry = customtkinter.CTkEntry(notif, width=340)
+        self.webhook_template_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.webhook_template_entry.grid(
+            row=r, column=1, columnspan=2, padx=(0, 20), sticky="w"
+        )
+        r += 1
+        self.enemy_webhook_label = customtkinter.CTkLabel(
+            notif, text="Enemy Webhook:", justify="left"
+        )
+        self.enemy_webhook_entry = customtkinter.CTkEntry(notif, width=260)
+        self.enemy_mincount_label = customtkinter.CTkLabel(
+            notif, text="Min#:", justify="left"
+        )
+        self.enemy_webhook_mincount = customtkinter.CTkEntry(notif, width=40)
+        self.enemy_webhook_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.enemy_webhook_entry.grid(row=r, column=1, sticky="w")
+        self.enemy_mincount_label.grid(row=r, column=2, sticky="e")
+        self.enemy_webhook_mincount.grid(row=r, column=3, sticky="w")
+        r += 1
+        self.faction_webhook_label = customtkinter.CTkLabel(
+            notif, text="Faction Webhook:", justify="left"
+        )
+        self.faction_webhook_entry = customtkinter.CTkEntry(notif, width=260)
+        self.faction_mincount_label = customtkinter.CTkLabel(
+            notif, text="Min#:", justify="left"
+        )
+        self.faction_webhook_mincount = customtkinter.CTkEntry(notif, width=40)
+        self.faction_webhook_label.grid(row=r, column=0, padx=(20, 4), sticky="e")
+        self.faction_webhook_entry.grid(row=r, column=1, sticky="w")
+        self.faction_mincount_label.grid(row=r, column=2, sticky="e")
+        self.faction_webhook_mincount.grid(row=r, column=3, sticky="w")
+        r += 1
 
-        self.esi_fleet_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Display fleet membership on start",
-            variable=self.esi_fleet_var,
-        ).grid(row=74, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+        _hdr(notif, "Push Notifications", r)
+        r += 1
+        r = self._build_registry_section(
+            notif, "Notifications", "Push Notifications", r
+        )
 
-        self.esi_structure_var = customtkinter.BooleanVar(value=False)
-        customtkinter.CTkCheckBox(
-            self.menu_frame,
-            text="Warn on structure fuel < 7 days",
-            variable=self.esi_structure_var,
-        ).grid(row=75, column=0, columnspan=2, padx=(20, 4), sticky="w", pady=2)
+        _hdr(notif, "Web Status UI", r)
+        r += 1
+        r = self._build_registry_section(notif, "Notifications", "Web Status UI", r)
+
+        # ==================================================================
+        # Tab: Wormhole & Fleet
+        # ==================================================================
+        whf = self._tab_frames["Wormhole & Fleet"]
+        r = 0
+        _hdr(whf, "Wormhole Awareness", r)
+        r += 1
+        r = self._build_registry_section(
+            whf, "Wormhole & Fleet", "Wormhole Awareness", r
+        )
+
+        _hdr(whf, "Fleet Context", r)
+        r += 1
+        r = self._build_registry_section(whf, "Wormhole & Fleet", "Fleet Context", r)
+        customtkinter.CTkLabel(whf, text="Tracked char IDs:", justify="left").grid(
+            row=r, column=0, padx=(20, 4), sticky="e"
+        )
+        self.fleet_char_ids_entry = customtkinter.CTkEntry(
+            whf, width=300, placeholder_text="comma-separated ESI character IDs"
+        )
+        self.fleet_char_ids_entry.grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
+
+        # ── Footer: Save / Apply / Close (always visible) ────────────────
+        footer = customtkinter.CTkFrame(win)
+        footer.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 10))
+        self.save_button = customtkinter.CTkButton(
+            footer, text="Save", command=self.save
+        )
+        self.apply_button = customtkinter.CTkButton(
+            footer, text="Apply", command=self.apply_settings_runtime
+        )
+        self.close_button = customtkinter.CTkButton(
+            footer, text="Close", command=self.clean_up
+        )
+        self.save_button.grid(row=0, column=0, pady=8, padx=8)
+        self.apply_button.grid(row=0, column=1, pady=8, padx=8)
+        self.close_button.grid(row=0, column=2, pady=8, padx=8)
 
         # Refresh login status if already authenticated
         self._esi_refresh_status()
-
-        # Save / Apply / Close
-        self.save_button.grid(row=76, column=0, pady=10)
-        self.apply_button.grid(row=76, column=1, pady=10)
-        self.close_button.grid(row=76, column=2, pady=10)
 
         self.setting_window.protocol("WM_DELETE_WINDOW", self.clean_up)
 
@@ -1877,19 +1823,23 @@ class SettingMenu:
             config_menu_x = self.main.winfo_x()
             config_menu_y = self.main.winfo_y()
             config_menu_width = self.main.winfo_width()
-            config_menu_height = self.main.winfo_height()
 
-            config_window_width = 650
-            config_window_height = 1200
+            # Resizable window with a sane minimum; the tabview + per-tab
+            # scrollable frames handle overflow, so no fixed tall geometry that
+            # clips the footer off-screen (#107).
+            config_window_width = 760
+            config_window_height = 720
+            self.setting_window.minsize(700, 500)
+            self.setting_window.resizable(True, True)
 
             raw_x = config_menu_x + config_menu_width + 10
-            raw_y = config_menu_y + config_menu_height + 40
+            raw_y = config_menu_y + 10
 
-            # Clamp to screen bounds so popup never opens off-screen
+            # Clamp to screen bounds so the popup never opens off-screen.
             screen_w = self.main.winfo_screenwidth()
             screen_h = self.main.winfo_screenheight()
-            window_x = min(raw_x, screen_w - config_window_width - 10)
-            window_y = min(max(raw_y, 10), screen_h - config_window_height - 10)
+            window_x = max(10, min(raw_x, screen_w - config_window_width - 10))
+            window_y = max(10, min(raw_y, screen_h - config_window_height - 10))
 
             self.setting_window.geometry(
                 f"{config_window_width}x{config_window_height}+{window_x}+{window_y}"
