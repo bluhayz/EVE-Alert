@@ -190,9 +190,14 @@ class SettingMenu:
                 else:
                     settings[key] = value
 
-        # Only sync UI if the window has been created
+        # Widget mutation must run on the main Tkinter thread. AlertAgent.run()
+        # and vision_check() call load_settings() from the alert daemon thread,
+        # so dispatch the UI sync via after(0) rather than mutating widgets
+        # cross-thread (Tkinter is not thread-safe — see #114 / COCO Rule 1).
+        # The read+merge above is pure, so the returned dict is still available
+        # synchronously to non-UI callers (e.g. AlertAgent).
         if self._window_created:
-            self.apply_settings(settings)
+            self.main.after(0, lambda s=settings: self.apply_settings(s))
         return settings
 
     def merge_settings_with_defaults(self, settings, defaults=None):
