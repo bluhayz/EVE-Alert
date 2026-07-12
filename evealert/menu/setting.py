@@ -1018,9 +1018,7 @@ class SettingMenu:
                 get_esi_auth,
             )
 
-            auth = get_esi_auth(
-                client_id=self.esi_client_id_entry.get().strip() or None
-            )
+            auth = get_esi_auth(client_id=self.esi_client_id_entry.get().strip())
 
             def _run_login():
                 import asyncio  # pylint: disable=import-outside-toplevel

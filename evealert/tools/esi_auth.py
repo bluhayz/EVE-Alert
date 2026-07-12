@@ -22,8 +22,11 @@ Usage:
 """
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
+import secrets
 import time
 import webbrowser
 from pathlib import Path
@@ -42,7 +45,6 @@ logger = logging.getLogger("alert.esi_auth")
 
 _ESI_AUTH_URL = "https://login.eveonline.com/v2/oauth/authorize"
 _ESI_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
-_ESI_VERIFY_URL = "https://esi.evetech.net/verify/"
 _HTTP_TIMEOUT = 10.0
 _REDIRECT_PORT = 8888
 _REDIRECT_URI = f"http://localhost:{_REDIRECT_PORT}/callback"
@@ -56,9 +58,29 @@ _SCOPES = " ".join(
         "esi-characters.read_standings.v1",
         "esi-fleets.read_fleet.v1",
         "esi-assets.read_assets.v1",
+        "esi-corporations.read_structures.v1",  # #104: needed for structure fuel
         "publicData",
     ]
 )
+
+
+def _decode_character_from_jwt(access_token: str) -> tuple[int, str]:
+    """Extract (character_id, name) from an EVE SSO v2 JWT access token.
+
+    The payload is decoded without signature verification: the token was
+    received directly from login.eveonline.com over TLS, and we only use it
+    to identify the logged-in character locally.
+    """
+    try:
+        payload_b64 = access_token.split(".")[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64 + padding))
+        sub = payload.get("sub", "")  # "CHARACTER:EVE:2112625428"
+        char_id = int(sub.split(":")[-1]) if ":" in sub else 0
+        return char_id, payload.get("name", "")
+    except Exception as exc:
+        logger.debug("JWT decode failed: %s", exc)
+        return 0, ""
 
 
 def _token_path() -> Path:
@@ -81,6 +103,7 @@ class EsiAuth:
     def __init__(self, client_id: str = _DEFAULT_CLIENT_ID) -> None:
         self._client_id = client_id
         self._token: TokenInfo | None = None
+        self._code_verifier: str = ""  # PKCE verifier for the in-flight login
         self._load_token()
 
     @property
@@ -103,12 +126,24 @@ class EsiAuth:
 
         import urllib.parse  # pylint: disable=import-outside-toplevel
 
+        # PKCE: EVE SSO v2 public/native clients authenticate with a
+        # code_verifier/code_challenge pair instead of a client secret (#104).
+        self._code_verifier = secrets.token_urlsafe(64)
+        challenge = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(self._code_verifier.encode()).digest()
+            )
+            .rstrip(b"=")
+            .decode()
+        )
         params = {
             "response_type": "code",
             "client_id": self._client_id,
             "redirect_uri": _REDIRECT_URI,
             "scope": _SCOPES,
             "state": "evealert",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
         }
         auth_url = f"{_ESI_AUTH_URL}?{urllib.parse.urlencode(params)}"
         webbrowser.open(auth_url)
@@ -184,7 +219,7 @@ class EsiAuth:
             "grant_type": "authorization_code",
             "code": code,
             "client_id": self._client_id,
-            "redirect_uri": _REDIRECT_URI,
+            "code_verifier": self._code_verifier,  # PKCE (#104)
         }
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
@@ -224,22 +259,11 @@ class EsiAuth:
         expires_in = int(data.get("expires_in", 1199))
         expires_at = time.time() + expires_in
 
-        # Verify token to get character info
+        # Identify the character by decoding the JWT access token (#104).
         char_id = existing.character_id if existing else 0
         char_name = existing.character_name if existing else ""
         if not char_id and access:
-            try:
-                async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                    resp = await client.get(
-                        _ESI_VERIFY_URL,
-                        headers={"Authorization": f"Bearer {access}"},
-                    )
-                    resp.raise_for_status()
-                    verify = resp.json()
-                    char_id = verify.get("CharacterID", 0)
-                    char_name = verify.get("CharacterName", "")
-            except Exception:
-                pass
+            char_id, char_name = _decode_character_from_jwt(access)
 
         return TokenInfo(
             access_token=access,
@@ -322,7 +346,8 @@ async def get_structure_fuel_warnings(auth: EsiAuth) -> list[dict]:
     token = await auth.get_token()
     if not token:
         return []
-    # First get corporation ID
+    # First get corporation ID, then its structures — both on ONE open client
+    # (the second request previously ran on a closed client, #104).
     char_id = auth.character_id
     url_char = f"https://esi.evetech.net/v5/characters/{char_id}/"
     try:
@@ -330,14 +355,16 @@ async def get_structure_fuel_warnings(auth: EsiAuth) -> list[dict]:
             resp = await client.get(url_char)
             resp.raise_for_status()
             corp_id = resp.json().get("corporation_id", 0)
-        if not corp_id:
-            return []
-        url_structs = f"https://esi.evetech.net/v3/corporations/{corp_id}/structures/"
-        resp = await client.get(
-            url_structs, headers={"Authorization": f"Bearer {token}"}
-        )
-        resp.raise_for_status()
-        structures = resp.json()
+            if not corp_id:
+                return []
+            url_structs = (
+                f"https://esi.evetech.net/v3/corporations/{corp_id}/structures/"
+            )
+            resp = await client.get(
+                url_structs, headers={"Authorization": f"Bearer {token}"}
+            )
+            resp.raise_for_status()
+            structures = resp.json()
     except Exception as exc:
         logger.debug("ESI structure fetch failed: %s", exc)
         return []
@@ -350,7 +377,6 @@ async def get_structure_fuel_warnings(auth: EsiAuth) -> list[dict]:
             try:
                 from datetime import (  # pylint: disable=import-outside-toplevel
                     datetime,
-                    timezone,
                 )
 
                 expiry = datetime.fromisoformat(fuel_expires.replace("Z", "+00:00"))
@@ -373,7 +399,16 @@ _auth: EsiAuth | None = None
 
 
 def get_esi_auth(client_id: str = _DEFAULT_CLIENT_ID) -> EsiAuth:
+    """Return the shared EsiAuth singleton.
+
+    A blank/None client_id falls back to the default, and passing a different
+    client_id reconfigures the existing instance rather than being ignored
+    (#115) — so a user pasting their own dev-app client ID takes effect.
+    """
     global _auth
+    client_id = client_id or _DEFAULT_CLIENT_ID
     if _auth is None:
         _auth = EsiAuth(client_id=client_id)
+    elif client_id != _auth._client_id:
+        _auth._client_id = client_id
     return _auth
