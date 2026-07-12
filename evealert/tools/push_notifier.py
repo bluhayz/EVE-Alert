@@ -77,7 +77,11 @@ class PushNotifier:
         }
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(url, json=payload)
-            resp.raise_for_status()
+            # Sanitize errors: the bot token is in the URL path, and an
+            # httpx error's string includes the URL. Raise a token-free
+            # error so it never reaches the logger in send() (#105).
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Telegram send failed: HTTP {resp.status_code}")
 
     async def _send_pushover(self, message: str, title: str) -> None:
         url = "https://api.pushover.net/1/messages.json"
@@ -93,6 +97,15 @@ class PushNotifier:
             resp.raise_for_status()
 
     async def _send_ntfy(self, message: str, title: str) -> None:
+        # Vet the user-supplied URL to avoid SSRF to loopback/metadata/private
+        # hosts (#105).
+        from evealert.tools.net_safety import (  # pylint: disable=import-outside-toplevel
+            is_safe_public_url,
+        )
+
+        if not is_safe_public_url(self._ntfy_url):
+            logger.warning("Refusing ntfy URL (must be https + public host).")
+            return
         headers = {"Title": title, "Priority": "high", "Tags": "warning"}
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             resp = await client.post(self._ntfy_url, content=message, headers=headers)

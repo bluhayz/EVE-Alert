@@ -150,6 +150,15 @@ class KosChecker:
 
     async def _query_custom(self, base_url: str, pilot: str) -> KosResult | None:
         """Query a custom KOS API (same JSON format as CVA KOS expected)."""
+        # Vet the user-supplied URL to avoid SSRF to loopback/metadata/private
+        # hosts (#105).
+        from evealert.tools.net_safety import (  # pylint: disable=import-outside-toplevel
+            is_safe_public_url,
+        )
+
+        if not is_safe_public_url(base_url):
+            logger.warning("Skipping unsafe KOS URL (must be https + public host).")
+            return None
         params = {"c": "json", "q": pilot, "type": "pilot"}
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:

@@ -26,6 +26,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 import webbrowser
@@ -104,6 +105,7 @@ class EsiAuth:
         self._client_id = client_id
         self._token: TokenInfo | None = None
         self._code_verifier: str = ""  # PKCE verifier for the in-flight login
+        self._state: str = ""  # per-login CSRF state for the callback
         self._load_token()
 
     @property
@@ -129,6 +131,8 @@ class EsiAuth:
         # PKCE: EVE SSO v2 public/native clients authenticate with a
         # code_verifier/code_challenge pair instead of a client secret (#104).
         self._code_verifier = secrets.token_urlsafe(64)
+        # Per-login random state to reject forged/injected callbacks (#105).
+        self._state = secrets.token_urlsafe(16)
         challenge = (
             base64.urlsafe_b64encode(
                 hashlib.sha256(self._code_verifier.encode()).digest()
@@ -141,7 +145,7 @@ class EsiAuth:
             "client_id": self._client_id,
             "redirect_uri": _REDIRECT_URI,
             "scope": _SCOPES,
-            "state": "evealert",
+            "state": self._state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
@@ -192,7 +196,13 @@ class EsiAuth:
                     import urllib.parse  # pylint: disable=import-outside-toplevel
 
                     qs = urllib.parse.parse_qs(path.split("?", 1)[-1])
-                    code_holder.extend(qs.get("code", []))
+                    # Validate the state parameter to reject forged callbacks
+                    # (any local process could otherwise POST a code) (#105).
+                    returned_state = (qs.get("state") or [""])[0]
+                    if returned_state == self._state:
+                        code_holder.extend(qs.get("code", []))
+                    else:
+                        logger.warning("Discarding OAuth callback with bad state.")
                 body = b"<html><body><h2>EVE Alert authorised. Return to the app.</h2></body></html>"
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: "
@@ -281,8 +291,16 @@ class EsiAuth:
         if not self._token:
             return
         try:
-            with open(_token_path(), "w", encoding="utf-8") as fh:
+            # Write access/refresh tokens owner-read-write only (0600) so the
+            # token file isn't world-readable under the default umask (#105).
+            path = _token_path()
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(self._token._asdict(), fh, indent=2)
+            try:
+                os.chmod(path, 0o600)  # tighten if the file pre-existed
+            except OSError:
+                pass
         except OSError as exc:
             logger.debug("Failed to save token: %s", exc)
 
