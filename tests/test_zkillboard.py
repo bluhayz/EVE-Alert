@@ -27,8 +27,10 @@ class TestVersionTupleNotPresent(unittest.TestCase):
 
         client = ZkillboardClient()
         with respx.mock:
-            respx.get("https://esi.evetech.net/latest/search/").mock(
-                return_value=Response(200, json={"solar_system": [30000142]})
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(
+                    200, json={"systems": [{"id": 30000142, "name": "Jita"}]}
+                )
             )
             result = asyncio.run(client._resolve_system_id("Jita"))
         self.assertEqual(result, 30000142)
@@ -40,7 +42,7 @@ class TestVersionTupleNotPresent(unittest.TestCase):
 
         client = ZkillboardClient()
         with respx.mock:
-            respx.get("https://esi.evetech.net/latest/search/").mock(
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
                 return_value=Response(500)
             )
             result = asyncio.run(client._resolve_system_id("Jita"))
@@ -83,8 +85,8 @@ class TestCaching(unittest.TestCase):
         client._cache["jita"] = (time.time() - 9999, ["old_result"])
 
         with respx.mock:
-            respx.get("https://esi.evetech.net/latest/search/").mock(
-                return_value=Response(200, json={"solar_system": []})
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(200, json={"systems": []})
             )
             result = asyncio.run(client.get_recent_kills("Jita", limit=1))
 
@@ -100,8 +102,8 @@ class TestGetRecentKills(unittest.TestCase):
 
         client = ZkillboardClient()
         with respx.mock:
-            respx.get("https://esi.evetech.net/latest/search/").mock(
-                return_value=Response(200, json={"solar_system": []})
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(200, json={"systems": []})
             )
             result = asyncio.run(client.get_recent_kills("UnknownSystem"))
         self.assertIsNone(result)
@@ -113,8 +115,10 @@ class TestGetRecentKills(unittest.TestCase):
 
         client = ZkillboardClient()
         with respx.mock:
-            respx.get("https://esi.evetech.net/latest/search/").mock(
-                return_value=Response(200, json={"solar_system": [30000142]})
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(
+                    200, json={"systems": [{"id": 30000142, "name": "Jita"}]}
+                )
             )
             respx.get(
                 "https://zkillboard.com/api/kills/solarSystemID/30000142/limit/3/"

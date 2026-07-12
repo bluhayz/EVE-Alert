@@ -31,6 +31,50 @@ _NAME_CACHE_TTL = 86400  # system names never change — cache for 24 h
 _SOV_CACHE_TTL = 300  # sovereignty refreshes every 5 min
 
 
+async def resolve_ids(names: list[str]) -> dict:
+    """Resolve a list of names to IDs via ``POST /universe/ids/``.
+
+    Returns the raw ESI payload, e.g.
+    ``{"systems": [{"id": 30000142, "name": "Jita"}], "characters": [...], ...}``.
+
+    This replaces the public ``GET /search/`` endpoint family, which CCP
+    removed (only the authenticated ``/characters/{id}/search/`` remains).
+    ``/universe/ids/`` needs no auth and does exact, case-insensitive
+    full-name matching. See issue #110.
+    """
+    if not _HTTPX_AVAILABLE or not names:
+        return {}
+    url = f"{_ESI_BASE}/latest/universe/ids/"
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            resp = await client.post(
+                url,
+                json=list(names),
+                params={"datasource": "tranquility"},
+                headers={"User-Agent": "EVEAlert/4.0"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.debug("ESI /universe/ids/ failed for %r: %s", names, exc)
+        return {}
+
+
+async def resolve_single_id(name: str, category: str) -> int | None:
+    """Resolve one *name* within a ``/universe/ids/`` *category* key
+    (``"systems"``, ``"characters"``, ``"corporations"``, ``"alliances"``).
+
+    Prefers an exact case-insensitive name match; falls back to the first
+    entry in the category if the server-returned names don't line up.
+    """
+    data = await resolve_ids([name])
+    entries = data.get(category, [])
+    for entry in entries:
+        if entry.get("name", "").lower() == name.lower():
+            return entry.get("id")
+    return entries[0].get("id") if entries else None
+
+
 class SovInfo(NamedTuple):
     system_id: int
     alliance_id: int | None
@@ -259,22 +303,8 @@ class UniverseCache:
     async def _search_system(self, name: str) -> int | None:
         if not _HTTPX_AVAILABLE:
             return None
-        url = f"{_ESI_BASE}/v2/search/"
-        params = {
-            "categories": "solar_system",
-            "search": name,
-            "strict": "true",
-            "datasource": "tranquility",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                ids = resp.json().get("solar_system", [])
-                return ids[0] if ids else None
-        except Exception as exc:
-            logger.debug("ESI system search failed for %r: %s", name, exc)
-            return None
+        # POST /universe/ids/ (GET /search/ was removed by CCP — #110)
+        return await resolve_single_id(name, "systems")
 
     async def _fetch_system_name(self, system_id: int) -> str | None:
         if not _HTTPX_AVAILABLE:

@@ -153,22 +153,13 @@ class EsiLookup:
         )
 
     async def _search_character_id(self, name: str) -> int | None:
-        url = f"{_ESI_BASE}/v2/characters/search/"
-        params = {
-            "categories": "character",
-            "search": name,
-            "strict": "true",
-            "datasource": "tranquility",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                ids = resp.json().get("character", [])
-                return ids[0] if ids else None
-        except Exception as exc:
-            logger.debug("ESI character search failed for %r: %s", name, exc)
-            return None
+        # GET /characters/search/ was removed by CCP; use the shared
+        # POST /universe/ids/ resolver in universe.py (#110).
+        from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
+            resolve_single_id,
+        )
+
+        return await resolve_single_id(name, "characters")
 
     async def _get_character(self, char_id: int) -> dict | None:
         url = f"{_ESI_BASE}/v5/characters/{char_id}/"

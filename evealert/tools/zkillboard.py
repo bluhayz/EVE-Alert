@@ -89,29 +89,18 @@ class ZkillboardClient:
     # ------------------------------------------------------------------
 
     async def _resolve_system_id(self, system_name: str) -> int | None:
-        """Look up solar system ID via ESI universe-search."""
+        """Look up solar system ID via ESI ``/universe/ids/`` (#110)."""
         key = system_name.lower()
         if key in self._system_id_cache:
             return self._system_id_cache[key]
 
-        url = f"{_ESI_BASE}/search/"
-        params = {
-            "categories": "solar_system",
-            "search": system_name,
-            "strict": "true",
-            "datasource": "tranquility",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-                ids = data.get("solar_system", [])
-                system_id = ids[0] if ids else None
-        except Exception as exc:
-            logger.debug("ESI system lookup failed for %r: %s", system_name, exc)
-            system_id = None
+        # GET /search/ was removed by CCP; use the shared POST /universe/ids/
+        # resolver in universe.py.
+        from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
+            resolve_single_id,
+        )
 
+        system_id = await resolve_single_id(system_name, "systems")
         self._system_id_cache[key] = system_id
         return system_id
 
