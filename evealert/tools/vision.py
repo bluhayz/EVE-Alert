@@ -35,13 +35,21 @@ class Vision:
     # Template matching method — TM_CCOEFF_NORMED
     # There are 6 methods: TM_CCOEFF, TM_CCOEFF_NORMED, TM_CCORR, TM_CCORR_NORMED, TM_SQDIFF, TM_SQDIFF_NORMED
     def __init__(self, needle_img_paths, method=cv.TM_CCOEFF_NORMED):
-        # Store paths for per-image threshold lookups (key = basename)
-        self.needle_paths = list(needle_img_paths)
-        # Load the images we're trying to match
-        self.needle_imgs = [
-            cv.imread(path, cv.IMREAD_UNCHANGED) for path in needle_img_paths
-        ]
-        # Save the dimensions of the needle images
+        # Load the images we're trying to match. cv.imread returns None for
+        # unreadable/corrupt/non-image files (rather than raising), so skip
+        # those instead of crashing on img.shape — the Image Manager lets
+        # users add arbitrary files to the img/ dir (#113). needle_paths and
+        # needle_imgs are kept index-aligned because vision_process zips them.
+        self.needle_paths = []
+        self.needle_imgs = []
+        for path in needle_img_paths:
+            img = cv.imread(path, cv.IMREAD_UNCHANGED)
+            if img is None:
+                logger.warning("Vision: skipping unreadable template image: %s", path)
+                continue
+            self.needle_paths.append(path)
+            self.needle_imgs.append(img)
+        # Save the dimensions of the (valid) needle images
         self.needle_dims = [(img.shape[1], img.shape[0]) for img in self.needle_imgs]
 
         self.method = method
@@ -196,17 +204,29 @@ class Vision:
         self.debug_mode = False
         self.debug_mode_faction = False
 
+    @staticmethod
+    def _safe_destroy_window(name: str) -> None:
+        """Destroy an OpenCV window, ignoring the cv.error raised when the
+        window does not exist."""
+        try:
+            cv.destroyWindow(name)
+        except cv.error:
+            pass
+
     def destroy_vision(self, vision_mode: str = "Enemy") -> None:
         """Close the vision window."""
         if vision_mode == "Enemy":
             self.debug_mode = False
         elif vision_mode == "Faction":
             self.debug_mode_faction = False
-        cv.destroyWindow(vision_mode)
+        # Windows are created as "<mode> Vision" (e.g. "Enemy Vision"), so
+        # destroy that exact name — not the bare mode (#112).
+        self._safe_destroy_window(f"{vision_mode} Vision")
 
     def find(
         self, haystack_img, threshold: int = 50, per_image_thresholds: dict = None
     ) -> list:
+        detection_image = None
         try:
             all_points, detection_image = self.vision_process(
                 haystack_img, threshold, "Enemy", per_image_thresholds
@@ -216,19 +236,20 @@ class Vision:
             self.destroy_vision("Enemy")
             all_points = []
 
-        if self.debug_mode:
+        # Guard against detection_image being unbound on the error path (#111).
+        if self.debug_mode and detection_image is not None:
             cv.imshow("Enemy Vision", detection_image)
             self.enemy = True
             cv.waitKey(1)
-        else:
-            if self.enemy:
-                cv.destroyWindow("Enemy Vision")
-                self.enemy = None
+        elif self.enemy:
+            self._safe_destroy_window("Enemy Vision")
+            self.enemy = None
         return all_points
 
     def find_faction(
         self, haystack_img, threshold: int = 50, per_image_thresholds: dict = None
     ) -> list:
+        detection_image = None
         try:
             all_points, detection_image = self.vision_process(
                 haystack_img, threshold, "Faction", per_image_thresholds
@@ -238,12 +259,12 @@ class Vision:
             self.destroy_vision("Faction")
             all_points = []
 
-        if self.debug_mode_faction:
+        # Guard against detection_image being unbound on the error path (#111).
+        if self.debug_mode_faction and detection_image is not None:
             cv.imshow("Faction Vision", detection_image)
             self.faction = True
             cv.waitKey(1)
-        else:
-            if self.faction:
-                cv.destroyWindow("Faction Vision")
-                self.faction = None
+        elif self.faction:
+            self._safe_destroy_window("Faction Vision")
+            self.faction = None
         return all_points

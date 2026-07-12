@@ -169,7 +169,7 @@ class TestVision(unittest.TestCase):
 
         with patch("cv2.destroyWindow") as mock_destroy:
             self.vision.destroy_vision("Enemy")
-            mock_destroy.assert_called_once_with("Enemy")
+            mock_destroy.assert_called_once_with("Enemy Vision")
 
         self.assertFalse(self.vision.debug_mode)
 
@@ -179,7 +179,7 @@ class TestVision(unittest.TestCase):
 
         with patch("cv2.destroyWindow") as mock_destroy:
             self.vision.destroy_vision("Faction")
-            mock_destroy.assert_called_once_with("Faction")
+            mock_destroy.assert_called_once_with("Faction Vision")
 
         self.assertFalse(self.vision.debug_mode_faction)
 
@@ -227,6 +227,74 @@ class TestVision(unittest.TestCase):
 
         points = self.vision.find(haystack, threshold=50)
         self.assertIsInstance(points, list)
+
+
+class TestVisionRobustness(unittest.TestCase):
+    """Regression tests for issues #111, #112, #113."""
+
+    def test_unreadable_template_is_skipped_not_crash(self):
+        """#113: an unreadable/non-image path must not crash construction."""
+        vision = Vision(["/nonexistent/definitely_not_an_image.png"])
+        self.assertEqual(vision.needle_imgs, [])
+        self.assertEqual(vision.needle_paths, [])
+        self.assertEqual(vision.needle_dims, [])
+
+    def test_mixed_valid_and_unreadable_templates(self):
+        """#113: valid images load; bad ones are skipped and lists stay aligned."""
+        good = Path("tests/fixtures/robust_needle.png")
+        good.parent.mkdir(parents=True, exist_ok=True)
+        img = np.zeros((20, 20, 3), dtype=np.uint8)
+        img[5:15, 5:15] = (200, 100, 50)
+        cv.imwrite(str(good), img)
+        try:
+            vision = Vision([str(good), "/nonexistent/bad.png"])
+            self.assertEqual(len(vision.needle_imgs), 1)
+            self.assertEqual(len(vision.needle_paths), 1)
+            self.assertEqual(len(vision.needle_dims), 1)
+            self.assertEqual(vision.needle_paths[0], str(good))
+        finally:
+            if good.exists():
+                good.unlink()
+            if good.parent.exists() and not list(good.parent.iterdir()):
+                good.parent.rmdir()
+
+    def test_destroy_vision_uses_vision_suffix_window(self):
+        """#112: destroy_vision must target '<mode> Vision', not the bare mode."""
+        vision = Vision([])
+        with patch("cv2.destroyWindow") as mock_destroy:
+            vision.destroy_vision("Enemy")
+            mock_destroy.assert_called_once_with("Enemy Vision")
+
+    def test_destroy_vision_swallows_missing_window_error(self):
+        """#112: destroying a non-existent window must not raise."""
+        vision = Vision([])
+        with patch("cv2.destroyWindow", side_effect=cv.error("no window")):
+            # Must not raise.
+            vision.destroy_vision("Faction")
+        self.assertFalse(vision.debug_mode_faction)
+
+    def test_find_error_path_with_debug_open_does_not_crash(self):
+        """#111: if vision_process raises while debug is on, find() must not
+        hit an UnboundLocalError and must return an empty list."""
+        needle = Path("tests/fixtures/robust_needle2.png")
+        needle.parent.mkdir(parents=True, exist_ok=True)
+        img = np.zeros((40, 40, 3), dtype=np.uint8)
+        img[5:35, 5:35] = (10, 200, 90)
+        cv.imwrite(str(needle), img)
+        try:
+            vision = Vision([str(needle)])
+            vision.debug_mode = True
+            # Haystack smaller than the needle -> RegionSizeError inside
+            # vision_process, so detection_image is never assigned.
+            tiny_haystack = np.zeros((5, 5, 3), dtype=np.uint8)
+            with patch("cv2.destroyWindow"):
+                points = vision.find(tiny_haystack, threshold=50)
+            self.assertEqual(points, [])
+        finally:
+            if needle.exists():
+                needle.unlink()
+            if needle.parent.exists() and not list(needle.parent.iterdir()):
+                needle.parent.rmdir()
 
 
 if __name__ == "__main__":
