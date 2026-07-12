@@ -371,15 +371,12 @@ Set `EVEALERT_DEBUG=1` before launching to enable verbose logging from process s
 
 ---
 
-## Known Issues
+## Known Issues & Limitations
 
-A July 2026 code review identified several bugs now tracked on the
-[issue tracker](https://github.com/bluhayz/eve-alert/issues) — highlights:
+- **EVE SSO login requires your own EVE developer application.** The bundled default client ID is a non-functional placeholder, so ESI OAuth features (personal standings auto-classify, fleet membership display, structure fuel warnings) require registering an application at the [EVE Developers portal](https://developers.eveonline.com/) and entering your client ID under **Settings → Intel & ESI → EVE SSO / ESI OAuth**.
+- **OCR pilot-name detection requires Tesseract installed separately.** The feature is off by default and degrades to a no-op with a log message when the Tesseract engine is not present on the machine.
 
-- **Saving Settings wipes saved profiles and per-image thresholds** (`SettingMenu.save()` rebuilds from defaults). Workaround until fixed: re-save profiles after any Settings save.
-- **ESI name→ID resolution uses removed ESI search endpoints**, so zKillboard intel, pilot lookups, and universe features silently fail; migration to `POST /universe/ids/` is needed.
-- **The web status dashboard's HTML page always errors** (template bug); the JSON endpoints `/api/status` and `/api/log` work fine.
-- EVE SSO login requires registering your own EVE developer application — the bundled default client ID is a non-functional placeholder.
+Found a bug? Please [open an issue](https://github.com/bluhayz/eve-alert/issues) with a diagnostics bundle (**Settings → Alerts & Sound → Diagnostics → Export Diagnostics Bundle**).
 
 ---
 
