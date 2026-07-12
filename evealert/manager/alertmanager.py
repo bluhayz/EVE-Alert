@@ -124,6 +124,10 @@ class AlertAgent:
         # Vision flags (written by vision tasks, read by run task)
         self.enemy = False
         self.faction = False
+        # Match centers from the last enemy scan (for per-enemy dedup, #100)
+        self._enemy_points: list = []
+        # Quantized enemy center -> last-alarm epoch time
+        self._seen_enemies: dict = {}
 
         # Alarm settings
         self.cooldown_timers: dict = {}
@@ -683,8 +687,12 @@ class AlertAgent:
                 enemy = self.alert_vision.find(
                     screenshot, self.detection, self.image_thresholds
                 )
+                # Retain match centers for per-enemy dedup (#100). Set both
+                # together (no await between) so run() sees a consistent pair.
+                self._enemy_points = list(enemy)
                 self.enemy = bool(enemy)
             else:
+                self._enemy_points = []
                 self.enemy = False
                 self._ui(self.main.write_message, "Wrong Alert Settings.", "red")
                 self.clean_up()
@@ -713,6 +721,7 @@ class AlertAgent:
             self.cooldown_timers[alarm_type] = 0
         if alarm_type == "Enemy":
             self._local_hostile_count = 0  # v3.5: reset escalation counter
+            self._seen_enemies = {}  # #100: enemy left — allow re-alert on return
 
         if self.main.webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
@@ -723,6 +732,38 @@ class AlertAgent:
             except Exception as e:
                 logger.error("Error sending reset webhook: %s", e)
             self.webhook_sent = False
+
+    @staticmethod
+    def _quantize_point(point, grid: int = 20) -> tuple:
+        """Snap an (x, y) match center to a coarse grid so sub-pixel jitter
+        between frames maps to the same enemy identity (#100)."""
+        x, y = point
+        return (int(x) // grid, int(y) // grid)
+
+    def _should_alarm_enemy(self) -> bool:
+        """Return True only when a genuinely new enemy has appeared, or an
+        already-seen enemy's cooldown window has elapsed. Prevents the alarm
+        (stats/sound/webhook/plugins/push) from re-firing on every poll while
+        the same enemy stays on screen (#100).
+        """
+        now = time.time()
+        cooldown = max(int(self._cooldown_enemy), 1)
+        keys = {self._quantize_point(p) for p in (self._enemy_points or [])}
+        if not keys:
+            # self.enemy was True but no points — treat as one anonymous enemy.
+            keys = {(-1, -1)}
+
+        trigger = any(
+            key not in self._seen_enemies or (now - self._seen_enemies[key]) >= cooldown
+            for key in keys
+        )
+
+        # Prune the seen-set to enemies still on screen (preserve timestamps).
+        self._seen_enemies = {key: self._seen_enemies.get(key, 0.0) for key in keys}
+        if trigger:
+            for key in keys:
+                self._seen_enemies[key] = now
+        return trigger
 
     async def alarm_detection(
         self, alarm_text: str, sound: str = ALARM_SOUND, alarm_type: str = "Enemy"
@@ -1503,9 +1544,11 @@ class AlertAgent:
                     )
                 if self.enemy:
                     self.alarm_detected = True
-                    await self.alarm_detection(
-                        "Enemy Appears!", self._alarm_sound, "Enemy"
-                    )
+                    # Only alarm for a new/re-eligible enemy, not every poll (#100)
+                    if self._should_alarm_enemy():
+                        await self.alarm_detection(
+                            "Enemy Appears!", self._alarm_sound, "Enemy"
+                        )
             except Exception as e:
                 logger.error("Alert System Error: %s", e, exc_info=True)
                 self.stop()
