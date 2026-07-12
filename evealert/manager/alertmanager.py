@@ -252,6 +252,9 @@ class AlertAgent:
         self._ocr_enabled = False
         self._ocr_region = (0, 0, 0, 0)
 
+        # v4.2: diagnostic verbose-logging mode
+        self._diagnostics_enabled = False
+
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
@@ -672,6 +675,23 @@ class AlertAgent:
             self._webhook_enemy_min = int(wh.get("enemy", {}).get("min_count", 0))
             self._webhook_faction_url = wh.get("faction", {}).get("url", "")
             self._webhook_faction_min = int(wh.get("faction", {}).get("min_count", 0))
+
+            # Diagnostic / verbose-logging mode (#v4.2)
+            diag = settings.get("diagnostics", {})
+            self._diagnostics_enabled = bool(diag.get("enabled", False))
+            from evealert.settings.logger import (  # pylint: disable=import-outside-toplevel
+                set_verbose,
+            )
+
+            set_verbose(
+                self._diagnostics_enabled, restore_level=settings.get("log_level")
+            )
+            if self._diagnostics_enabled:
+                from evealert.settings.diagnostics import (  # pylint: disable=import-outside-toplevel
+                    write_context_log,
+                )
+
+                write_context_log(settings)
 
             if self.main.menu.setting.is_changed:
                 vision_opened = self.alert_vision.is_vision_open

@@ -338,6 +338,39 @@ EVE-Alert/
 - [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — external API surface and failure behavior
 - [docs/FEATURES.md](docs/FEATURES.md) — feature-to-settings-to-module map
 
+## Reporting a Problem / Diagnostics
+
+EVE Alert includes a built-in **Diagnostic Mode** that produces verbose logs and a shareable bundle.
+
+### Enabling verbose logging
+
+1. Open **Settings → Alerts & Sound → Diagnostics**.
+2. Check **Enable diagnostic (verbose) logging**.
+3. Optionally set **Log Level** to `DEBUG` for maximum detail.
+4. Click **Save** then **Apply**.
+
+All app loggers now write at DEBUG level to the log files in the path shown in the Diagnostics section.
+
+### Exporting a diagnostics bundle
+
+After reproducing an issue:
+
+1. Settings → Alerts & Sound → Diagnostics → click **Export Diagnostics Bundle**.
+2. A `eve-alert-diagnostics-<timestamp>.zip` is created in the config directory (your OS file manager opens to its location automatically).
+3. The zip contains all log files, a **secrets-redacted** copy of your settings, and a system/environment info file.
+4. Share the zip when reporting a bug — it contains enough context to diagnose issues remotely.
+
+> **Note:** Log files may contain EVE system names and character names from your session. Push notification tokens, OAuth credentials, and webhook URLs are **redacted** from the settings snapshot.
+
+### EVEALERT_DEBUG environment variable
+
+Set `EVEALERT_DEBUG=1` before launching to enable verbose logging from process start (before the UI is displayed). Useful for startup crashes or issues that occur before the settings UI is accessible:
+
+- Windows: `set EVEALERT_DEBUG=1` then launch `EVEAlert.exe`
+- macOS/Linux: `EVEALERT_DEBUG=1 ./EVEAlert`
+
+---
+
 ## Known Issues
 
 A July 2026 code review identified several bugs now tracked on the

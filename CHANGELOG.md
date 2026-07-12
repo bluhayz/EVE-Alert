@@ -1,5 +1,16 @@
 # Changelog
 
+## [4.2.0] 2026-07-12
+
+### Added
+- **Diagnostic mode** — new **Alerts & Sound → Diagnostics** settings section with:
+  - "Enable diagnostic (verbose) logging" toggle: raises all app loggers to DEBUG for the duration of a session, capturing full call-path detail in the log files.
+  - **Log Level** dropdown (Debug/Info/Warning/Error): surfaces the previously-hidden `log_level` setting.
+  - **Export Diagnostics Bundle** button: packages all log files + a secrets-redacted copy of your settings + a system/environment info snapshot into a single `eve-alert-diagnostics-<timestamp>.zip` in the config directory, then reveals the file in your OS file manager.
+  - Log path label showing where logs are stored.
+- `EVEALERT_DEBUG=1` environment variable: enables verbose DEBUG logging before the UI loads (useful for diagnosing crashes at startup).
+- `evealert/settings/diagnostics.py`: `gather_context()` (app version, OS, Python, monitors, EVE chatlog dir detection, OCR/Tesseract availability, feature flags), `_redact_settings()` (blanks push tokens, OAuth client ID, webhook URLs), `create_bundle()` (creates the export zip).
+
 ## [4.1.0] 2026-07-12
 
 ### Added

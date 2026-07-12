@@ -135,6 +135,10 @@ DEFAULT_SETTINGS = {
         "enabled": False,  # off by default; requires Tesseract installed
         "region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0},  # 0s = use alert region
     },
+    # v4.2: diagnostic / verbose logging mode
+    "diagnostics": {
+        "enabled": False,  # when True, all app loggers run at DEBUG level
+    },
 }
 
 
@@ -525,6 +529,16 @@ FIELDS: list = [
         "fleet_killmail_var",
         False,
     ),
+    # --- Diagnostics section (Alerts & Sound tab) -------------------------
+    FieldSpec(
+        "diagnostics.enabled",
+        "bool",
+        "Alerts & Sound",
+        "Diagnostics",
+        "Enable diagnostic (verbose) logging",
+        "diagnostics_enabled_var",
+        False,
+    ),
 ]
 
 # Tab display order for the CTkTabview.
@@ -565,8 +579,9 @@ class SettingMenu:
         self.changed = False
         self._window_created = False
 
-        # BooleanVar doesn't depend on a window so it can be created here
+        # BooleanVar/StringVar don't depend on a window so can be created here
         self.play_alarm = customtkinter.BooleanVar()
+        self.log_level_var = customtkinter.StringVar(value="INFO")
 
     def _ensure_window(self) -> None:
         """Create the CTkToplevel and all widgets on first call (lazy init)."""
@@ -692,8 +707,7 @@ class SettingMenu:
             self.profile_dropdown.configure(values=profile_names)
             self.profile_var.set(active)
 
-            self.logging.delete(0, customtkinter.END)
-            self.logging.insert(0, settings["log_level"])
+            self.log_level_var.set(settings.get("log_level", "INFO"))
 
             self.alert_region_x_first.delete(0, customtkinter.END)
             self.alert_region_x_first.insert(0, settings["alert_region_1"]["x"])
@@ -866,7 +880,7 @@ class SettingMenu:
             settings = self._read_saved_settings()
             settings.update(
                 {
-                    "log_level": self.logging.get(),
+                    "log_level": self.log_level_var.get(),
                     "alert_region_1": {
                         "x": int(self.alert_region_x_first.get()),
                         "y": int(self.alert_region_y_first.get()),
@@ -1073,6 +1087,35 @@ class SettingMenu:
 
     # ------------------------------------------------------------------
     # Route check helper (v3.2)
+    # ------------------------------------------------------------------
+
+    def _export_diagnostics_bundle(self) -> None:
+        """Create a zip bundle of logs + redacted settings and report its path."""
+        try:
+            from evealert.settings.diagnostics import (  # pylint: disable=import-outside-toplevel
+                create_bundle,
+            )
+
+            settings = self._read_saved_settings()
+            bundle_path = create_bundle(settings)
+            self.main.write_message(f"Diagnostics bundle saved: {bundle_path}", "cyan")
+            # Best-effort: open the containing folder so the user can find the file
+            import subprocess  # noqa: E401  pylint: disable=import-outside-toplevel,multiple-imports
+            import sys
+
+            try:
+                if sys.platform == "win32":
+                    subprocess.Popen(["explorer", "/select,", str(bundle_path)])
+                elif sys.platform == "darwin":
+                    subprocess.Popen(["open", "-R", str(bundle_path)])
+                else:
+                    subprocess.Popen(["xdg-open", str(bundle_path.parent)])
+            except Exception:
+                pass  # Folder reveal is best-effort; the path is in the message
+        except Exception as exc:
+            logger.error("Failed to create diagnostics bundle: %s", exc)
+            self.main.write_message(f"Diagnostics bundle failed: {exc}", "red")
+
     # ------------------------------------------------------------------
 
     def _check_route(self) -> None:
@@ -1426,8 +1469,7 @@ class SettingMenu:
             header, text="Delete", width=60, command=self._delete_profile
         ).grid(row=0, column=5, padx=2)
 
-        # Hidden holder for log_level (no visible widget, round-trips via save)
-        self.logging = customtkinter.CTkEntry(win)
+        # (log_level is now surfaced via self.log_level_var dropdown in the Diagnostics section)
 
         # ── Tabview with a scrollable frame per tab ──────────────────────
         self.tabview = customtkinter.CTkTabview(win, width=680, height=560)
@@ -1698,7 +1740,50 @@ class SettingMenu:
         r += 1
         r = self._build_registry_section(snd, "Alerts & Sound", "Alarm Options", r)
 
-        # ==================================================================
+        _hdr(snd, "Diagnostics", r)
+        r += 1
+        r = self._build_registry_section(snd, "Alerts & Sound", "Diagnostics", r)
+        # Log level dropdown (bespoke — fixed choices, not a free-form entry)
+        customtkinter.CTkLabel(snd, text="Log Level:", justify="left").grid(
+            row=r, column=0, padx=(20, 4), sticky="e"
+        )
+        self.log_level_menu = customtkinter.CTkOptionMenu(
+            snd,
+            values=["DEBUG", "INFO", "WARNING", "ERROR"],
+            variable=self.log_level_var,
+            width=120,
+        )
+        self.log_level_menu.grid(row=r, column=1, sticky="w", padx=(0, 4))
+        r += 1
+        # Export button
+        self.export_diag_button = customtkinter.CTkButton(
+            snd,
+            text="Export Diagnostics Bundle",
+            command=self._export_diagnostics_bundle,
+            width=200,
+        )
+        self.export_diag_button.grid(
+            row=r, column=0, columnspan=2, padx=20, pady=(4, 0), sticky="w"
+        )
+        r += 1
+        # Log path info label
+        from evealert.settings.logger import (  # pylint: disable=import-outside-toplevel
+            get_log_dir,
+        )
+
+        self._diag_log_path_label = customtkinter.CTkLabel(
+            snd,
+            text=f"Logs: {get_log_dir()}",
+            text_color="gray",
+            wraplength=420,
+            justify="left",
+        )
+        self._diag_log_path_label.grid(
+            row=r, column=0, columnspan=3, padx=20, pady=(0, 4), sticky="w"
+        )
+        r += 1
+
+        # ====================================================================
         # Tab: Intel & ESI
         # ==================================================================
         intel = self._tab_frames["Intel & ESI"]

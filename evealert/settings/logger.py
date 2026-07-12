@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -21,11 +22,19 @@ _config_dir = Path(get_settings_path()).parent
 LOG_PATH = _config_dir / "logs"
 LOG_PATH.mkdir(parents=True, exist_ok=True)
 
+# Names of every app-owned logger — used by set_verbose
+_APP_LOGGERS = ("main", "alert", "menu", "tools", "test", "validator")
+
 # Create formatter
 LOG_FORMAT = logging.Formatter(
     LOG_FORMAT_STRING,
     datefmt=LOG_DATE_FORMAT,
 )
+
+
+def get_log_dir() -> Path:
+    """Return the directory where log files are stored."""
+    return LOG_PATH
 
 
 def create_fh(name: str, level: Optional[int] = None) -> RotatingFileHandler:
@@ -113,6 +122,34 @@ def setup_logger(
     return logger
 
 
+def set_verbose(enabled: bool, restore_level: Optional[str] = None) -> None:
+    """Raise or lower all app loggers to match diagnostic mode.
+
+    When *enabled* is True every app logger is set to DEBUG so that full
+    call-path detail lands in the log files.  When disabled the loggers are
+    restored to *restore_level* (or the current settings file value if
+    restore_level is None).
+
+    Third-party libraries (httpx, PIL, etc.) are intentionally left at
+    WARNING to avoid noise.
+    """
+    if enabled:
+        target = logging.DEBUG
+    else:
+        if restore_level is None:
+            config_path = get_settings_path()
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    settings = json.load(f)
+                    restore_level = settings.get("log_level", LOG_DEFAULT_LEVEL)
+            except (FileNotFoundError, json.JSONDecodeError):
+                restore_level = LOG_DEFAULT_LEVEL
+        target = getattr(logging, restore_level.upper(), logging.INFO)
+
+    for name in _APP_LOGGERS:
+        logging.getLogger(name).setLevel(target)
+
+
 # Create default loggers for different modules
 # These can be imported and used throughout the application
 main_log = setup_logger("main")
@@ -129,8 +166,15 @@ logging.basicConfig(
     datefmt=LOG_DATE_FORMAT,
 )
 
+# Honor EVEALERT_DEBUG env var — enables verbose logging before UI loads
+if os.environ.get("EVEALERT_DEBUG", "").strip() not in ("", "0", "false", "no"):
+    set_verbose(True)
+    main_log.info("EVEALERT_DEBUG env var active — verbose logging enabled")
+
 __all__ = [
     "setup_logger",
+    "set_verbose",
+    "get_log_dir",
     "main_log",
     "alert_log",
     "menu_log",
