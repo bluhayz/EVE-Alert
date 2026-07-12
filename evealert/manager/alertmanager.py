@@ -129,6 +129,14 @@ class AlertAgent:
         # Quantized enemy center -> last-alarm epoch time
         self._seen_enemies: dict = {}
 
+        # Long-running asyncio task handles (cancelled in stop(), #102)
+        self.vision_t = None
+        self.vision_faction_t = None
+        self.alert_t = None
+        self._thera_task = None
+        self._sov_task = None
+        self._esi_standings_task = None
+
         # Alarm settings
         self.cooldown_timers: dict = {}
         self.cooldowntimer = DEFAULT_COOLDOWN_TIMER
@@ -400,7 +408,7 @@ class AlertAgent:
                 )
             # v3.6: wormhole awareness tasks
             if self._thera_enabled:
-                self.loop.create_task(self._thera_monitor())
+                self._thera_task = self.loop.create_task(self._thera_monitor())
             if self._wh_drop_enabled:
                 from evealert.tools.wormhole import (  # pylint: disable=import-outside-toplevel
                     WhDropDetector,
@@ -441,11 +449,42 @@ class AlertAgent:
             return True
         return False
 
+    def _shutdown_loop(self) -> None:
+        """Cancel all long-running tasks then stop the loop.
+
+        Runs on the loop's own thread (scheduled via call_soon_threadsafe),
+        so task cancellation is thread-safe (#102).
+        """
+        for task in (
+            self.vision_t,
+            self.vision_faction_t,
+            self.alert_t,
+            self._thera_task,
+            self._sov_task,
+            self._esi_standings_task,
+        ):
+            if task is not None and not task.done():
+                task.cancel()
+        self.loop.stop()
+
     def stop(self) -> None:
         """Stop the detection engine. Safe to call from any thread."""
-        if self.loop is not None and self.loop.is_running():
-            self.loop.stop()
+        # Flip the flag first so any monitor mid-iteration sees False before
+        # the loop is torn down (#102).
         self.running = False
+        # Signal class-based monitors (thread-safe flag flips).
+        for monitor in (
+            self._web_server,
+            self._neighbor_monitor,
+            self._dscan_watcher,
+            self._killmail_monitor,
+            self._intel_watcher,
+        ):
+            if monitor is not None:
+                monitor.stop()
+        # Cancel raw asyncio tasks and stop the loop on the loop's own thread.
+        if self.loop is not None and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self._shutdown_loop)
         try:
             from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
                 get_plugin_manager,
@@ -454,21 +493,11 @@ class AlertAgent:
             get_plugin_manager().call("on_stop")
         except Exception:
             pass
-        if self._web_server is not None:
-            self._web_server.stop()
-            self._web_server = None
-        if self._neighbor_monitor is not None:
-            self._neighbor_monitor.stop()
-            self._neighbor_monitor = None
-        if self._dscan_watcher is not None:
-            self._dscan_watcher.stop()
-            self._dscan_watcher = None
-        if self._killmail_monitor is not None:
-            self._killmail_monitor.stop()
-            self._killmail_monitor = None
-        if self._intel_watcher is not None:
-            self._intel_watcher.stop()
-            self._intel_watcher = None
+        self._web_server = None
+        self._neighbor_monitor = None
+        self._dscan_watcher = None
+        self._killmail_monitor = None
+        self._intel_watcher = None
         self.wincap.close()
         self.currently_playing_sounds.clear()
         self.alarm_trigger_counts.clear()
@@ -1172,7 +1201,7 @@ class AlertAgent:
                 )
 
             # Start the sov change monitor in background
-            self.loop.create_task(
+            self._sov_task = self.loop.create_task(
                 self._sov_monitor(system_id, sov.alliance_id if sov else None)
             )
 
@@ -1254,7 +1283,9 @@ class AlertAgent:
 
             # Standings auto-classify monitor loop (#95)
             if self._esi_standings_classify:
-                self.loop.create_task(self._esi_standings_monitor())
+                self._esi_standings_task = self.loop.create_task(
+                    self._esi_standings_monitor()
+                )
         except Exception as exc:
             logger.debug("ESI deep integration error: %s", exc)
 
