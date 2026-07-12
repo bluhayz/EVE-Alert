@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import tempfile
@@ -195,23 +196,38 @@ class SettingMenu:
         return settings
 
     def merge_settings_with_defaults(self, settings, defaults=None):
-        """Merge the loaded settings with the default settings recursively."""
+        """Merge loaded settings with defaults recursively.
+
+        Preserves user-only keys that have no counterpart in
+        DEFAULT_SETTINGS (saved profiles, per-image thresholds, kos_list
+        entries, custom threat tiers, …) and fills in default keys missing
+        from the loaded settings. Crucially, a default value of ``{}`` no
+        longer wipes the user's populated sub-dict — the previous
+        implementation iterated only over ``defaults`` and returned ``{}``
+        for any key whose default was an empty dict, silently deleting all
+        data stored under it (see issues #99/#108).
+        """
         if defaults is None:
             defaults = self.default
 
-        merged_settings = defaults.copy()
-        for key, value in defaults.items():
-            if key in settings:
-                if isinstance(value, dict) and isinstance(settings[key], dict):
+        merged_settings = {}
+        for key in set(defaults) | set(settings):
+            if key in defaults and key in settings:
+                dval = defaults[key]
+                sval = settings[key]
+                if isinstance(dval, dict) and isinstance(sval, dict):
                     # Recursively merge nested dictionaries
-                    merged_settings[key] = self.merge_settings_with_defaults(
-                        settings[key], value
-                    )
+                    merged_settings[key] = self.merge_settings_with_defaults(sval, dval)
                 else:
-                    merged_settings[key] = settings[key]
+                    merged_settings[key] = sval
+            elif key in settings:
+                # User-only key with no default (e.g. a saved profile or a
+                # per-image threshold entry) — keep it verbatim.
+                merged_settings[key] = settings[key]
             else:
-                # Fill missing keys with default values
-                merged_settings[key] = value
+                # Default-only key (e.g. a newly added feature block) —
+                # deep-copy so callers can't mutate DEFAULT_SETTINGS.
+                merged_settings[key] = copy.deepcopy(defaults[key])
 
         return merged_settings
 
@@ -477,10 +493,29 @@ class SettingMenu:
         self.apply_settings(settings)
         self.changed = True
 
+    def _read_saved_settings(self):
+        """Read + merge the on-disk settings WITHOUT applying to the UI or
+        overlaying the active profile.
+
+        Used as the base for :meth:`save` so that keys which have no
+        Settings-window widget (``profiles``, ``image_thresholds``,
+        ``active_profile``, ``kos_list``, …) are preserved rather than
+        reset to their defaults on every save (issues #99/#108).
+        """
+        config_path = get_settings_path()
+        try:
+            with open(config_path, encoding="utf-8") as config_file:
+                return self.merge_settings_with_defaults(json.load(config_file))
+        except (OSError, json.JSONDecodeError):
+            return copy.deepcopy(self.default)
+
     def save(self):
         """Save settings to disk only (does not apply to running system)."""
         try:
-            settings = DEFAULT_SETTINGS.copy()
+            # Start from the persisted settings (not DEFAULT_SETTINGS) so
+            # non-widget keys — saved profiles, per-image thresholds,
+            # active profile, kos_list — survive the save.
+            settings = self._read_saved_settings()
             settings.update(
                 {
                     "log_level": self.logging.get(),
@@ -1827,6 +1862,10 @@ class SettingMenu:
         """Opens the settings window."""
         if not self.is_open:
             self._ensure_window()
+            # Re-apply persisted settings to the freshly-referenced widgets so
+            # saved values (incl. intelligence checkboxes) show correctly after
+            # an app restart, not the widget constructor defaults (#99/#108).
+            self.load_settings()
             self.open = True
             self.main.mainmenu_buttons.setting_menu.configure(
                 fg_color="#fa0202", hover_color="#bd291e"
