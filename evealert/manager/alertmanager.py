@@ -233,6 +233,8 @@ class AlertAgent:
         self._wh_drop_enabled = False
         self._wh_drop_threshold = 3
         self._wh_drop_detector = None
+        # Names already counted toward the current WH-drop window (#106)
+        self._wh_drop_seen_names: set = set()
 
         # v3.7: fleet context
         self._fleet_composition_enabled = False
@@ -324,11 +326,11 @@ class AlertAgent:
 
         if not valid_alarm:
             logger.warning(error_alarm)
-            self.main.write_message(f"Warning: {error_alarm}", "red")
+            self._ui(self.main.write_message, f"Warning: {error_alarm}", "red")
 
         if not valid_faction:
             logger.warning(error_faction)
-            self.main.write_message(f"Warning: {error_faction}", "red")
+            self._ui(self.main.write_message, f"Warning: {error_faction}", "red")
 
     def start(self) -> bool:
         """Start the detection engine in this (daemon) thread."""
@@ -751,6 +753,9 @@ class AlertAgent:
         if alarm_type == "Enemy":
             self._local_hostile_count = 0  # v3.5: reset escalation counter
             self._seen_enemies = {}  # #100: enemy left — allow re-alert on return
+            self._wh_drop_seen_names.clear()  # #106: reset WH-drop counting
+            if self._wh_drop_detector is not None:
+                self._wh_drop_detector.reset()
 
         if self.main.webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
@@ -816,15 +821,15 @@ class AlertAgent:
                     system = self.main.menu.setting.system_name.get()
                     msg = f"{alarm_type} alarm in {system}" if system else alarm_type
                     asyncio.ensure_future(notifier.send(msg))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Push notification dispatch failed: %s", exc)
 
         # v3.5: auto-screenshot on alarm
         if self._auto_screenshot:
             try:
                 self._capture_alarm_screenshot()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Alarm screenshot failed: %s", exc)
 
         # v3.5: escalation check
         if self._escalation_threshold > 0:
@@ -846,8 +851,8 @@ class AlertAgent:
             ts = time.strftime("%H:%M:%S")
             hook = "on_enemy" if alarm_type == "Enemy" else "on_faction"
             get_plugin_manager().call(hook, system=system, timestamp=ts)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Plugin on_enemy/on_faction hook failed: %s", exc)
 
         # Zkillboard lookup — Enemy alarms only, subject to cooldown
         if alarm_type == "Enemy" and self._zkillboard_enabled:
@@ -912,8 +917,8 @@ class AlertAgent:
             )
 
             get_plugin_manager().call("on_intel", line=stripped)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Plugin on_intel hook failed: %s", exc)
 
     async def _augment_with_esi(self) -> None:
         """Background task: enriched ESI + Zkillboard pilot intel on Enemy alarm.
@@ -953,13 +958,18 @@ class AlertAgent:
             if not names:
                 return
 
-            # v3.6: WH drop heuristic — fire on every batch of new joins
+            # v3.6: WH drop heuristic — count each NEW pilot once (names that
+            # were already counted since the last reset are skipped so the
+            # warning doesn't re-fire on every subsequent alarm, #106).
             if self._wh_drop_detector and self._wh_drop_enabled:
-                for _ in names:
+                new_names = [n for n in names if n not in self._wh_drop_seen_names]
+                for name in new_names:
+                    self._wh_drop_seen_names.add(name)
                     if self._wh_drop_detector.record_join():
                         self._ui(
                             self.main.write_message,
-                            f"WH DROP WARNING: {len(names)} pilot(s) joined Local rapidly — possible fleet drop",
+                            f"WH DROP WARNING: {len(new_names)} new pilot(s) joined "
+                            "Local rapidly — possible fleet drop",
                             "red",
                         )
                         self._wh_drop_detector.reset()
@@ -985,8 +995,8 @@ class AlertAgent:
                             f"Fleet analysis: {composition.threat_summary}",
                             "red",
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Fleet composition analysis failed: %s", exc)
 
             self._ui(self.main.write_message, "ESI — Local pilot intel:", "cyan")
 
@@ -1056,8 +1066,8 @@ class AlertAgent:
                             f"[{danger_pct}% danger]{ship_str}",
                             "cyan",
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Zkillboard profile augmentation failed: %s", exc)
 
                 # ── KOS check (v3.4) ──────────────────────────────────────────
                 try:
@@ -1080,12 +1090,20 @@ class AlertAgent:
                             f"    ⚠ KOS ({kos_result.source}): {info.name} — {kos_result.label}",
                             "red",
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("KOS check failed: %s", exc)
 
                 # ── ESI standings auto-classify (v4.0) ───────────────────────
                 if self._esi_standings_classify and self._esi_standings_cache:
-                    standing = self._esi_standings_cache.get(info.character_id)
+                    # Standings can be set at character, corp, OR alliance level
+                    # (#106) — collect all that apply and use the most hostile.
+                    candidates = [
+                        self._esi_standings_cache.get(info.character_id),
+                        self._esi_standings_cache.get(info.corporation_id),
+                        self._esi_standings_cache.get(info.alliance_id),
+                    ]
+                    found = [s for s in candidates if s is not None]
+                    standing = min(found) if found else None
                     if standing is not None:
                         if standing <= -5.0:
                             tier_color = "red"
@@ -1239,8 +1257,8 @@ class AlertAgent:
                             "yellow",
                         )
                         current_holder = new_holder
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Sovereignty poll failed: %s", exc)
         except Exception as exc:
             logger.debug("Sov monitor error: %s", exc)
 
@@ -1345,10 +1363,12 @@ class AlertAgent:
                     )
                     for conn, dist in hits:
                         jump_word = "jump" if dist == 1 else "jumps"
+                        cls = f" [{conn.system_class}]" if conn.system_class else ""
                         self._ui(
                             self.main.write_message,
-                            f"Thera: {conn.wh_type} connection via {conn.source_system_name}"
-                            f" ({dist} {jump_word} away) — expires {conn.expires_at[:16]}",
+                            f"Thera: {conn.wh_type} to {conn.system_name}{cls} "
+                            f"via {conn.hub_system_name} ({dist} {jump_word} away) "
+                            f"— ~{conn.remaining_hours}h left",
                             "yellow",
                         )
                 except Exception as exc:

@@ -66,9 +66,13 @@ class PushNotifier:
 
     async def _send_telegram(self, message: str) -> None:
         url = f"https://api.telegram.org/bot{self._telegram_token}/sendMessage"
+        # HTML-escape the body: EVE names can contain <, >, & which would
+        # otherwise make Telegram reject the message with HTTP 400 (#106).
+        import html  # pylint: disable=import-outside-toplevel
+
         payload = {
             "chat_id": self._telegram_chat_id,
-            "text": message,
+            "text": html.escape(message),
             "parse_mode": "HTML",
         }
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:

@@ -59,14 +59,15 @@ _TIER_MAP: dict[str, list[str]] = {
         "stealth bomber",
         # Black ops
         "black ops",
-        # Capitals
+        # Capitals — list "supercarrier"/"super carrier" before "carrier" so
+        # the first-match loop labels them correctly (#106).
+        "supercarrier",
+        "super carrier",
         "carrier",
         "dreadnought",
         "force auxiliary",
         "fax",
         "titan",
-        "supercarrier",
-        "super carrier",
         # Specific named ships often used for danger
         "sabre",
         "flycatcher",
@@ -178,6 +179,7 @@ class DscanWatcher:
         self._running = False
         self._log_path: Path | None = None
         self._file_pos: int = 0
+        self._encoding: str | None = None  # detected once per file from the BOM
         # Track what's currently visible to detect disappearances
         self._visible: set[str] = set()
         # Session timeline
@@ -200,6 +202,7 @@ class DscanWatcher:
             if new_path != self._log_path:
                 self._log_path = new_path
                 self._file_pos = new_path.stat().st_size if new_path else 0
+                self._encoding = None
                 self._visible.clear()
 
             if self._log_path is not None:
@@ -209,6 +212,26 @@ class DscanWatcher:
 
     # ------------------------------------------------------------------
 
+    def _detect_encoding(self) -> str:
+        """Detect the log encoding once from the BOM. EVE writes UTF-16 (older
+        clients) or UTF-8 (newer); mid-file chunks have no BOM, so we sniff the
+        file header separately."""
+        if self._encoding:
+            return self._encoding
+        bom = b""
+        try:
+            with open(self._log_path, "rb") as fh:
+                bom = fh.read(4)
+        except OSError:
+            pass
+        if bom.startswith(b"\xff\xfe"):
+            self._encoding = "utf-16-le"
+        elif bom.startswith(b"\xfe\xff"):
+            self._encoding = "utf-16-be"
+        else:
+            self._encoding = "utf-8"
+        return self._encoding
+
     def _tail_once(self) -> None:
         assert self._log_path is not None
         try:
@@ -216,48 +239,95 @@ class DscanWatcher:
         except OSError:
             return
 
-        if size < self._file_pos:
+        if size < self._file_pos:  # file truncated / rotated
             self._file_pos = 0
-        if size == self._file_pos:
+            self._visible.clear()
+        if size <= self._file_pos:
             return
 
+        # Read new bytes from the last byte offset and decode manually. Seeking
+        # a text-mode UTF-16 reader to an arbitrary byte offset is invalid
+        # (only tell()-returned values are legal) and misaligns reads (#101).
         try:
-            with open(self._log_path, encoding="utf-16", errors="replace") as fh:
+            with open(self._log_path, "rb") as fh:
                 fh.seek(self._file_pos)
-                chunk = fh.read(min(size - self._file_pos, _MAX_READ))
-                self._file_pos = fh.tell()
-        except (OSError, UnicodeError):
-            # EVE D-scan files may be UTF-16 or UTF-8 depending on client version
-            try:
-                with open(self._log_path, encoding="utf-8", errors="replace") as fh:
-                    fh.seek(self._file_pos)
-                    chunk = fh.read(min(size - self._file_pos, _MAX_READ))
-                    self._file_pos = fh.tell()
-            except OSError:
-                return
+                raw = fh.read(min(size - self._file_pos, _MAX_READ))
+        except OSError:
+            return
 
-        # Each D-scan line: "Name\tDistance\tType\tGroup"
-        # We care about the Type column (index 2) for classification.
+        encoding = self._detect_encoding()
+        # UTF-16 is 2 bytes/char — keep the chunk length even.
+        if encoding.startswith("utf-16") and len(raw) % 2:
+            raw = raw[:-1]
+        text = raw.decode(encoding, errors="replace")
+
+        read_to_eof = (self._file_pos + len(raw)) >= size
+        # Process only complete lines; leave any trailing partial line for the
+        # next poll so a record is never split mid-line.
+        last_nl = text.rfind("\n")
+        if last_nl == -1:
+            if not read_to_eof:
+                return  # wait for a full line
+            complete_text = text
+        else:
+            complete_text = text[: last_nl + 1]
+        self._file_pos += len(complete_text.encode(encoding))
+
+        current_scan, probe_detected = self._parse_lines(complete_text)
+
+        if probe_detected:
+            try:
+                self._on_probe()
+            except Exception:
+                pass
+
+        # Only compute disappearances when we've consumed the whole file —
+        # a truncated 64KB read would otherwise flag everything not in the
+        # partial chunk as "disappeared" (#101).
+        if read_to_eof:
+            disappeared = self._visible - current_scan
+            for name in disappeared:
+                entry = DscanEntry(
+                    name=name,
+                    tier=classify_entry(name),
+                    timestamp=time.time(),
+                    appeared=False,
+                )
+                self.timeline.append(entry)
+                try:
+                    self._on_entry(entry)
+                except Exception:
+                    pass
+            if current_scan:
+                self._visible = current_scan
+        else:
+            # Accumulate visibility across partial reads without evicting.
+            self._visible |= current_scan
+
+    def _parse_lines(self, text: str) -> tuple[set, bool]:
+        """Parse D-scan lines, classifying by the Type column (index 2) and
+        falling back to the object name (index 0). Returns (current_scan set,
+        probe_detected)."""
         current_scan: set[str] = set()
         probe_detected = False
-
-        for line in chunk.splitlines():
+        for line in text.splitlines():
             parts = line.strip().split("\t")
-            if len(parts) < 1:
-                continue
-            # Use the full name for classification; first column is the object name
-            obj_name = parts[0].strip()
+            obj_name = parts[0].strip() if parts else ""
             if not obj_name:
                 continue
+            type_name = parts[2].strip() if len(parts) >= 3 else ""
 
             current_scan.add(obj_name)
-            tier = classify_entry(obj_name)
+            # Ship type (col 2) is the reliable classification source; the name
+            # (col 0) is often a custom ship name that matches no keyword (#101).
+            tier = classify_entry(type_name) if type_name else "unknown"
+            if tier == "unknown":
+                tier = classify_entry(obj_name)
 
             entry = DscanEntry(
                 name=obj_name, tier=tier, timestamp=time.time(), appeared=True
             )
             self.timeline.append(entry)
-
             try:
                 self._on_entry(entry)
             except Exception:
@@ -270,30 +340,7 @@ class DscanWatcher:
                     self._on_threat(tier, obj_name)
                 except Exception:
                     pass
-
-        if probe_detected:
-            try:
-                self._on_probe()
-            except Exception:
-                pass
-
-        # Detect disappearances from previous scan
-        disappeared = self._visible - current_scan
-        for name in disappeared:
-            entry = DscanEntry(
-                name=name,
-                tier=classify_entry(name),
-                timestamp=time.time(),
-                appeared=False,
-            )
-            self.timeline.append(entry)
-            try:
-                self._on_entry(entry)
-            except Exception:
-                pass
-
-        if current_scan:
-            self._visible = current_scan
+        return current_scan, probe_detected
 
     @staticmethod
     def _find_dscan_dir() -> Path | None:

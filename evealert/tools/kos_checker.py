@@ -57,6 +57,20 @@ class KosChecker:
     def update_local_list(self, hostile_list: dict) -> None:
         self._local = {k.lower(): v for k, v in hostile_list.items()}
 
+    def reconfigure(
+        self,
+        api_urls: list[str] | None = None,
+        local_hostile_list: dict | None = None,
+        cva_enabled: bool | None = None,
+    ) -> None:
+        """Update settings in place without discarding the result cache."""
+        if api_urls is not None:
+            self._api_urls = list(api_urls)
+        if local_hostile_list is not None:
+            self._local = local_hostile_list
+        if cva_enabled is not None:
+            self._cva_enabled = cva_enabled
+
     async def check(
         self, pilot_name: str, corp_name: str = "", alliance_name: str = ""
     ) -> KosResult | None:
@@ -64,7 +78,7 @@ class KosChecker:
 
         Returns a KosResult if KOS, or None if clean / unknown.
         """
-        key = pilot_name.lower()
+        key = (pilot_name.lower(), corp_name.lower(), alliance_name.lower())
         cached_at, cached_result = self._cache.get(key, (0.0, None))
         if time.time() - cached_at < _CACHE_TTL:
             return cached_result
@@ -92,23 +106,32 @@ class KosChecker:
         if not _HTTPX_AVAILABLE:
             return None
 
-        # 2. CVA KOS API
+        # 2. CVA KOS API — check pilot, then corp, then alliance (a pilot in
+        #    a KOS corp/alliance is KOS even if personally clean, #101).
+        #    NOTE: the CVA KOS service (kos.cva-eve.com) is frequently offline;
+        #    failures degrade gracefully to None.
         if self._cva_enabled:
-            result = await self._query_cva(pilot)
-            if result:
-                return result
+            for entity in (pilot, corp, alliance):
+                if not entity:
+                    continue
+                result = await self._query_cva(entity)
+                if result:
+                    return result
 
-        # 3. Custom API URLs
+        # 3. Custom API URLs — same pilot/corp/alliance sweep
         for url in self._api_urls:
-            result = await self._query_custom(url, pilot)
-            if result:
-                return result
+            for entity in (pilot, corp, alliance):
+                if not entity:
+                    continue
+                result = await self._query_custom(url, entity)
+                if result:
+                    return result
 
         return None
 
     async def _query_cva(self, pilot: str) -> KosResult | None:
         """Query the CVA KOS API for *pilot*."""
-        params = {"c": "json", "q": pilot, "type": "unit", "details": "1"}
+        params = {"c": "json", "q": pilot, "type": "pilot", "details": "1"}
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(_CVA_KOS_URL, params=params)
@@ -127,7 +150,7 @@ class KosChecker:
 
     async def _query_custom(self, base_url: str, pilot: str) -> KosResult | None:
         """Query a custom KOS API (same JSON format as CVA KOS expected)."""
-        params = {"c": "json", "q": pilot, "type": "unit"}
+        params = {"c": "json", "q": pilot, "type": "pilot"}
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(base_url, params=params)
@@ -153,7 +176,15 @@ _checker: KosChecker | None = None
 
 
 def get_kos_checker(**kwargs) -> KosChecker:
+    """Return the shared KosChecker singleton, creating it on first use.
+
+    Previously any call passing kwargs rebuilt the singleton and discarded the
+    10-minute cache; now the instance is created once and reused. Use
+    :meth:`KosChecker.reconfigure` to change settings without losing the cache.
+    """
     global _checker
     if _checker is None:
         _checker = KosChecker(**kwargs)
+    elif kwargs:
+        _checker.reconfigure(**kwargs)
     return _checker

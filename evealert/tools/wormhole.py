@@ -20,7 +20,7 @@ except ImportError:
 logger = logging.getLogger("alert.wormhole")
 
 _HTTP_TIMEOUT = 8.0
-_EVE_SCOUT_URL = "https://www.eve-scout.com/api/wormholes"
+_EVE_SCOUT_URL = "https://api.eve-scout.com/v2/public/signatures"
 
 # WH system ID range: 31000000 – 32000000
 _WH_SYSTEM_MIN = 31_000_000
@@ -28,13 +28,14 @@ _WH_SYSTEM_MAX = 32_000_000
 
 
 class TheraConnection(NamedTuple):
-    source_system_id: int
-    source_system_name: str
-    source_wh_class: str
-    destination_system_id: int
-    destination_system_name: str
-    wh_type: str
+    hub_system_id: int  # Thera or Turnur (Eve-Scout "out" side)
+    hub_system_name: str
+    system_id: int  # the connected system (Eve-Scout "in" side)
+    system_name: str
+    system_class: str  # e.g. "c4", "hs", "ls", "ns" (from Eve-Scout)
+    wh_type: str  # signature code, e.g. "J377"
     expires_at: str  # ISO string
+    remaining_hours: int
 
 
 # ------------------------------------------------------------------
@@ -43,13 +44,18 @@ class TheraConnection(NamedTuple):
 
 
 async def get_thera_connections() -> list[TheraConnection]:
-    """Fetch current Thera wormhole connections from Eve-Scout."""
+    """Fetch current Thera/Turnur wormhole connections from Eve-Scout.
+
+    Uses the Eve-Scout v2 public signatures API. Its schema is flat (no
+    nested type/system objects) — the previous code assumed nested dicts and
+    an endpoint that no longer exists, so it always returned [] (#101).
+    """
     if not _HTTPX_AVAILABLE:
         return []
     try:
         async with httpx.AsyncClient(
             timeout=_HTTP_TIMEOUT,
-            headers={"User-Agent": "EVEAlert/3.6"},
+            headers={"User-Agent": "EVEAlert/4.0"},
         ) as client:
             resp = await client.get(_EVE_SCOUT_URL)
             resp.raise_for_status()
@@ -60,18 +66,19 @@ async def get_thera_connections() -> list[TheraConnection]:
 
     connections: list[TheraConnection] = []
     for entry in data if isinstance(data, list) else []:
+        if entry.get("signature_type") != "wormhole":
+            continue
         try:
-            src = entry.get("sourceSolarSystem", {})
-            dst = entry.get("destinationSolarSystem", {})
             connections.append(
                 TheraConnection(
-                    source_system_id=src.get("id", 0),
-                    source_system_name=src.get("name", "?"),
-                    source_wh_class=src.get("whClass", "?"),
-                    destination_system_id=dst.get("id", 0),
-                    destination_system_name=dst.get("name", "?"),
-                    wh_type=entry.get("type", {}).get("name", "?"),
-                    expires_at=entry.get("expiresAt", ""),
+                    hub_system_id=entry.get("out_system_id", 0),
+                    hub_system_name=entry.get("out_system_name", "?"),
+                    system_id=entry.get("in_system_id", 0),
+                    system_name=entry.get("in_system_name", "?"),
+                    system_class=entry.get("in_system_class", ""),
+                    wh_type=entry.get("wh_type", "?"),
+                    expires_at=entry.get("expires_at", ""),
+                    remaining_hours=int(entry.get("remaining_hours") or 0),
                 )
             )
         except Exception:
@@ -98,7 +105,7 @@ async def find_nearby_thera_connections(
     connections = await get_thera_connections()
     results = []
     for conn in connections:
-        for sys_id in (conn.source_system_id, conn.destination_system_id):
+        for sys_id in (conn.hub_system_id, conn.system_id):
             if sys_id in all_system_ids:
                 jump_dist = nearby_systems.get(sys_id, 0)
                 results.append((conn, jump_dist))
@@ -150,22 +157,17 @@ async def get_wh_static_info(system_id: int) -> dict | None:
 
 
 def _infer_wh_class(system_id: int) -> str:
-    """Infer WH class from system ID range (approximate)."""
-    if 31000001 <= system_id <= 31000199:
-        return "C1"
-    if 31000200 <= system_id <= 31000399:
-        return "C2"
-    if 31000400 <= system_id <= 31000599:
-        return "C3"
-    if 31000600 <= system_id <= 31000799:
-        return "C4"
-    if 31000800 <= system_id <= 31000999:
-        return "C5"
-    if 31001000 <= system_id <= 31001199:
-        return "C6"
-    if 31001200 <= system_id <= 31001999:
-        return "Thera / Special"
-    return "Unknown WH"
+    """WH class is not derivable from the solar-system ID (CCP stores it in
+    the SDE; the IDs are not laid out in sequential class bands — e.g. Thera
+    is 31000005). Return an honest "Unknown" rather than a fabricated class
+    (#101). Eve-Scout supplies the class directly for Thera connections via
+    TheraConnection.system_class.
+    """
+    if not is_wormhole_system(system_id):
+        return "k-space"
+    if system_id == 31000005:
+        return "Thera"
+    return "Unknown"
 
 
 # ------------------------------------------------------------------

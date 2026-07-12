@@ -203,6 +203,10 @@ class EsiAuth:
                 await writer.drain()
             finally:
                 writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
 
         server = await asyncio.start_server(handle, "127.0.0.1", _REDIRECT_PORT)
         try:
