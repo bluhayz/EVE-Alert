@@ -1,6 +1,6 @@
 # EVE Alert
 
-EVE Alert monitors your EVE Online Local chat window for enemy and neutral player icons using OpenCV template matching, then fires audio alarms and optional Discord webhook notifications — giving you a heads-up without breaking your focus.
+EVE Alert monitors your EVE Online Local chat window for enemy and neutral player icons using OpenCV template matching, then fires audio alarms, Discord webhooks, and mobile push notifications — giving you a heads-up without breaking your focus. Beyond screen detection it layers in a full intel suite: pilot background checks via ESI, zKillboard kill activity, D-scan threat classification, KOS list checks, adjacent-system and wormhole awareness, and (since v4.0) EVE SSO login for personal standings, fleet, and structure-fuel data.
 
 [![Tests](https://github.com/bluhayz/EVE-Alert/actions/workflows/tests.yml/badge.svg)](https://github.com/bluhayz/EVE-Alert/actions/workflows/tests.yml)
 [![Latest Release](https://img.shields.io/github/v/release/bluhayz/EVE-Alert)](https://github.com/bluhayz/EVE-Alert/releases)
@@ -50,6 +50,23 @@ A second, independent region (Faction Region) watches for faction spawn or other
 - **Zkillboard kill intelligence** — optional async lookup of recent kills in your configured system on each Enemy alarm
 - **Intel channel log watcher** — optional real-time tail of your EVE chat log; new lines appear in the log pane
 - Statistics window showing lifetime totals, current-session counts, history, and past-session report browser
+
+### Intelligence & alerting (v3.0 – v4.0)
+
+- **ESI pilot intel** — on each Enemy alarm, recent Local joiners are looked up via public ESI: corp/alliance, character age, corp-history count, security status, and a zKillboard kill/loss profile per pilot
+- **Threat tiers** — map pilot/corp/alliance name fragments to red/orange/yellow tiers; matched pilots get `⚠ [KOS-RED]` / `⚠ [HOSTILE]` / `[CAUTION]` prefixes
+- **Flashy & cyno-alt warnings** — distinct alerts for sec-status ≤ −5 pilots and characters younger than 30 days
+- **KOS checker** — queries the CVA KOS API plus any custom KOS endpoints per pilot
+- **D-scan monitor** — tails EVE's D-scan log files, classifies ships into RED/ORANGE/YELLOW/GREEN threat tiers, and fires a distinct probe-detection alert
+- **Adjacent-system monitor** — polls zKillboard for kill activity within a configurable jump radius (BFS over the ESI stargate graph)
+- **Route threat check** — one-click threat assessment of every hop from your system to a destination
+- **System context on start** — pipe/pocket/crossroads classification, sovereignty holder, and a background sov-change monitor
+- **Wormhole awareness** — Thera connection monitor (Eve-Scout) and a WH fleet-drop heuristic (rapid multi-pilot Local joins)
+- **Fleet context** — hostile fleet composition analysis when 3+ hostiles appear; killmail notifications for tracked characters
+- **Push notifications** — Telegram Bot, Pushover, and ntfy.sh channels; auto-screenshot on alarm; alarm escalation counter
+- **Web status dashboard** — optional localhost HTTP server with a live status page and JSON API (`/api/status`, `/api/log`)
+- **Plugin system** — drop `.py` files into the user plugins directory; hooks for `on_start`, `on_stop`, `on_enemy`, `on_faction`, `on_intel`
+- **EVE SSO login (v4.0)** — OAuth2 authorization-code flow; personal standings auto-classification of Local pilots, fleet membership display, and structure fuel-expiry warnings (requires registering your own EVE developer application client ID)
 - Platform-aware settings storage: `%APPDATA%\evealert` on Windows, `~/Library/Application Support/evealert` on macOS
 - Rotating log files (5 MB x 3 backups) with configurable log level
 - Support for multiple UI scaling variants of template images (e.g. `image_1_90%.png`, `image_1_100%.png`)
@@ -257,6 +274,10 @@ EVE-Alert/
 ├── pyproject.toml                  # Package metadata, dependencies, build config
 ├── COCO.md                         # AI agent architecture context document
 ├── CHANGELOG.md
+├── docs/
+│   ├── ARCHITECTURE.md             # Module inventory, threading model, data flow
+│   ├── INTEGRATIONS.md             # Every external API used, timeouts, failure modes
+│   └── FEATURES.md                 # Feature ↔ settings-key ↔ module lookup table
 │
 ├── evealert/
 │   ├── __init__.py                 # Version string (__version__)
@@ -267,13 +288,13 @@ EVE-Alert/
 │   ├── tray.py                     # System-tray integration (pystray)
 │   │
 │   ├── manager/
-│   │   └── alertmanager.py         # Core detection loop, audio, webhook, Zkillboard dispatch
+│   │   └── alertmanager.py         # Core engine: vision loops, alarms, all intel task wiring
 │   │
 │   ├── menu/
 │   │   ├── main.py                 # Main window and button layout
-│   │   ├── config.py               # Config Mode overlay and region selection
+│   │   ├── config.py               # Config Mode window, EVE window auto-detect
 │   │   ├── image_manager.py        # Add/remove/preview custom template images
-│   │   ├── setting.py              # Settings dialog
+│   │   ├── setting.py              # Settings dialog + DEFAULT_SETTINGS schema
 │   │   ├── statistics.py           # Statistics window (live stats + sessions tab)
 │   │   └── threshold_editor.py     # Per-image threshold editor
 │   │
@@ -284,21 +305,47 @@ EVE-Alert/
 │   │   └── validator.py            # Settings schema validation
 │   │
 │   ├── tools/
+│   │   ├── dscan_watcher.py        # D-scan log tail + ship threat classification
+│   │   ├── esi_auth.py             # EVE SSO OAuth2 + authed ESI helpers (v4.0)
+│   │   ├── esi_standings.py        # Public-ESI pilot intel + Local join parser
+│   │   ├── fleet_context.py        # Fleet composition, TZ profile, killmail monitor
 │   │   ├── intel_watcher.py        # EVE chat log tail watcher
-│   │   ├── overlay.py              # Bounding-box overlay window
+│   │   ├── kos_checker.py          # CVA / custom KOS API checks
+│   │   ├── neighbor_monitor.py     # Adjacent-system kill polling
+│   │   ├── overlay.py              # Region-selection marquee overlay
+│   │   ├── plugin_loader.py        # User plugin discovery and hook dispatch
+│   │   ├── push_notifier.py        # Telegram / Pushover / ntfy push channels
+│   │   ├── universe.py             # System cache, jump-graph BFS, sov, route threat
+│   │   ├── update_checker.py       # GitHub Releases version check
 │   │   ├── vision.py               # OpenCV template matching engine
+│   │   ├── web_server.py           # Localhost status dashboard + JSON API
 │   │   ├── window_finder.py        # Cross-platform EVE window detection
 │   │   ├── windowscapture.py       # mss-based screen region capture
+│   │   ├── wormhole.py             # Thera monitor, WH class, drop heuristic
 │   │   └── zkillboard.py           # Zkillboard + ESI kill lookup
 │   │
 │   ├── img/                        # Bundled template and UI images
 │   └── sound/                      # Bundled audio files
 │
-└── tests/
-    ├── test_alertmanager.py
-    ├── test_vision.py
-    └── test_validator.py
+└── tests/                          # pytest suite (9 modules; GUI + newer intel tools untested)
 ```
+
+## Documentation
+
+- [COCO.md](COCO.md) — canonical AI-agent context: thread-safety rules, conventions, release process
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module inventory and data flow
+- [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — external API surface and failure behavior
+- [docs/FEATURES.md](docs/FEATURES.md) — feature-to-settings-to-module map
+
+## Known Issues
+
+A July 2026 code review identified several bugs now tracked on the
+[issue tracker](https://github.com/bluhayz/eve-alert/issues) — highlights:
+
+- **Saving Settings wipes saved profiles and per-image thresholds** (`SettingMenu.save()` rebuilds from defaults). Workaround until fixed: re-save profiles after any Settings save.
+- **ESI name→ID resolution uses removed ESI search endpoints**, so zKillboard intel, pilot lookups, and universe features silently fail; migration to `POST /universe/ids/` is needed.
+- **The web status dashboard's HTML page always errors** (template bug); the JSON endpoints `/api/status` and `/api/log` work fine.
+- EVE SSO login requires registering your own EVE developer application — the bundled default client ID is a non-functional placeholder.
 
 ---
 

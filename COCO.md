@@ -3,6 +3,11 @@
 > **For AI coding assistants.** This document is the canonical source of
 > architecture, design decisions, and conventions for the EVE-Alert repository.
 > Read this before touching any source file.
+>
+> Companion references in `docs/`:
+> - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full v4.0 module inventory, data flow, singleton caveats
+> - [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — every external API endpoint used, timeouts, failure modes
+> - [docs/FEATURES.md](docs/FEATURES.md) — feature ↔ settings-key ↔ module lookup table
 
 ---
 
@@ -202,6 +207,18 @@ if time.time() < self.cooldown_timers[alarm_type]:
 | `window_finder.py` | `find_eve_window()` — cross-platform EVE client window detection (`pygetwindow` on Windows, `osascript` on macOS) |
 | `windowscapture.py` | `WindowCapture` — `mss`-based screen region capture; lazy `_sct` init (see Rule 2) |
 | `zkillboard.py` | `ZkillboardClient` — async ESI system-ID lookup + Zkillboard kill fetch with TTL cache; module-level `get_client()` singleton |
+| `esi_standings.py` | `EsiLookup` — public-ESI pilot intel (corp/alliance/age/sec status/corp history + zKillboard kill profile); `extract_joining_characters()` Local-log parser (v3.0/3.1) |
+| `esi_auth.py` | `EsiAuth` — EVE SSO OAuth2 token lifecycle + authed helpers: personal standings, fleet membership, structure fuel warnings (v4.0) |
+| `universe.py` | `UniverseCache` — system ID/name cache, stargate jump-graph BFS, pipe/pocket classification, sovereignty map, route threat (v3.2) |
+| `neighbor_monitor.py` | `NeighborMonitor` — polls zKillboard for kills within N jumps (v3.2) |
+| `dscan_watcher.py` | `DscanWatcher` — tails EVE D-scan logs, classifies ships into RED/ORANGE/YELLOW/GREEN tiers, probe detection, session timeline (v3.3) |
+| `kos_checker.py` | `KosChecker` — CVA KOS API + custom KOS endpoints + local hostile list, TTL-cached (v3.4) |
+| `push_notifier.py` | `PushNotifier` — Telegram Bot / Pushover / ntfy.sh push channels (v3.5) |
+| `wormhole.py` | Thera connection lookup (Eve-Scout), WH class inference, `WhDropDetector` rapid-join heuristic (v3.6) |
+| `fleet_context.py` | Fleet composition analysis, `ActivityProfile` TZ histogram, `KillmailMonitor` tracked-character poller (v3.7) |
+| `web_server.py` | `WebStatusServer` — stdlib-asyncio localhost dashboard + `/api/status`, `/api/log` JSON endpoints (v3.0) |
+| `plugin_loader.py` | `PluginManager` — loads user `.py` plugins; `on_start/on_stop/on_enemy/on_faction/on_intel` hooks in a thread pool (v3.0) |
+| `update_checker.py` | `check_for_update()` — GitHub Releases version comparison (v2.6) |
 
 ### `evealert/settings/`
 
@@ -290,6 +307,16 @@ if time.time() < self.cooldown_timers[alarm_type]:
 | `intelligence.zkillboard_cooldown` | `int` | Seconds between Zkillboard lookups for the same system (default 300) |
 | `intelligence.intel_log_enabled` | `bool` | Tail EVE chat log file for intel channel messages |
 | `intelligence.intel_log_channel` | `str` | Partial filename to match the intel channel log (e.g. `"Intel"`) |
+
+> **Schema drift note:** the JSON block above reflects the v2.5-era core. Since
+> then `DEFAULT_SETTINGS` (in `evealert/menu/setting.py` — always the source of
+> truth) has grown these additional top-level blocks:
+> `cooldown_timer_enemy`, `cooldown_timer_faction`, `server.webhook_template`,
+> `webhooks` (per-type URLs + min_count), `esi`, `threat_tiers`, `plugins`,
+> `web_ui`, `adjacent`, `dscan`, `kos`, `kos_list`, `push`, `notifications`,
+> `wormhole`, `fleet`, `esi_oauth`. See
+> [docs/FEATURES.md](docs/FEATURES.md) for what each block controls and where
+> it is consumed.
 
 ### Storage Locations
 
