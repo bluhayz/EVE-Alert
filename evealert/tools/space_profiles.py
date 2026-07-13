@@ -38,7 +38,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "alerts.rearm_minutes":       2,
         "notifications.tts_enabled":  False,
         "intelligence.zkillboard_enabled": True,
-        "kos.cva_kos_enabled":        True,
+        "kos.cva_enabled":            True,
     },
     "wormhole": {
         "label": "Wormhole",
@@ -52,7 +52,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "notifications.tts_enabled":  True,
         "notifications.tts_rate":     175,
         "intelligence.zkillboard_enabled": True,
-        "kos.cva_kos_enabled":        False,
+        "kos.cva_enabled":            False,
     },
     "highsec": {
         "label": "High-sec",
@@ -65,7 +65,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "alerts.rearm_minutes":       0,
         "notifications.tts_enabled":  False,
         "intelligence.zkillboard_enabled": False,
-        "kos.cva_kos_enabled":        False,
+        "kos.cva_enabled":            False,
     },
 }
 

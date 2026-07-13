@@ -227,24 +227,26 @@ class MainWindow(QMainWindow):
             w.style().polish(w)
 
     def _build_tray(self) -> None:
-        self._tray = AppTray(self)
-        self._tray.show()
+        try:
+            self._tray = AppTray(self)
+            self._tray.show()
+        except Exception:
+            logger.debug("System tray not available; running without tray icon.")
+            self._tray = None
 
     def _setup_hotkeys(self) -> None:
         """Start the pynput global-hotkey listener on a daemon thread."""
+        # Initialise the live-reloadable bindings
+        self.reload_hotkeys()
         try:
             from pynput import keyboard  # noqa: PLC0415
-
-            hotkeys = self.store.load().get("hotkeys", {})
-            alert_key = hotkeys.get("alert_region", "f1")
-            faction_key = hotkeys.get("faction_region", "f2")
-
             from evealert.hotkeys import key_matches  # noqa: PLC0415
 
             def _on_release(key):
-                if key_matches(key, alert_key):
+                # Read from self so reload_hotkeys() takes effect without restart (#161)
+                if key_matches(key, self._hotkey_alert_key):
                     self.hotkey_pressed.emit("alert")
-                elif key_matches(key, faction_key):
+                elif key_matches(key, self._hotkey_faction_key):
                     self.hotkey_pressed.emit("faction")
                 elif key_matches(key, "f3"):
                     self.hotkey_pressed.emit("profile")
@@ -260,6 +262,12 @@ class MainWindow(QMainWindow):
             self._hotkey_listener = None
 
         self.hotkey_pressed.connect(self._on_hotkey)
+
+    def reload_hotkeys(self) -> None:
+        """Re-read hotkey bindings from the store (called after settings save)."""
+        hotkeys = self.store.load_raw().get("hotkeys", {})
+        self._hotkey_alert_key = hotkeys.get("alert_region", "f1")
+        self._hotkey_faction_key = hotkeys.get("faction_region", "f2")
 
     # ------------------------------------------------------------------
     # Engine control
@@ -364,7 +372,8 @@ class MainWindow(QMainWindow):
 
         self._btn_start.setEnabled(not running)
         self._btn_stop.setEnabled(running)
-        self._tray.sync_run_state(running)
+        if self._tray is not None:
+            self._tray.sync_run_state(running)
 
     # ------------------------------------------------------------------
     # Dialog launchers (filled in by Phases 3–5)
@@ -384,9 +393,10 @@ class MainWindow(QMainWindow):
             from evealert.ui.settings_dialog import SettingsDialog  # noqa: PLC0415
             self._settings_dlg = SettingsDialog(self, self.store)
         self._settings_dlg.show_dialog()
-        # Refresh context line when dialog saves
-        if hasattr(self._settings_dlg, 'accepted'):
-            self._settings_dlg.accepted.connect(self.refresh_context_line)
+        # Refresh is triggered from _save_and_apply() directly; no accepted.connect
+        # needed (and accepted never fires because Save calls _save_and_apply, not
+        # self.accept()). Connecting here on every open would accumulate duplicate
+        # connections anyway (#162).
 
     def _open_statistics(self) -> None:
         if self._stats_dlg is None:
@@ -401,10 +411,12 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_hotkey(self, kind: str) -> None:
         if kind in ("alert", "faction"):
-            if self._config_dlg is not None:
+            # Only act when Config Mode dialog is actually visible (#154 — F1 is
+            # the EVE fire-weapons key and must not activate after dialog was
+            # opened once but is now closed).
+            if self._config_dlg is not None and self._config_dlg.isVisible():
                 self._config_dlg.start_selection(kind)
-            else:
-                self.append_log(f"Hotkey {kind}: open Config Mode first", "yellow")
+            # else: silently ignore — do NOT log; F1/F2 in-game must be clean
         elif kind == "profile":
             self._cycle_space_profile()
         elif kind == "status":
@@ -496,12 +508,13 @@ class MainWindow(QMainWindow):
         """Hide to tray instead of closing."""
         event.ignore()
         self.hide()
-        self._tray.showMessage(
-            "EVE Alert",
-            "Running in the system tray. Double-click to restore.",
-            AppTray.MessageIcon.Information,
-            2000,
-        )
+        if self._tray is not None:
+            self._tray.showMessage(
+                "EVE Alert",
+                "Running in the system tray. Double-click to restore.",
+                AppTray.MessageIcon.Information,
+                2000,
+            )
 
     def exit_app(self) -> None:
         """Hard exit: stop engine, hide tray, quit Qt."""
@@ -515,5 +528,6 @@ class MainWindow(QMainWindow):
         if self.alert.is_running:
             self.alert.stop()
         # Hide tray icon so it doesn't ghost
-        self._tray.hide()
+        if self._tray is not None:
+            self._tray.hide()
         QApplication.quit()

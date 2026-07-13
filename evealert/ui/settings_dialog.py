@@ -329,8 +329,19 @@ class SettingsDialog(QDialog):
 
         # ESI OAuth (non-registry parts: client_id, login/logout, status)
         box, form = _group("EVE SSO / ESI OAuth")
-        self._esi_client_id = QLineEdit(); self._esi_client_id.setPlaceholderText("Leave blank for built-in public client")
-        self._esi_status_label = QLabel("Not authenticated"); self._esi_status_label.setProperty("class", "muted")
+        self._esi_client_id = QLineEdit()
+        self._esi_client_id.setPlaceholderText(
+            "Required \u2014 register a free app at developers.eveonline.com"
+        )
+        esi_help = QLabel(
+            "App type: <b>Authentication Only</b> \u2014 "
+            "Callback: <code>http://localhost:4557/callback</code> \u2014 "
+            "Client ID must be a 32-character hex string"
+        )
+        esi_help.setWordWrap(True)
+        esi_help.setProperty("class", "muted")
+        self._esi_status_label = QLabel("Not authenticated")
+        self._esi_status_label.setProperty("class", "muted")
         btn_row = QHBoxLayout()
         self._esi_login_btn = QPushButton("Login with EVE SSO")
         self._esi_login_btn.setProperty("class", "primary")
@@ -339,6 +350,7 @@ class SettingsDialog(QDialog):
         self._esi_logout_btn.clicked.connect(self._esi_logout)
         btn_row.addWidget(self._esi_login_btn); btn_row.addWidget(self._esi_logout_btn); btn_row.addStretch()
         form.addRow("Client ID:", self._esi_client_id)
+        form.addRow("", esi_help)
         form.addRow("Status:", self._esi_status_label)
         form.addRow("", btn_row)
         intel.addWidget(box)
@@ -538,21 +550,38 @@ class SettingsDialog(QDialog):
 
     def _save_and_apply(self) -> None:
         try:
-            settings = self._store.load()
+            # load_raw() so profile overlays are NEVER written back to base (#156)
+            settings = self._store.load_raw()
             patch = self._collect()
             settings = _deep_merge(settings, patch)
             # Preserve active_profile from UI
             settings["active_profile"] = self._profile_combo.currentText()
             self._store.save(settings)
-            # Tell MainWindow to refresh context line
+            # Tell MainWindow to refresh context line and reload hotkeys (#161)
             parent = self.parent()
             if hasattr(parent, "refresh_context_line"):
                 parent.refresh_context_line()
+            if hasattr(parent, "reload_hotkeys"):
+                parent.reload_hotkeys()
+            self.hide()   # close after Save (#162)
         except Exception as e:
             QMessageBox.critical(self, "Settings Error", f"Could not save: {e}")
 
     def _apply_only(self) -> None:
-        self._save_and_apply()
+        """Apply (save to disk) without closing the dialog (#162)."""
+        try:
+            settings = self._store.load_raw()
+            patch = self._collect()
+            settings = _deep_merge(settings, patch)
+            settings["active_profile"] = self._profile_combo.currentText()
+            self._store.save(settings)
+            parent = self.parent()
+            if hasattr(parent, "refresh_context_line"):
+                parent.refresh_context_line()
+            if hasattr(parent, "reload_hotkeys"):
+                parent.reload_hotkeys()
+        except Exception as e:
+            QMessageBox.critical(self, "Settings Error", f"Could not apply: {e}")
 
     # ------------------------------------------------------------------
     # Profiles

@@ -868,7 +868,8 @@ class AlertAgent:
                 reset_msg = (
                     f"Alarm cleared in {self._settings_store.get('server.system', '')}"
                 )
-                self._webhook.execute(reset_msg)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._webhook.execute, reset_msg)
             except Exception as e:
                 logger.error("Error sending reset webhook: %s", e)
             self.webhook_sent = False
@@ -1040,7 +1041,8 @@ class AlertAgent:
             )
 
             hook = _Webhook(url, username="EVE Alert")
-            hook.execute(msg)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, hook.execute, msg)
         except Exception as e:
             logger.error("Error sending %s webhook: %s", alarm_type, e)
 
@@ -1906,7 +1908,8 @@ class AlertAgent:
         # 1. "All events" webhook (server.webhook) — fires for every alarm type
         if self._webhook and not self.webhook_sent:
             try:
-                self._webhook.execute(msg)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, self._webhook.execute, msg)
                 self.webhook_cooldown_timer = current_time + WEBHOOK_COOLDOWN
                 self.webhook_sent = True
             except Exception as e:

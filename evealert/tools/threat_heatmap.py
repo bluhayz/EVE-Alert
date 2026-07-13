@@ -82,28 +82,41 @@ async def _esi_resolve_name(name: str) -> int | None:
 
 
 async def _zkb_kills_for_system(system_id: int, days: int) -> list[dict]:
-    """Fetch recent kills from zKillboard for a single system."""
+    """Fetch recent kills from zKillboard for a single system.
+
+    Paginates up to 5 pages (≈ 1000 kills) so busy systems return accurate
+    histograms instead of just the most-recent ~200 entries (#163).
+    """
     from evealert.tools.http_common import DEFAULT_HEADERS  # noqa: PLC0415
 
+    import asyncio as _asyncio  # noqa: PLC0415
     import httpx  # noqa: PLC0415
 
     past_seconds = days * 86400
-    url = (
-        f"https://zkillboard.com/api/kills/solarSystemID/{system_id}/"
-        f"pastSeconds/{past_seconds}/"
-    )
-    try:
-        async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=10) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            data = r.json()
-            # zKB returns [null] for empty; normalise
-            if data == [None] or data is None:
-                return []
-            return [k for k in data if isinstance(k, dict)]
-    except Exception as exc:
-        logger.debug("zKB system %d heatmap fetch failed: %s", system_id, exc)
-        return []
+    all_kills: list[dict] = []
+
+    for page in range(1, 6):   # max 5 pages ≈ 1 000 kills
+        url = (
+            f"https://zkillboard.com/api/kills/solarSystemID/{system_id}/"
+            f"pastSeconds/{past_seconds}/page/{page}/"
+        )
+        try:
+            async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=10) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+                if data == [None] or data is None:
+                    break
+                page_kills = [k for k in data if isinstance(k, dict)]
+                all_kills.extend(page_kills)
+                if len(page_kills) < 200:
+                    break   # last page — stop paging
+                await _asyncio.sleep(0.5)  # polite rate-limiting between pages
+        except Exception as exc:
+            logger.debug("zKB system %d page %d fetch failed: %s", system_id, page, exc)
+            break
+
+    return all_kills
 
 
 def _build_entry(system_name: str, kills: list[dict], days: int) -> HeatmapEntry:
