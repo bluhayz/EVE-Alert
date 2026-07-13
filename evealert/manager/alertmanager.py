@@ -1146,12 +1146,12 @@ class AlertAgent:
                 # ── Zkillboard kill profile ───────────────────────────────────
                 try:
                     zkb = await client.get_zkillboard_profile(info.character_id)
-                    if zkb and (zkb.kills_30d > 0 or zkb.losses_30d > 0):
+                    if zkb and (zkb.kills_total > 0 or zkb.losses_total > 0):
                         danger_pct = int(zkb.danger_ratio * 100)
                         ship_str = f" | flies {zkb.top_ship}" if zkb.top_ship else ""
                         self._ui(
                             self.main.write_message,
-                            f"    ZKB: {zkb.kills_30d}K/{zkb.losses_30d}L "
+                            f"    ZKB: {zkb.kills_total}K/{zkb.losses_total}L (all-time) "
                             f"[{danger_pct}% danger]{ship_str}",
                             "cyan",
                         )

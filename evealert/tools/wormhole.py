@@ -17,6 +17,8 @@ try:
 except ImportError:
     _HTTPX_AVAILABLE = False
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+
 logger = logging.getLogger("alert.wormhole")
 
 _HTTP_TIMEOUT = 8.0
@@ -55,7 +57,7 @@ async def get_thera_connections() -> list[TheraConnection]:
     try:
         async with httpx.AsyncClient(
             timeout=_HTTP_TIMEOUT,
-            headers={"User-Agent": "EVEAlert/4.0"},
+            headers=DEFAULT_HEADERS,
         ) as client:
             resp = await client.get(_EVE_SCOUT_URL)
             resp.raise_for_status()
@@ -135,7 +137,7 @@ async def get_wh_static_info(system_id: int) -> dict | None:
 
     url = f"https://esi.evetech.net/v4/universe/systems/{system_id}/"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             data = resp.json()

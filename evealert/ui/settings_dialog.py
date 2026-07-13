@@ -6,7 +6,7 @@ Never build a settings dict from DEFAULT_SETTINGS (data-loss risk, see #108).
 
 import os
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal as _Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,6 +33,25 @@ from PySide6.QtWidgets import (
 from evealert.settings.fields import FIELDS, TAB_ORDER
 from evealert.settings.helper import get_settings_path
 from evealert.settings.store import SettingsStore, _get_by_path, _set_by_path
+
+
+class _LoginThread(QThread):
+    """Runs EsiAuth.login() on a background thread so Qt's event loop is not blocked."""
+
+    finished = _Signal(bool, str)  # ok, character_name_or_error
+
+    def __init__(self, auth):
+        super().__init__()
+        self._auth = auth
+
+    def run(self) -> None:
+        import asyncio  # noqa: PLC0415
+        try:
+            ok = asyncio.run(self._auth.login())
+            name = self._auth.character_name if ok else ""
+            self.finished.emit(ok, name)
+        except Exception as exc:
+            self.finished.emit(False, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -587,30 +606,42 @@ class SettingsDialog(QDialog):
 
     def _refresh_esi_status(self) -> None:
         try:
-            from evealert.tools.esi_auth import ESIAuth  # noqa: PLC0415
-            auth = ESIAuth()
-            token = auth.load_token()
-            if token:
-                char = token.get("character_name", "authenticated")
-                self._esi_status_label.setText(f"✓ {char}")
+            from evealert.tools.esi_auth import get_esi_auth  # noqa: PLC0415
+            auth = get_esi_auth()
+            if auth.is_authenticated:
+                self._esi_status_label.setText(f"✓ {auth.character_name}")
             else:
                 self._esi_status_label.setText("Not authenticated")
         except Exception:
             self._esi_status_label.setText("ESI unavailable")
 
     def _esi_login(self) -> None:
-        try:
-            from evealert.tools.esi_auth import ESIAuth  # noqa: PLC0415
-            auth = ESIAuth()
-            auth.start_oauth_flow()
-            self._refresh_esi_status()
-        except Exception as e:
-            QMessageBox.warning(self, "EVE SSO", f"Login failed: {e}")
+        client_id = self._esi_client_id.text().strip()
+        if not client_id:
+            self._esi_status_label.setText(
+                "Enter Client ID first (developers.eveonline.com)"
+            )
+            return
+        from evealert.tools.esi_auth import get_esi_auth  # noqa: PLC0415
+        self._login_thread = _LoginThread(get_esi_auth(client_id))
+        self._login_thread.finished.connect(self._on_login_done)
+        self._esi_login_btn.setEnabled(False)
+        self._esi_status_label.setText("Waiting for browser login\u2026")
+        self._login_thread.start()
+
+    def _on_login_done(self, ok: bool, name_or_err: str) -> None:
+        self._esi_login_btn.setEnabled(True)
+        if ok:
+            self._esi_status_label.setText(f"\u2713 {name_or_err}")
+        else:
+            self._esi_status_label.setText("Not authenticated")
+            if name_or_err:
+                QMessageBox.warning(self, "EVE SSO", f"Login failed: {name_or_err}")
 
     def _esi_logout(self) -> None:
         try:
-            from evealert.tools.esi_auth import ESIAuth  # noqa: PLC0415
-            ESIAuth().logout()
+            from evealert.tools.esi_auth import get_esi_auth  # noqa: PLC0415
+            get_esi_auth().logout()
             self._refresh_esi_status()
         except Exception as e:
             QMessageBox.warning(self, "EVE SSO", f"Logout error: {e}")

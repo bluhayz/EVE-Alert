@@ -25,6 +25,8 @@ try:
 except ImportError:
     _HTTPX_AVAILABLE = False
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+
 logger = logging.getLogger("alert.esi")
 
 _ESI_BASE = "https://esi.evetech.net"
@@ -50,10 +52,10 @@ class CharacterInfo(NamedTuple):
 
 
 class KillProfile(NamedTuple):
-    kills_30d: int
-    losses_30d: int
+    kills_total: int
+    losses_total: int
     top_ship: str | None  # most-used ship in recent kills
-    danger_ratio: float  # kills / (kills + losses), 0.0–1.0
+    danger_ratio: float  # 0.0–1.0 (from zKB dangerRatio or computed)
 
 
 class EsiLookup:
@@ -164,7 +166,7 @@ class EsiLookup:
     async def _get_character(self, char_id: int) -> dict | None:
         url = f"{_ESI_BASE}/v5/characters/{char_id}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 return resp.json()
@@ -176,7 +178,7 @@ class EsiLookup:
         """Return the number of corporations a character has been in."""
         url = f"{_ESI_BASE}/v2/characters/{char_id}/corporationhistory/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 history = resp.json()
@@ -188,7 +190,7 @@ class EsiLookup:
     async def _get_name(self, path_template: str, entity_id: int) -> str | None:
         url = f"{_ESI_BASE}{path_template.replace('{id}', str(entity_id))}"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 return resp.json().get("name")
@@ -206,7 +208,7 @@ class EsiLookup:
         try:
             async with httpx.AsyncClient(
                 timeout=_HTTP_TIMEOUT,
-                headers={"User-Agent": "EVEAlert/3.1 contact@example.com"},
+                headers=DEFAULT_HEADERS,
             ) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
@@ -221,21 +223,23 @@ class EsiLookup:
         kills = int(data.get("shipsDestroyed", 0) or 0)
         losses = int(data.get("shipsLost", 0) or 0)
         total = kills + losses
-        danger_ratio = kills / total if total > 0 else 0.0
+        # Prefer zKB's own dangerRatio (accounts for their weighting) over a raw ratio
+        raw_ratio = kills / total if total > 0 else 0.0
+        danger_ratio = int(data.get("dangerRatio", 0) or 0) / 100.0 or raw_ratio
 
-        # top ship from topLists: look for the "ship" category
+        # top ship from topLists: the category key is 'shipType' (not 'ship')
         top_ship: str | None = None
         top_lists = data.get("topLists", [])
         for entry in top_lists:
-            if entry.get("type") == "ship" and entry.get("values"):
-                top_ship = entry["values"][0].get("shipName") or entry["values"][0].get(
-                    "name"
-                )
+            if entry.get("type") == "shipType":
+                vals = entry.get("values") or []
+                if vals:
+                    top_ship = vals[0].get("shipName") or vals[0].get("name")
                 break
 
         return KillProfile(
-            kills_30d=kills,
-            losses_30d=losses,
+            kills_total=kills,
+            losses_total=losses,
             top_ship=top_ship,
             danger_ratio=round(danger_ratio, 2),
         )

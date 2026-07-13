@@ -42,6 +42,8 @@ except ImportError:
 
 from platformdirs import user_config_dir
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+
 logger = logging.getLogger("alert.esi_auth")
 
 _ESI_AUTH_URL = "https://login.eveonline.com/v2/oauth/authorize"
@@ -50,9 +52,10 @@ _HTTP_TIMEOUT = 10.0
 _REDIRECT_PORT = 8888
 _REDIRECT_URI = f"http://localhost:{_REDIRECT_PORT}/callback"
 
-# EVE Alert registered client ID (public, for installed apps — no secret)
-# Users can override via settings if they have their own dev app.
-_DEFAULT_CLIENT_ID = "evealert_public_client"
+# EVE Alert registered client ID.
+# Blank means unconfigured — users must register a free app at
+# https://developers.eveonline.com and provide their own Client ID.
+_DEFAULT_CLIENT_ID = ""
 
 _SCOPES = " ".join(
     [
@@ -124,6 +127,19 @@ class EsiAuth:
         """Open browser and wait for OAuth callback. Returns True on success."""
         if not _HTTPX_AVAILABLE:
             logger.warning("httpx not available — ESI auth disabled.")
+            return False
+
+        # Validate client ID before opening the browser — an empty or
+        # non-hex-32 ID means the user hasn't registered a dev app yet.
+        import re  # noqa: PLC0415
+        _CLIENT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+        if not _CLIENT_ID_RE.match(self._client_id or ""):
+            logger.warning(
+                "ESI login: invalid or missing client ID '%s'. "
+                "Register a free application at https://developers.eveonline.com "
+                "and enter the 32-character hex Client ID in Settings.",
+                self._client_id,
+            )
             return False
 
         import urllib.parse  # pylint: disable=import-outside-toplevel
@@ -236,7 +252,7 @@ class EsiAuth:
             "code_verifier": self._code_verifier,  # PKCE (#104)
         }
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.post(_ESI_TOKEN_URL, data=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -254,7 +270,7 @@ class EsiAuth:
             "client_id": self._client_id,
         }
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.post(_ESI_TOKEN_URL, data=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -331,7 +347,7 @@ async def get_personal_standings(auth: EsiAuth) -> list[dict]:
     char_id = auth.character_id
     url = f"https://esi.evetech.net/v2/characters/{char_id}/standings/"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             resp.raise_for_status()
             return resp.json()
@@ -350,7 +366,7 @@ async def get_fleet_membership(auth: EsiAuth) -> dict | None:
     char_id = auth.character_id
     url = f"https://esi.evetech.net/v1/characters/{char_id}/fleet/"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             if resp.status_code == 404:
                 return None
@@ -373,7 +389,7 @@ async def get_structure_fuel_warnings(auth: EsiAuth) -> list[dict]:
     char_id = auth.character_id
     url_char = f"https://esi.evetech.net/v5/characters/{char_id}/"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
             resp = await client.get(url_char)
             resp.raise_for_status()
             corp_id = resp.json().get("corporation_id", 0)
@@ -423,9 +439,9 @@ _auth: EsiAuth | None = None
 def get_esi_auth(client_id: str = _DEFAULT_CLIENT_ID) -> EsiAuth:
     """Return the shared EsiAuth singleton.
 
-    A blank/None client_id falls back to the default, and passing a different
-    client_id reconfigures the existing instance rather than being ignored
-    (#115) — so a user pasting their own dev-app client ID takes effect.
+    A blank/None client_id means unconfigured (no built-in public client).
+    Passing a different client_id reconfigures the existing instance so a
+    user pasting their own dev-app client ID takes effect immediately.
     """
     global _auth
     client_id = client_id or _DEFAULT_CLIENT_ID

@@ -60,5 +60,50 @@ class SingletonTests(unittest.TestCase):
         self.assertFalse(second._cva_enabled)  # but reconfigured
 
 
+class DeadSourceTests(unittest.TestCase):
+    """CVA KOS domain is offline — connection errors must disable the source (#135)."""
+
+    def setUp(self):
+        import asyncio
+        import httpx
+        import respx
+        from httpx import Response
+        from evealert.tools.kos_checker import KosChecker
+
+        self.asyncio = asyncio
+        self.httpx = httpx
+        self.respx = respx
+        self.Response = Response
+        self.KosChecker = KosChecker
+
+    def test_connect_error_disables_cva_and_returns_none(self):
+        import asyncio, respx, httpx
+        from evealert.tools.kos_checker import KosChecker, _CVA_KOS_URL
+
+        checker = KosChecker(cva_enabled=True)
+        with respx.mock:
+            respx.get(_CVA_KOS_URL).mock(side_effect=httpx.ConnectError("no route"))
+            result = asyncio.run(checker.check("Bad Guy", "Bad Corp", "Bad Alliance"))
+
+        self.assertIsNone(result)
+        self.assertIn(_CVA_KOS_URL, checker._dead_sources)
+
+    def test_dead_source_not_retried(self):
+        import asyncio, respx, httpx
+        from evealert.tools.kos_checker import KosChecker, _CVA_KOS_URL
+
+        checker = KosChecker(cva_enabled=True)
+        checker._dead_sources.add(_CVA_KOS_URL)  # pre-mark as dead
+
+        call_count = 0
+        with respx.mock:
+            route = respx.get(_CVA_KOS_URL).mock(side_effect=httpx.ConnectError("dead"))
+            result = asyncio.run(checker.check("Bad Guy"))
+
+        # Route must NOT have been called
+        self.assertFalse(route.called)
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

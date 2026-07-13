@@ -20,6 +20,8 @@ try:
 except ImportError:
     _HTTPX_AVAILABLE = False
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+
 logger = logging.getLogger("alert.zkillboard")
 
 # ESI base URL
@@ -108,14 +110,11 @@ class ZkillboardClient:
         self, system_id: int, limit: int
     ) -> list[KillSummary] | None:
         """Fetch recent kills from Zkillboard for *system_id*."""
-        url = f"{_ZKB_BASE}/kills/solarSystemID/{system_id}/limit/{limit}/"
+        url = f"{_ZKB_BASE}/kills/solarSystemID/{system_id}/"
         try:
             async with httpx.AsyncClient(
                 timeout=_HTTP_TIMEOUT,
-                headers={
-                    "Accept-Encoding": "gzip",
-                    "User-Agent": "EVEAlert/2.5 contact@example.com",
-                },
+                headers=DEFAULT_HEADERS,
             ) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
@@ -124,8 +123,12 @@ class ZkillboardClient:
             logger.debug("Zkillboard fetch failed for system %d: %s", system_id, exc)
             return None
 
-        if not isinstance(entries, list):
+        if isinstance(entries, dict):
+            logger.debug("zKillboard error response: %s", entries.get("error", entries))
             return None
+        entries = clean_zkb_entries(entries)
+        if not entries:
+            return []
 
         results: list[KillSummary] = []
         # Fetch ESI killmail details for each entry concurrently (max 5)
@@ -152,7 +155,7 @@ class ZkillboardClient:
 
         url = f"{_ESI_BASE}/killmails/{kill_id}/{hash_val}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 km = resp.json()
@@ -182,7 +185,7 @@ class ZkillboardClient:
             return None
         url = f"{_ESI_BASE}/universe/types/{type_id}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 return resp.json().get("name")
@@ -194,12 +197,31 @@ class ZkillboardClient:
             return None
         url = f"{_ESI_BASE}/characters/{character_id}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 return resp.json().get("name")
         except Exception:
             return None
+
+
+def clean_zkb_entries(data) -> list[dict]:
+    """Normalize zKillboard API responses.
+
+    zKillboard returns [null] for empty result sets and may include null
+    entries in non-empty lists.  This helper filters them out and also
+    rejects non-list responses (e.g. error dicts).
+
+    >>> clean_zkb_entries([None, {"killmail_id": 1}])
+    [{'killmail_id': 1}]
+    >>> clean_zkb_entries([None])
+    []
+    >>> clean_zkb_entries({"error": "x"})
+    []
+    """
+    if not isinstance(data, list):
+        return []
+    return [e for e in data if isinstance(e, dict)]
 
 
 # Module-level singleton shared across the application

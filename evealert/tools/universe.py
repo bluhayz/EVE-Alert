@@ -20,6 +20,9 @@ try:
 except ImportError:
     _HTTPX_AVAILABLE = False
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+from evealert.tools.zkillboard import clean_zkb_entries
+
 logger = logging.getLogger("alert.universe")
 
 _ESI_BASE = "https://esi.evetech.net"
@@ -46,12 +49,12 @@ async def resolve_ids(names: list[str]) -> dict:
         return {}
     url = f"{_ESI_BASE}/latest/universe/ids/"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
             resp = await client.post(
                 url,
                 json=list(names),
                 params={"datasource": "tranquility"},
-                headers={"User-Agent": "EVEAlert/4.0"},
+                headers=DEFAULT_HEADERS,
             )
             resp.raise_for_status()
             return resp.json()
@@ -311,7 +314,7 @@ class UniverseCache:
             return None
         url = f"{_ESI_BASE}/v4/universe/systems/{system_id}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
@@ -331,7 +334,7 @@ class UniverseCache:
         if system_id not in self._stargates:
             url = f"{_ESI_BASE}/v4/universe/systems/{system_id}/"
             try:
-                async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+                async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                     resp = await client.get(url)
                     resp.raise_for_status()
                     data = resp.json()
@@ -355,7 +358,7 @@ class UniverseCache:
     async def _fetch_stargate_dest(self, stargate_id: int) -> int | None:
         url = f"{_ESI_BASE}/v2/universe/stargates/{stargate_id}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 return resp.json().get("destination", {}).get("system_id")
@@ -369,7 +372,7 @@ class UniverseCache:
             return {}
         url = f"{_ESI_BASE}/v1/sovereignty/map/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 entries = resp.json()
@@ -383,7 +386,7 @@ class UniverseCache:
             return self._entity_names[entity_id]
         url = f"{_ESI_BASE}/v4/{entity_type}/{entity_id}/"
         try:
-            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 name = resp.json().get("name")
@@ -402,12 +405,12 @@ class UniverseCache:
         try:
             async with httpx.AsyncClient(
                 timeout=_HTTP_TIMEOUT,
-                headers={"User-Agent": "EVEAlert/3.2"},
+                headers=DEFAULT_HEADERS,
             ) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
-                return len(data) if isinstance(data, list) else 0
+                return len(clean_zkb_entries(data))
         except Exception as exc:
             logger.debug("ZKB kills failed for %d: %s", system_id, exc)
             return 0

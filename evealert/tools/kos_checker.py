@@ -4,7 +4,8 @@ Queries configurable KOS API endpoints to determine whether a pilot,
 their corporation, or their alliance is flagged as Kill-on-Sight.
 
 Supports:
-  - CVA KOS API (https://kos.cva-eve.com/api/) — enabled by default
+  - CVA KOS API (https://kos.cva-eve.com/api/) — DISABLED by default
+    (service is offline as of 2026-07; #135)
   - Any additional KOS API URL configured by the user
   - Local hostile list (pilot/corp/alliance names in settings.json)
 
@@ -47,12 +48,13 @@ class KosChecker:
         self,
         api_urls: list[str] | None = None,
         local_hostile_list: dict | None = None,
-        cva_enabled: bool = True,
+        cva_enabled: bool = False,  # disabled by default — CVA KOS domain offline (#135)
     ) -> None:
         self._api_urls: list[str] = api_urls or []
         self._local: dict = local_hostile_list or {}  # {name_lower: tier}
         self._cva_enabled = cva_enabled
         self._cache: dict[str, tuple[float, KosResult | None]] = {}
+        self._dead_sources: set[str] = set()  # URLs disabled this session
 
     def update_local_list(self, hostile_list: dict) -> None:
         self._local = {k.lower(): v for k, v in hostile_list.items()}
@@ -131,12 +133,21 @@ class KosChecker:
 
     async def _query_cva(self, pilot: str) -> KosResult | None:
         """Query the CVA KOS API for *pilot*."""
+        if _CVA_KOS_URL in self._dead_sources:
+            return None
         params = {"c": "json", "q": pilot, "type": "pilot", "details": "1"}
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
                 resp = await client.get(_CVA_KOS_URL, params=params)
                 resp.raise_for_status()
                 data = resp.json()
+        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+            logger.warning(
+                "CVA KOS source unreachable, disabling for this session: %s (%s)",
+                _CVA_KOS_URL, exc,
+            )
+            self._dead_sources.add(_CVA_KOS_URL)
+            return None
         except Exception as exc:
             logger.debug("CVA KOS query failed for %r: %s", pilot, exc)
             return None

@@ -121,10 +121,57 @@ class TestGetRecentKills(unittest.TestCase):
                 )
             )
             respx.get(
-                "https://zkillboard.com/api/kills/solarSystemID/30000142/limit/3/"
+                "https://zkillboard.com/api/kills/solarSystemID/30000142/"
             ).mock(return_value=Response(200, json={"error": "not a list"}))
             result = asyncio.run(client.get_recent_kills("Jita", limit=3))
         self.assertIsNone(result)
+
+    def test_error_dict_response_returns_none(self):
+        """zKB returns {"error": "..."} (HTTP 200) — must return None without raising."""
+        import asyncio
+
+        from evealert.tools.zkillboard import ZkillboardClient
+
+        client = ZkillboardClient()
+        with respx.mock:
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(
+                    200, json={"systems": [{"id": 30000142, "name": "Jita"}]}
+                )
+            )
+            respx.get(
+                "https://zkillboard.com/api/kills/solarSystemID/30000142/"
+            ).mock(return_value=Response(200, json={"error": "revoked"}))
+            result = asyncio.run(client.get_recent_kills("Jita", limit=3))
+        self.assertIsNone(result)
+
+
+class CleanZkbEntriesTests(unittest.TestCase):
+    """Unit tests for clean_zkb_entries() — the [null] normalizer (#133)."""
+
+    def setUp(self):
+        from evealert.tools.zkillboard import clean_zkb_entries
+        self.fn = clean_zkb_entries
+
+    def test_null_list_returns_empty(self):
+        self.assertEqual(self.fn([None]), [])
+
+    def test_empty_list_returns_empty(self):
+        self.assertEqual(self.fn([]), [])
+
+    def test_valid_entry_passes_through(self):
+        entry = {"killmail_id": 1}
+        self.assertEqual(self.fn([entry]), [entry])
+
+    def test_mixed_null_and_valid(self):
+        entry = {"killmail_id": 2}
+        self.assertEqual(self.fn([None, entry]), [entry])
+
+    def test_error_dict_returns_empty(self):
+        self.assertEqual(self.fn({"error": "x"}), [])
+
+    def test_none_input_returns_empty(self):
+        self.assertEqual(self.fn(None), [])
 
 
 if __name__ == "__main__":

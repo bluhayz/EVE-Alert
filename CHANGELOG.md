@@ -1,5 +1,17 @@
 # Changelog
 
+## [5.0.1] 2026-07-13
+
+### Fixed
+
+- **#132** — zKillboard revoked the `limit/` URL modifier; kills-on-alarm intel was completely broken. Removed the `/limit/{n}/` path segment; client-side slicing is unchanged.
+- **#133** — zKillboard returns `[null]` for empty result sets. Added `clean_zkb_entries()` helper that normalises `[null]` → `[]`; applied at all 4 affected sites: `neighbor_monitor._kills_15min`, `universe._zkb_kills_last_hour`, `zkillboard._fetch_kills`, and `fleet_context._zkb_get`. Phantom adjacent-monitor alerts and false-positive route-threat warnings are gone.
+- **#134** — zKillboard `topLists` category key is `"shipType"`, not `"ship"`. Top-ship intel line now resolves correctly. Kill/loss field names renamed from `kills_30d`/`losses_30d` to `kills_total`/`losses_total` (data is all-time, not 30-day); display strings updated to say `(all-time)`. `dangerRatio` read from zKB's own field when available.
+- **#135** — CVA KOS domain (`kos.cva-eve.com`) is offline. `cva_enabled` now defaults to `False` in both `KosChecker` and `DEFAULT_SETTINGS`. A new `_dead_sources` set disables any KOS source that raises a connection error for the rest of the session (one warning log, no repeated attempts).
+- **#136** — EVE SSO login would open the browser and hang 120 s with a fake placeholder client ID (`evealert_public_client`). `_DEFAULT_CLIENT_ID` is now `""`. `EsiAuth.login()` validates that the client ID is a 32-character lowercase hex string (the format issued by developers.eveonline.com) before opening the browser; blank or malformed IDs return `False` immediately with a descriptive log message.
+- **#137** — HTTP User-Agent strings were stale, mismatched across modules, and missing entirely from several `httpx.AsyncClient` calls. Introduced `evealert/tools/http_common.py` with a canonical `USER_AGENT` and `DEFAULT_HEADERS`; applied to all `AsyncClient` constructions in `zkillboard`, `universe`, `esi_standings`, `fleet_context`, `wormhole`, `esi_auth`, and `neighbor_monitor`.
+- **#138** — EVE SSO login in the Settings dialog crashed with `cannot import name 'ESIAuth'` (class is `EsiAuth`), then `load_token()` (method does not exist), then `start_oauth_flow()` (method does not exist, and `login()` is async). Fixed: uses `get_esi_auth()` factory, reads `auth.is_authenticated` / `auth.character_name` properties, and runs `asyncio.run(auth.login())` in a `_LoginThread(QThread)` so Qt's event loop is not blocked.
+
 ## [5.0.0] 2026-07-13
 
 ### Changed — UI completely rewritten (PySide6 migration, #123–#131)

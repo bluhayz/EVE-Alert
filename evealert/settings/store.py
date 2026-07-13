@@ -63,7 +63,7 @@ DEFAULT_SETTINGS: dict = {
         "min_kills": 1, "destination_system": "",
     },
     "dscan": {"enabled": False, "alert_red": True, "alert_orange": False, "alert_probes": True},
-    "kos": {"cva_enabled": True, "custom_urls": []},
+    "kos": {"cva_enabled": False, "custom_urls": []},  # CVA KOS domain offline (#135)
     "kos_list": [],
     "push": {
         "telegram_token": "", "telegram_chat_id": "",

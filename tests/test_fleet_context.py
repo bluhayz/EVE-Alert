@@ -50,6 +50,23 @@ class ZkbGetTests(unittest.TestCase):
                 fleet_context.asyncio.sleep = orig
         self.assertEqual(result, [{"killmail_id": 1}])
 
+    def test_null_list_returns_empty(self):
+        """zKB [null] response must yield empty list, not crash (#133)."""
+        async def fast_sleep(_):
+            return None
+
+        with respx.mock:
+            respx.get("https://zkillboard.com/api/test/").mock(
+                return_value=Response(200, json=[None])
+            )
+            orig = fleet_context.asyncio.sleep
+            fleet_context.asyncio.sleep = fast_sleep
+            try:
+                result = asyncio.run(_zkb_get("https://zkillboard.com/api/test/"))
+            finally:
+                fleet_context.asyncio.sleep = orig
+        self.assertEqual(result, [])
+
 
 class KillmailDedupTests(unittest.TestCase):
     def test_mark_seen_dedups(self):

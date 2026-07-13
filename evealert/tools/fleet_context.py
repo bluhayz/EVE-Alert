@@ -18,6 +18,9 @@ try:
 except ImportError:
     _HTTPX_AVAILABLE = False
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+from evealert.tools.zkillboard import clean_zkb_entries
+
 logger = logging.getLogger("alert.fleet")
 
 _HTTP_TIMEOUT = 8.0
@@ -96,7 +99,7 @@ async def _recent_ships(character_id: int) -> list[str]:
     # client-side. ZKB feeds already embed the full killmail (attackers).
     data = await _zkb_get(f"{_ZKB_BASE}/kills/characterID/{character_id}/")
     ship_ids = []
-    for entry in (data or [])[:5]:
+    for entry in clean_zkb_entries(data or [])[:5]:
         for att in entry.get("attackers", []):
             if att.get("character_id") == character_id:
                 sid = att.get("ship_type_id")
@@ -124,7 +127,7 @@ async def _zkb_get(url: str):
         try:
             async with httpx.AsyncClient(
                 timeout=_HTTP_TIMEOUT,
-                headers={"User-Agent": "EVEAlert/4.0 contact@example.com"},
+                headers=DEFAULT_HEADERS,
             ) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
@@ -138,13 +141,13 @@ async def _zkb_get(url: str):
         if isinstance(data, dict) and "error" in data:
             logger.debug("ZKB error for %s: %s", url, data.get("error"))
             return None
-        return data if isinstance(data, list) else None
+        return clean_zkb_entries(data)
 
 
 async def _resolve_type_name(type_id: int) -> str | None:
     url = f"https://esi.evetech.net/v4/universe/types/{type_id}/"
     try:
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
             resp = await client.get(url)
             resp.raise_for_status()
             return resp.json().get("name")

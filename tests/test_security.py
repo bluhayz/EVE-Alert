@@ -65,7 +65,7 @@ class OAuthStateTests(unittest.TestCase):
         from evealert.tools.esi_auth import EsiAuth
 
         with mock.patch.object(EsiAuth, "_load_token", lambda self: None):
-            auth = EsiAuth(client_id="x")
+            auth = EsiAuth(client_id="a" * 32)  # valid 32-hex client ID
         captured = {}
 
         with (

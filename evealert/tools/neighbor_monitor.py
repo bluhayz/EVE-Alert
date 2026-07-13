@@ -15,6 +15,9 @@ import logging
 import time
 from typing import Callable
 
+from evealert.tools.http_common import DEFAULT_HEADERS
+from evealert.tools.zkillboard import clean_zkb_entries
+
 logger = logging.getLogger("alert.neighbors")
 
 # Default poll interval — 120 s keeps well within Zkillboard rate limits
@@ -141,12 +144,12 @@ class NeighborMonitor:
 
             url = f"https://zkillboard.com/api/kills/solarSystemID/{system_id}/pastSeconds/900/"
             async with httpx.AsyncClient(
-                timeout=8.0, headers={"User-Agent": "EVEAlert/3.2"}
+                timeout=8.0, headers=DEFAULT_HEADERS
             ) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
-                return len(data) if isinstance(data, list) else 0
+                return len(clean_zkb_entries(data))
         except Exception as exc:
             logger.debug("ZKB 15min kills failed for %d: %s", system_id, exc)
             return 0

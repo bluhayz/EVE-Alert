@@ -72,7 +72,7 @@ class SingletonClientIdTests(unittest.TestCase):
 
     def test_none_client_id_does_not_override_existing(self):
         get_esi_auth(client_id="my-dev-app-id")
-        auth = get_esi_auth(client_id="")  # blank must not clobber to placeholder
+        auth = get_esi_auth(client_id="")  # blank leaves client_id as-is (empty = unconfigured)
         self.assertEqual(auth._client_id, _DEFAULT_CLIENT_ID)
 
 
@@ -80,7 +80,7 @@ class PkceParamsTests(unittest.IsolatedAsyncioTestCase):
     async def test_login_builds_pkce_challenge(self):
         esi_auth._auth = None
         with mock.patch.object(EsiAuth, "_load_token", lambda self: None):
-            auth = EsiAuth(client_id="test-id")
+            auth = EsiAuth(client_id="a" * 32)  # valid 32-hex client ID
         opened = {}
 
         def fake_open(url):
@@ -150,6 +150,55 @@ class TokenRoundTripTests(unittest.TestCase):
                 b = EsiAuth(client_id="x")
         self.assertEqual(b.character_id, 42)
         self.assertEqual(b.character_name, "Pilot")
+
+
+class ClientIdValidationTests(unittest.TestCase):
+    """login() must reject blank / malformed client IDs without opening a browser (#136)."""
+
+    def _login_sync(self, client_id):
+        import asyncio
+        from evealert.tools.esi_auth import EsiAuth
+        auth = EsiAuth(client_id=client_id)
+        return asyncio.run(auth.login())
+
+    def test_empty_client_id_returns_false(self):
+        with mock.patch("webbrowser.open") as browser:
+            result = self._login_sync("")
+        self.assertFalse(result)
+        browser.assert_not_called()
+
+    def test_placeholder_client_id_returns_false(self):
+        with mock.patch("webbrowser.open") as browser:
+            result = self._login_sync("evealert_public_client")
+        self.assertFalse(result)
+        browser.assert_not_called()
+
+    def test_non_hex_client_id_returns_false(self):
+        with mock.patch("webbrowser.open") as browser:
+            result = self._login_sync("not-hex-at-all")
+        self.assertFalse(result)
+        browser.assert_not_called()
+
+    def test_valid_32hex_client_id_opens_browser(self):
+        """A 32-hex client ID should attempt to open the browser."""
+        import asyncio
+        from evealert.tools.esi_auth import EsiAuth
+
+        fake_id = "a" * 32  # valid 32-char lowercase hex
+        auth = EsiAuth(client_id=fake_id)
+
+        browser_calls = []
+
+        async def fake_await_callback(timeout=120.0):
+            return None  # simulate no callback (timeout)
+
+        with mock.patch("webbrowser.open", side_effect=lambda url: browser_calls.append(url)):
+            with mock.patch.object(auth, "_await_callback", fake_await_callback):
+                result = asyncio.run(auth.login())
+
+        self.assertEqual(len(browser_calls), 1)
+        self.assertIn("login.eveonline.com", browser_calls[0])
+        self.assertFalse(result)  # no callback arrived
 
 
 if __name__ == "__main__":
