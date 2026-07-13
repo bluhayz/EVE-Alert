@@ -1,5 +1,48 @@
 # Changelog
 
+## [6.3.0] 2026-07-13
+
+### Added — UX & Onboarding (Epic v6.3)
+
+- **#167 Log pane ergonomics** — `LogPane(QWidget)` replaces the bare
+  `QPlainTextEdit`. New toolbar: All / Alarms / Intel / System category
+  filter buttons (driven by message color tags), free-text search, and a
+  Pause toggle (ring buffer of 2 000 entries keeps filling while paused; view
+  re-renders on resume). Right-click context menu: Copy line / Copy all visible.
+  `MainWindow.append_log` delegates to the pane; web-server mirroring unchanged.
+
+- **#168 Tray icon state** — Three icon variants generated at runtime (grey =
+  stopped, green = running, red = alarm flash) by compositing a status dot onto
+  the base icon with `QPainter`. `QtBridge.alarm_fired` signal (new) emitted on
+  every red log message; connected to `AppTray.on_alarm()` which flashes red for
+  10 s then reverts. Tooltip updated: `EVE Alert — Running · last alarm HH:MM:SS`.
+  New "Mute alarms" checkable tray menu item writes `server.mute` via
+  `load_raw()/save()` and hot-reloads the engine.
+
+- **#165 HotkeyEdit capture widget** — `HotkeyEdit(QPushButton)` enters capture
+  mode on click, grabs the keyboard, converts the pressed Qt key to a
+  pynput-compatible string, and rejects conflicting bindings with a tooltip
+  warning. Replaces the two free-text QLineEdit hotkey fields in Settings;
+  F3 (profile cycle) and F4 (status readout) now exposed as remappable bindings.
+  `DEFAULT_HOTKEYS` expanded; `reload_hotkeys()` reads all four bindings.
+
+- **#166 Profile manager UI** — `ProfileManagerDialog(QDialog)` shows a profile
+  list (user profiles + read-only built-in space profiles) and a diff table
+  (key / base value / profile value). Actions: New, Duplicate, Rename, Delete,
+  Set Active, Remove override. "Save current settings as profile" opens a
+  checkbox-list dialog so profiles stay minimal overlays. Settings dialog profile
+  bar simplified to combo + "Manage Profiles…" button.
+
+- **#164 First-run onboarding wizard** — `OnboardingWizardDialog` auto-shown on
+  first launch (when alert region is unconfigured and
+  `ui.onboarding_completed` is false). Four pages: Welcome (EVE window detect),
+  Alert Region (RegionOverlay + live mss thumbnail), Sound & volume (test alarm),
+  Done (start detection checkbox). Persists region + volume; marks
+  `ui.onboarding_completed = True` on Finish or Skip.
+  Re-launchable via **Settings → Detection → "Run Setup Wizard…"**.
+
+---
+
 ## [6.2.0] 2026-07-13
 
 ### Fixed
