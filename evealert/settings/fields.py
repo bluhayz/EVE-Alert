@@ -28,6 +28,9 @@ FIELDS: list = [
               "Auto-screenshot on alarm", "auto_screenshot_var", False),
     FieldSpec("notifications.escalation_threshold", "int", "Alerts & Sound", "Alarm Options",
               "Escalate at N hostiles (0 = off)", "escalation_threshold_entry", 0),
+    # Re-arm after sustained presence (#144)
+    FieldSpec("alerts.rearm_minutes", "int", "Alerts & Sound", "Alarm Options",
+              "Re-alert after N minutes of continuous presence (0 = off)", "rearm_minutes_entry", 0),
     # Text-to-speech (#139)
     FieldSpec("notifications.tts_enabled", "bool", "Alerts & Sound", "Text-to-Speech",
               "Speak alarm details aloud (requires pyttsx3)", "tts_enabled_var", False),

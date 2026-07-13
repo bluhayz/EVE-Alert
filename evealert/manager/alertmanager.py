@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import time
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import numpy as np
 import soundfile as sf
@@ -44,6 +44,13 @@ from evealert.settings.validator import ConfigValidator
 from evealert.statistics import AlarmStatistics
 from evealert.tools.vision import Vision
 from evealert.tools.windowscapture import WindowCapture
+
+
+class _EnemySighting(NamedTuple):
+    """Per-enemy dedup / re-arm record (#100, #144)."""
+    first_seen: float   # epoch when first alarmed
+    last_alarm: float   # epoch of most-recent alarm trigger
+    rearm_at: float     # epoch when re-alert is due (0 = never)
 
 # Sound file paths (safe to resolve at import time — no directory listing)
 ALARM_SOUND = get_resource_path(f"{SOUND_FOLDER}/{ALARM_SOUND_FILE}")
@@ -129,8 +136,9 @@ class AlertAgent:
         self.faction = False
         # Match centers from the last enemy scan (for per-enemy dedup, #100)
         self._enemy_points: list = []
-        # Quantized enemy center -> last-alarm epoch time
+        # Quantized enemy center -> sighting record
         self._seen_enemies: dict = {}
+        self._rearm_minutes: int = 0  # 0 = disabled
 
         # Long-running asyncio task handles (cancelled in stop(), #102)
         self.vision_t = None
@@ -676,6 +684,10 @@ class AlertAgent:
                     "value", self.cooldowntimer
                 )
             )
+            # Re-arm after sustained presence (#144); 0 = disabled
+            self._rearm_minutes = int(
+                settings.get("alerts", {}).get("rearm_minutes", 0)
+            )
             self._cooldown_faction = int(
                 settings.get("cooldown_timer_faction", {}).get(
                     "value", self.cooldowntimer
@@ -849,24 +861,50 @@ class AlertAgent:
         already-seen enemy's cooldown window has elapsed. Prevents the alarm
         (stats/sound/webhook/plugins/push) from re-firing on every poll while
         the same enemy stays on screen (#100).
+
+        When rearm_minutes > 0, also re-arms (returns True) when an enemy has
+        been continuously present for that many minutes (#144).
         """
         now = time.time()
         cooldown = max(int(self._cooldown_enemy), 1)
         keys = {self._quantize_point(p) for p in (self._enemy_points or [])}
         if not keys:
-            # self.enemy was True but no points — treat as one anonymous enemy.
             keys = {(-1, -1)}
 
-        trigger = any(
-            key not in self._seen_enemies or (now - self._seen_enemies[key]) >= cooldown
-            for key in keys
-        )
+        trigger = False
+        for key in keys:
+            sighting = self._seen_enemies.get(key)
+            if sighting is None:
+                # Brand-new enemy
+                trigger = True
+            elif now - sighting.last_alarm >= cooldown:
+                # Cooldown elapsed — re-alarm
+                trigger = True
+            elif sighting.rearm_at > 0 and now >= sighting.rearm_at:
+                # Sustained-presence re-arm (#144)
+                trigger = True
 
-        # Prune the seen-set to enemies still on screen (preserve timestamps).
-        self._seen_enemies = {key: self._seen_enemies.get(key, 0.0) for key in keys}
-        if trigger:
-            for key in keys:
-                self._seen_enemies[key] = now
+        # Prune to only currently-visible enemies; update or create records.
+        rearm_delta = self._rearm_minutes * 60
+        new_seen: dict = {}
+        for key in keys:
+            old = self._seen_enemies.get(key)
+            if old is None:
+                rearm_at = (now + rearm_delta) if rearm_delta > 0 else 0
+                new_seen[key] = _EnemySighting(
+                    first_seen=now, last_alarm=now if trigger else 0, rearm_at=rearm_at
+                )
+            else:
+                # Advance rearm_at if it fired
+                new_rearm_at = old.rearm_at
+                if new_rearm_at > 0 and now >= new_rearm_at:
+                    new_rearm_at = now + rearm_delta if rearm_delta > 0 else 0
+                new_seen[key] = _EnemySighting(
+                    first_seen=old.first_seen,
+                    last_alarm=now if trigger else old.last_alarm,
+                    rearm_at=new_rearm_at,
+                )
+        self._seen_enemies = new_seen
         return trigger
 
     async def alarm_detection(

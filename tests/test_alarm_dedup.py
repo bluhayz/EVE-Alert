@@ -19,6 +19,7 @@ class _DedupAgent(AlertAgent):
         self._cooldown_enemy = cooldown
         self._enemy_points = []
         self._seen_enemies = {}
+        self._rearm_minutes = 0  # disabled by default in unit tests
 
 
 class QuantizeTests(unittest.TestCase):
