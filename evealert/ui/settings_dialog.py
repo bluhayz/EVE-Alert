@@ -136,6 +136,7 @@ class SettingsDialog(QDialog):
         # Post-registry additions that inject into auto-created sections
         self._build_ocr_check_button()
         self._build_tts_check_button()
+        self._build_notification_wizard_button()
 
         # Footer buttons
         buttons = QDialogButtonBox(
@@ -730,6 +731,27 @@ class SettingsDialog(QDialog):
         except Exception as e:
             self._tts_status.setText(f"\u2717 {e}")
             self._tts_status.setStyleSheet("color: #F85149;")
+
+    # ------------------------------------------------------------------
+    # Notification setup wizard (#149)
+    # ------------------------------------------------------------------
+
+    def _build_notification_wizard_button(self) -> None:
+        """Append a 'Setup Notifications…' button to the Alerts & Sound tab."""
+        key = "Alerts & Sound/Alarm Options"
+        if key not in self._sections:
+            return
+        form = self._sections[key][1]
+
+        btn = QPushButton("Setup Mobile Notifications\u2026")
+        btn.clicked.connect(self._open_notification_wizard)
+        form.addRow("Push notifications:", btn)
+
+    def _open_notification_wizard(self) -> None:
+        from evealert.ui.notification_wizard import NotificationWizardDialog  # noqa: PLC0415
+
+        dlg = NotificationWizardDialog(self, self._store)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Tesseract / OCR check
