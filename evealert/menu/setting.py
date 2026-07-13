@@ -598,7 +598,8 @@ class SettingMenu:
     @property
     def is_changed(self):
         """Returns True if the settings have been changed."""
-        return self.changed
+        from evealert.settings.store import get_settings_store  # noqa: PLC0415
+        return get_settings_store().changed
 
     @property
     def is_open(self):
@@ -854,6 +855,9 @@ class SettingMenu:
 
         self.apply_settings(settings)
         self.changed = True
+        # Notify the shared SettingsStore so AlertAgent's run loop picks up the change.
+        from evealert.settings.store import get_settings_store  # noqa: PLC0415
+        get_settings_store().changed = True
 
     def _read_saved_settings(self):
         """Read + merge the on-disk settings WITHOUT applying to the UI or

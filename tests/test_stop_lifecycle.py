@@ -16,6 +16,7 @@ class _StopAgent(AlertAgent):
         self.loop.is_running.return_value = True
         self.wincap = mock.MagicMock()
         self.main = mock.MagicMock()
+        self._bridge = mock.MagicMock()
         self.statistics = mock.MagicMock()
         self.alert_vision = mock.MagicMock()
         self.alert_vision_faction = mock.MagicMock()

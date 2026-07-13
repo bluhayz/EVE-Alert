@@ -38,6 +38,8 @@ from evealert.settings.stats_store import (
     save_lifetime_stats,
     save_session_report,
 )
+from evealert.bridge import TkBridge, UIBridge  # noqa: F401
+from evealert.settings.store import get_settings_store
 from evealert.settings.validator import ConfigValidator
 from evealert.statistics import AlarmStatistics
 from evealert.tools.vision import Vision
@@ -85,13 +87,17 @@ class AlertAgent:
       - vision_faction_thread: faction detection loop
       - run: alarm trigger, cooldown, webhook dispatch
 
-    THREAD SAFETY: This class is instantiated on the main (GUI) thread but
-    start() runs on a daemon thread.  All Tkinter widget calls must be
-    dispatched via self._ui() to avoid non-deterministic crashes.
+    THREAD SAFETY: Engine-to-GUI communication goes exclusively through
+    self._bridge (UIBridge).  self.main is kept only for WindowCapture
+    compatibility and must not be accessed for any GUI operation.
     """
 
     def __init__(self, main: "MainMenu"):
         self.main = main
+        # Bridge + store must be created first so the rest of __init__ can use them
+        self._bridge: UIBridge = TkBridge(main)
+        self._settings_store = get_settings_store()
+        self._webhook = None  # dhooks_lite.Webhook; populated by load_settings()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.wincap = WindowCapture(self.main)
 
@@ -109,7 +115,7 @@ class AlertAgent:
         except OSError as e:
             err_msg = f"Error: Cannot load images: {e}"
             logger.error("Failed to load template images: %s", e)
-            self.main.after(0, lambda: self.main.write_message(err_msg, "red"))
+            self._bridge.log(err_msg, "red")
             alert_files, faction_files = [], []
 
         self.alert_vision = Vision(alert_files)
@@ -144,7 +150,7 @@ class AlertAgent:
         self.mute = False
         self.volume = 1.0
 
-        # Webhook
+        # Webhook — Discord Webhook object; managed by load_settings()
         self.webhook_cooldown_timer = 0
         self.webhook_sent = False
 
@@ -264,12 +270,23 @@ class AlertAgent:
     # ------------------------------------------------------------------
 
     def _ui(self, fn: Callable, *args, **kwargs) -> None:
-        """Schedule a GUI call on the main Tkinter thread.
+        """Route GUI calls through UIBridge (bridge-aware shim for legacy call sites).
 
-        Use this for ALL widget mutations that originate from the alert
-        daemon thread (vision tasks, run loop, play_sound, etc.).
+        Detects the known GUI functions and delegates to self._bridge so the
+        engine never calls Tk directly.  Unknown callables are dispatched via
+        self.main.after(0, ...) as a safe fallback.
         """
-        self.main.after(0, lambda: fn(*args, **kwargs))
+        if fn is self.main.write_message:
+            text = args[0] if args else kwargs.get("text", "")
+            color = args[1] if len(args) > 1 else kwargs.get("color", "normal")
+            self._bridge.log(text, color)
+        elif fn in (self.main.update_alert_button, self.main.update_faction_button):
+            self._bridge.refresh_region_toggles()
+        elif fn is self.main.open_error_window:
+            msg = args[0] if args else ""
+            self._bridge.show_error(msg)
+        else:
+            self.main.after(0, lambda: fn(*args, **kwargs))
 
     # ------------------------------------------------------------------
     # Properties
@@ -370,7 +387,7 @@ class AlertAgent:
             self.loop.create_task(self._display_system_info())
             # v3.2: adjacent system kill monitor
             if self._adjacent_enabled:
-                system_name = self.main.menu.setting.system_name.get().strip()
+                system_name = self._settings_store.get("server.system", "").strip()
                 if system_name and system_name != "Enter a System Name":
                     from evealert.tools.neighbor_monitor import (  # pylint: disable=import-outside-toplevel
                         NeighborMonitor,
@@ -523,7 +540,7 @@ class AlertAgent:
         self.stop()
 
     def load_settings(self) -> None:
-        settings = self.main.menu.setting.load_settings()
+        settings = self._settings_store.load()
 
         if settings:
             is_valid, errors = ConfigValidator.validate_settings_dict(settings)
@@ -693,7 +710,23 @@ class AlertAgent:
 
                 write_context_log(settings)
 
-            if self.main.menu.setting.is_changed:
+            # Webhook — create/update from settings so the engine owns it directly
+            webhook_url = settings.get("server", {}).get("webhook", "")
+            if webhook_url and webhook_url.startswith("https://discord.com/api/webhooks/"):
+                try:
+                    from dhooks_lite import Webhook  # noqa: PLC0415
+                    self._webhook = Webhook(
+                        webhook_url,
+                        username="Gneuten",
+                        avatar_url="https://cdn.discordapp.com/avatars/990582360103870495/410d536127874481b9771b9eb9aa8104.png",
+                    )
+                except Exception as e:
+                    logger.error("Failed to create webhook: %s", e)
+                    self._webhook = None
+            else:
+                self._webhook = None
+
+            if self._settings_store.changed:
                 vision_opened = self.alert_vision.is_vision_open
                 faction_vision_opened = self.alert_vision_faction.is_faction_vision_open
 
@@ -792,12 +825,12 @@ class AlertAgent:
             if self._wh_drop_detector is not None:
                 self._wh_drop_detector.reset()
 
-        if self.main.webhook and alarm_type == "Enemy" and self.webhook_sent:
+        if self._webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
                 reset_msg = (
-                    f"Alarm cleared in {self.main.menu.setting.system_name.get()}"
+                    f"Alarm cleared in {self._settings_store.get('server.system', '')}"
                 )
-                self.main.webhook.execute(reset_msg)
+                self._webhook.execute(reset_msg)
             except Exception as e:
                 logger.error("Error sending reset webhook: %s", e)
             self.webhook_sent = False
@@ -853,7 +886,7 @@ class AlertAgent:
 
                 notifier = get_push_notifier(**self._push_config)
                 if notifier.is_configured():
-                    system = self.main.menu.setting.system_name.get()
+                    system = self._settings_store.get("server.system", "")
                     msg = f"{alarm_type} alarm in {system}" if system else alarm_type
                     asyncio.ensure_future(notifier.send(msg))
             except Exception as exc:
@@ -882,7 +915,7 @@ class AlertAgent:
                 get_plugin_manager,
             )
 
-            system = self.main.menu.setting.system_name.get()
+            system = self._settings_store.get("server.system", "")
             ts = time.strftime("%H:%M:%S")
             hook = "on_enemy" if alarm_type == "Enemy" else "on_faction"
             get_plugin_manager().call(hook, system=system, timestamp=ts)
@@ -894,7 +927,7 @@ class AlertAgent:
             now = time.time()
             if now >= self._zkillboard_next_lookup:
                 self._zkillboard_next_lookup = now + self._zkillboard_cooldown
-                system_name = self.main.menu.setting.system_name.get().strip()
+                system_name = self._settings_store.get("server.system", "").strip()
                 if system_name:
                     asyncio.ensure_future(self._fetch_and_report_kills(system_name))
 
@@ -1242,7 +1275,7 @@ class AlertAgent:
                 get_universe_cache,
             )
 
-            system_name = self.main.menu.setting.system_name.get().strip()
+            system_name = self._settings_store.get("server.system", "").strip()
             if not system_name or system_name == "Enter a System Name":
                 return
 
@@ -1410,7 +1443,7 @@ class AlertAgent:
             )
 
             cache = get_universe_cache()
-            system_name = self.main.menu.setting.system_name.get().strip()
+            system_name = self._settings_store.get("server.system", "").strip()
             system_id = await cache.get_system_id(system_name)
             if not system_id:
                 return
@@ -1546,7 +1579,7 @@ class AlertAgent:
             logger.info("Webhook is in cooldown period. Message not sent.")
             return
 
-        system = self.main.menu.setting.system_name.get()
+        system = self._settings_store.get("server.system", "")
         msg = self._webhook_template.format(
             alarm_type=alarm_type,
             system=system,
@@ -1555,9 +1588,9 @@ class AlertAgent:
         )
 
         # 1. "All events" webhook (server.webhook) — fires for every alarm type
-        if self.main.webhook and not self.webhook_sent:
+        if self._webhook and not self.webhook_sent:
             try:
-                self.main.webhook.execute(msg)
+                self._webhook.execute(msg)
                 self.webhook_cooldown_timer = current_time + WEBHOOK_COOLDOWN
                 self.webhook_sent = True
             except Exception as e:
@@ -1640,9 +1673,9 @@ class AlertAgent:
     async def run(self) -> None:
         """Main alarm-trigger loop."""
         while True:
-            if self.main.menu.setting.is_changed:
+            if self._settings_store.changed:
                 self.load_settings()
-                self.main.menu.setting.changed = False
+                self._settings_store.changed = False
 
             self.alarm_detected = False
 

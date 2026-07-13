@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from evealert.manager.alertmanager import AlertAgent
+from evealert.settings.store import reset_settings_store
 from evealert.statistics import AlarmStatistics
 
 
@@ -43,7 +44,10 @@ class TestAlertAgent(unittest.TestCase):
         with open(self.settings_path, "w") as f:
             json.dump(self.test_settings, f)
 
-        self.mock_main.menu.setting.load_settings.return_value = self.test_settings
+        # Wire the shared SettingsStore to the temp file so AlertAgent.load_settings()
+        # reads from it without touching the real settings path.
+        self._store = reset_settings_store(self.settings_path)
+
         self.mock_main.menu.setting.is_changed = False
 
         # Patch audio file validation — event loop no longer created in __init__
@@ -74,9 +78,11 @@ class TestAlertAgent(unittest.TestCase):
 
     def test_load_settings_with_custom_volume(self):
         """Test loading custom volume setting."""
-        # Update settings with 50% volume
+        # Update the temp file and reset the store so the agent reads the new value
         self.test_settings["volume"]["value"] = 50
-        self.mock_main.menu.setting.load_settings.return_value = self.test_settings
+        with open(self.settings_path, "w") as f:
+            json.dump(self.test_settings, f)
+        reset_settings_store(self.settings_path)
 
         self.agent.load_settings()
         self.assertEqual(self.agent.volume, 0.5)
@@ -206,6 +212,7 @@ class TestAlertAgent(unittest.TestCase):
 
         with open(self.settings_path, "w") as f:
             json.dump(invalid_settings, f)
+        reset_settings_store(self.settings_path)
 
         # Load should handle invalid values gracefully
         try:
@@ -245,6 +252,7 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
         with open(self.settings_path, "w") as f:
             json.dump(test_settings, f)
 
+        reset_settings_store(self.settings_path)
         self.mock_main.getdata.return_value = self.settings_path
 
         with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
