@@ -16,7 +16,7 @@ jobs:
   build-windows:
     name: Build Windows .exe
     needs: [test]
-    runs-on: windows-latest
+    runs-on: self-hosted
 
     steps:
       - uses: actions/checkout@v7
@@ -49,56 +49,9 @@ jobs:
           name: EVE-Alert-Windows
           path: dist/EVE-Alert.exe
 
-  build-macos:
-    name: Build macOS .dmg
-    needs: [test]
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install PortAudio (required by sounddevice)
-        run: brew install portaudio
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ".[build-macos]"
-
-      - name: Build with PyInstaller
-        run: >
-          pyinstaller
-          --windowed
-          --name "EVE Alert"
-          --icon evealert/img/eve.png
-          --add-data "evealert/img:img"
-          --add-data "evealert/sound:sound"
-          main.py
-
-      - name: Package as DMG
-        run: >
-          hdiutil create
-          -volname "EVE Alert"
-          -srcfolder "dist/EVE Alert.app"
-          -ov
-          -format UDZO
-          EVE-Alert-macOS.dmg
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: EVE-Alert-macOS
-          path: EVE-Alert-macOS.dmg
-
   release:
     name: Create GitHub Release
-    needs: [build-windows, build-macos]
+    needs: [build-windows]
     runs-on: ubuntu-latest
 
     steps:
@@ -108,16 +61,8 @@ jobs:
           name: EVE-Alert-Windows
           path: artifacts/
 
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: EVE-Alert-macOS
-          path: artifacts/
-
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
-          files: |
-            artifacts/EVE-Alert.exe
-            artifacts/EVE-Alert-macOS.dmg
+          files: artifacts/EVE-Alert.exe
           generate_release_notes: true
