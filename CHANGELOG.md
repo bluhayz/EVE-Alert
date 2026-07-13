@@ -1,5 +1,55 @@
 # Changelog
 
+## [5.0.0] 2026-07-13
+
+### Changed — UI completely rewritten (PySide6 migration, #123–#131)
+
+- **Replaced customtkinter/Tkinter with PySide6 (Qt 6, LGPL)** — the entire
+  presentation layer is rebuilt from scratch under `evealert/ui/`.  The detection
+  engine (`evealert/manager/`, `evealert/tools/`) is unchanged.
+- **New dark-themed UI** — 510-line QSS stylesheet; consistent color palette with
+  primary/danger/warning button variants, stat cards, monospace log pane.
+- **Main window** — status indicator (● Running / ● Stopped), Start/Stop/Exit row,
+  Config Mode / Settings / Statistics buttons, region toggle buttons, scrollable
+  colored log pane, system tray with Start/Stop/Show/Exit menu.
+- **Settings dialog** — tabbed, scrollable, resizable (no more 1200 px fixed
+  height overflow).  42 settings auto-generated from the field registry + all
+  non-registry sections (regions, thresholds, sounds, webhooks, hotkeys, ESI
+  OAuth).  All settings sections reachable on a 1080p display (#107).
+- **Config mode** — fullscreen translucent QRubberBand drag-to-select overlay for
+  Alert and Faction regions (replaces the previous guide-only dialog).  F1/F2
+  hotkeys trigger the overlay directly; HiDPI scaling handled via
+  `devicePixelRatio()`.
+- **Statistics window** — 3×2 stat cards + sortable `QTableWidget` history; Sessions
+  tab with View / Export CSV / Delete.
+- **Image manager** — thumbnail list with 32×32 QIcon previews, 240×240 preview
+  pane, Add (with cv2 validation) / Remove with live template reload.
+- **Per-image threshold editor** — scrollable slider rows, per-image override or
+  Clear to global.
+- **System tray** — `QSystemTrayIcon` (replaces pystray daemon thread); double-click
+  to restore, minimize-to-tray on close.
+- **Engine/GUI decoupling** — `SettingsStore` owns all JSON persistence; `UIBridge`
+  protocol routes all engine→UI calls through Qt signals (no `after(0, ...)`)
+  (#124).
+
+### Removed
+- `customtkinter`, `pystray`, `screeninfo` dependencies removed from
+  `pyproject.toml`.
+- `evealert/menu/` package deleted (setting.py, main.py, config.py, statistics.py,
+  image_manager.py, threshold_editor.py).
+- `evealert/tray.py` (pystray) and `evealert/tools/overlay.py` (Tk marquee) deleted.
+
+### Added
+- `evealert/settings/store.py` — `SettingsStore` with atomic save, `changed` flag,
+  dotted-path `get()`, and `DEFAULT_SETTINGS` (moved from setting.py).
+- `evealert/settings/fields.py` — `FieldSpec` namedtuple, `FIELDS` registry (42
+  entries), `TAB_ORDER`, `apply_registry_fields()` / `save_registry_fields()`.
+- `evealert/bridge.py` — `UIBridge` protocol (toolkit-agnostic engine/GUI contract).
+- `evealert/ui/` — Qt UI package: `app.py`, `theme.py` + `theme.qss`, `main_window.py`,
+  `qt_bridge.py`, `tray.py`, `settings_dialog.py`, `config_dialog.py`,
+  `region_overlay.py`, `statistics_window.py`, `image_manager.py`,
+  `threshold_editor.py`.
+
 ## [4.2.0] 2026-07-12
 
 ### Added
