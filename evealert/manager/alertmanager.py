@@ -1667,6 +1667,38 @@ class AlertAgent:
             finally:
                 self.currently_playing_sounds.pop(alarm_type, None)
 
+    def _build_enemy_alarm_text(self) -> str:
+        """Build the Enemy alarm headline, including pilot names when available.
+
+        Does a quick synchronous read of the EVE Local chat log so that names
+        appear in the very first alarm line rather than a follow-up log entry.
+        Falls back to 'Enemy Appears!' gracefully if no names can be read.
+        """
+        base = "Enemy Appears!"
+        try:
+            from evealert.tools.esi_standings import (  # noqa: PLC0415
+                extract_joining_characters,
+            )
+            from evealert.tools.intel_watcher import (  # noqa: PLC0415
+                find_intel_log,
+                get_eve_chatlog_dir,
+            )
+
+            chatlog_dir = get_eve_chatlog_dir()
+            if not chatlog_dir:
+                return base
+            local_log = find_intel_log(chatlog_dir, "Local")
+            if not local_log:
+                return base
+            with open(local_log, encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()[-50:]
+            names = extract_joining_characters(lines)
+            if names:
+                return f"{base} — {', '.join(names)}"
+        except Exception as exc:
+            logger.debug("_build_enemy_alarm_text: name lookup failed: %s", exc)
+        return base
+
     async def run(self) -> None:
         """Main alarm-trigger loop."""
         while True:
@@ -1687,7 +1719,7 @@ class AlertAgent:
                     # Only alarm for a new/re-eligible enemy, not every poll (#100)
                     if self._should_alarm_enemy():
                         await self.alarm_detection(
-                            "Enemy Appears!", self._alarm_sound, "Enemy"
+                            self._build_enemy_alarm_text(), self._alarm_sound, "Enemy"
                         )
             except Exception as e:
                 logger.error("Alert System Error: %s", e, exc_info=True)
