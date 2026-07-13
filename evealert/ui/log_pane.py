@@ -20,9 +20,8 @@ from datetime import datetime
 from typing import NamedTuple
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QAction, QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
-    QAction,
     QHBoxLayout,
     QLabel,
     QLineEdit,
