@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
 
         # Status bar
         self.statusBar().showMessage(
-            "F1: alert region · F2: faction region · F3: cycle space profile · ESC: cancel selection"
+            "F1: alert region · F2: faction region · F3: cycle space profile · F4: status readout · ESC: cancel selection"
         )
 
         self._apply_dynamic_properties()
@@ -248,6 +248,8 @@ class MainWindow(QMainWindow):
                     self.hotkey_pressed.emit("faction")
                 elif key_matches(key, "f3"):
                     self.hotkey_pressed.emit("profile")
+                elif key_matches(key, "f4"):
+                    self.hotkey_pressed.emit("status")
                 elif key_matches(key, "esc"):
                     self.hotkey_pressed.emit("esc")
 
@@ -405,6 +407,56 @@ class MainWindow(QMainWindow):
                 self.append_log(f"Hotkey {kind}: open Config Mode first", "yellow")
         elif kind == "profile":
             self._cycle_space_profile()
+        elif kind == "status":
+            self._speak_status()
+
+    def _speak_status(self) -> None:
+        """F4: assemble current threat state and speak it via TTS (#152)."""
+        try:
+            from evealert.tools.tts import speak, is_tts_available  # noqa: PLC0415
+            from evealert.data.ship_classes import ShipThreatClass  # noqa: PLC0415
+            from evealert.tools.threat_score import compute_threat_score  # noqa: PLC0415
+
+            if not is_tts_available():
+                self.append_log("Status readout: TTS not available (pip install pyttsx3)", "yellow")
+                return
+
+            alert = self.alert
+
+            local_count = getattr(alert, "_local_hostile_count", 0)
+            dscan_classes: set = getattr(alert, "_dscan_last_classes", set())
+            top_class = ShipThreatClass.UNKNOWN
+            if dscan_classes:
+                top_class = max(dscan_classes,
+                                key=lambda c: ShipThreatClass(c).urgency,
+                                default=ShipThreatClass.UNKNOWN)
+            nm = getattr(alert, "_neighbor_monitor", None)
+            adj_kills = getattr(nm, "last_kill_count", 0) if nm else 0
+
+            assessment = compute_threat_score(
+                local_hostile_count=local_count,
+                dscan_threat_class=top_class.value if top_class != ShipThreatClass.UNKNOWN else "",
+                adjacent_kills=adj_kills,
+                is_cyno=ShipThreatClass.CYNO in dscan_classes,
+            )
+
+            if assessment.score == 0 and local_count == 0:
+                phrase = "All clear. No hostiles in local."
+            else:
+                parts = []
+                if local_count:
+                    parts.append(f"{local_count} hostile{'s' if local_count != 1 else ''} in local")
+                if top_class not in (ShipThreatClass.UNKNOWN, ShipThreatClass.INDUSTRIAL):
+                    parts.append(f"{top_class.value.replace('_', ' ')} on D-scan")
+                if adj_kills:
+                    parts.append(f"{adj_kills} kill{'s' if adj_kills != 1 else ''} in adjacent system")
+                reason_str = "; ".join(parts) if parts else "threat detected"
+                phrase = f"{assessment.label}. {reason_str}. Threat score {assessment.score} out of 10."
+
+            speak(phrase, rate=getattr(alert, "_tts_rate", 175))
+            self.append_log(f"Status: {phrase}", "cyan")
+        except Exception as exc:
+            self.append_log(f"Status readout failed: {exc}", "yellow")
 
     def _cycle_space_profile(self) -> None:
         """F3: advance to the next space profile and apply it."""
