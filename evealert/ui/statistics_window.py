@@ -1,11 +1,13 @@
 """Statistics window — stat cards + sortable tables (Phase 5, #129)."""
 
+import asyncio
 import csv
 import json
 import os
+import threading
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -153,6 +156,31 @@ class StatisticsWindow(QWidget):
         sessions_layout.addWidget(self._sessions_table, 1)
         sessions_layout.addLayout(btn_row)
 
+        # Tab 3 — Threat Heatmap (#148)
+        heatmap_widget = QWidget()
+        heatmap_layout = QVBoxLayout(heatmap_widget)
+        tabs.addTab(heatmap_widget, "Threat Heatmap")
+
+        # Input row
+        inp_row = QHBoxLayout()
+        inp_row.addWidget(QLabel("System:"))
+        self._heatmap_system_input = QLineEdit()
+        self._heatmap_system_input.setPlaceholderText("e.g. 1DQ1-A")
+        inp_row.addWidget(self._heatmap_system_input, 1)
+        btn_load = QPushButton("Load Heatmap")
+        btn_load.clicked.connect(self._load_heatmap)
+        inp_row.addWidget(btn_load)
+        heatmap_layout.addLayout(inp_row)
+
+        self._heatmap_status = QLabel("Enter a system name and press Load Heatmap.")
+        self._heatmap_status.setProperty("class", "muted")
+        heatmap_layout.addWidget(self._heatmap_status)
+
+        self._heatmap_table = _ro_table(
+            "System", "24h kills", "7d kills", "Peak UTC", "Histogram (0-23h)"
+        )
+        heatmap_layout.addWidget(self._heatmap_table, 1)
+
     # ------------------------------------------------------------------
     # Visibility
     # ------------------------------------------------------------------
@@ -284,3 +312,58 @@ class StatisticsWindow(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+
+    # ------------------------------------------------------------------
+    # Threat heatmap (#148)
+    # ------------------------------------------------------------------
+
+    def _load_heatmap(self) -> None:
+        """Fetch constellation heatmap in a background thread, then populate table."""
+        system = self._heatmap_system_input.text().strip()
+        if not system:
+            QMessageBox.warning(self, "Heatmap", "Enter a system name first.")
+            return
+        self._heatmap_status.setText(f"Loading heatmap for {system}\u2026")
+        self._heatmap_table.setRowCount(0)
+
+        def _run() -> None:
+            try:
+                from evealert.tools.threat_heatmap import get_constellation_heatmap  # noqa: PLC0415
+                loop = asyncio.new_event_loop()
+                result = loop.run_until_complete(get_constellation_heatmap(system, days=7))
+                loop.close()
+                self._populate_heatmap(result)
+            except Exception as exc:
+                self._heatmap_status.setText(f"Error: {exc}")
+
+        threading.Thread(target=_run, daemon=True, name="eve-alert-heatmap").start()
+
+    def _populate_heatmap(self, heatmap: dict) -> None:
+        """Populate the heatmap table from the result dict (called from thread)."""
+        # Qt widgets must be updated from the main thread — use a zero-ms timer
+        def _update() -> None:
+            if not heatmap:
+                self._heatmap_status.setText("No data returned (system unknown or no kills).")
+                return
+            self._heatmap_status.setText(
+                f"Constellation — {len(heatmap)} system(s), 7-day kill summary"
+            )
+            self._heatmap_table.setRowCount(len(heatmap))
+            for row, (name, entry) in enumerate(sorted(
+                heatmap.items(), key=lambda kv: kv[1].kills_7d, reverse=True
+            )):
+                hist_str = " ".join(f"{v:2d}" for v in entry.kill_histogram)
+                peak_str = f"{entry.peak_hour_utc:02d}:00"
+                for col, val in enumerate([
+                    name,
+                    str(entry.kills_24h),
+                    str(entry.kills_7d),
+                    peak_str,
+                    hist_str,
+                ]):
+                    item = QTableWidgetItem(val)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    self._heatmap_table.setItem(row, col, item)
+            self._heatmap_table.resizeColumnsToContents()
+
+        QTimer.singleShot(0, _update)
