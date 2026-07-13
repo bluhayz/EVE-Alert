@@ -366,7 +366,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _open_config(self) -> None:
-        self.append_log("Config Mode — settings dialog coming in Phase 4", "yellow")
+        if self._config_dlg is None:
+            from evealert.ui.config_dialog import ConfigDialog  # noqa: PLC0415
+            self._config_dlg = ConfigDialog(self, self.store)
+            self._config_dlg.closed.connect(lambda: self._btn_config.setProperty("class", "") or self._restyle(self._btn_config))
+        self._btn_config.setProperty("class", "warning")
+        self._restyle(self._btn_config)
+        self._config_dlg.show_dialog()
 
     def _open_settings(self) -> None:
         if self._settings_dlg is None:
@@ -378,7 +384,10 @@ class MainWindow(QMainWindow):
             self._settings_dlg.accepted.connect(self.refresh_context_line)
 
     def _open_statistics(self) -> None:
-        self.append_log("Statistics — window coming in Phase 5", "yellow")
+        if self._stats_dlg is None:
+            from evealert.ui.statistics_window import StatisticsWindow  # noqa: PLC0415
+            self._stats_dlg = StatisticsWindow(self, self.alert.statistics)
+        self._stats_dlg.show_window()
 
     # ------------------------------------------------------------------
     # Hotkeys
@@ -386,10 +395,11 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_hotkey(self, kind: str) -> None:
-        if kind == "alert":
-            self.append_log("Hotkey: alert region (Config Mode fill-in Phase 4)", "cyan")
-        elif kind == "faction":
-            self.append_log("Hotkey: faction region (Config Mode fill-in Phase 4)", "cyan")
+        if kind in ("alert", "faction"):
+            if self._config_dlg is not None:
+                self._config_dlg.start_selection(kind)
+            else:
+                self.append_log(f"Hotkey {kind}: open Config Mode first", "yellow")
 
     # ------------------------------------------------------------------
     # Error display
@@ -402,6 +412,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Window / tray / exit
     # ------------------------------------------------------------------
+
+    def _restyle(self, widget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
     def show_and_raise(self) -> None:
         self.show()
