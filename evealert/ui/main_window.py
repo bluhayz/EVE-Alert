@@ -104,6 +104,11 @@ class MainWindow(QMainWindow):
         self._build_tray()
         self._setup_hotkeys()
 
+        # Dialog instances (lazy creation)
+        self._settings_dlg = None
+        self._stats_dlg = None
+        self._config_dlg = None
+
         # 1 s poll timer to sync status from engine state
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
@@ -364,7 +369,13 @@ class MainWindow(QMainWindow):
         self.append_log("Config Mode — settings dialog coming in Phase 4", "yellow")
 
     def _open_settings(self) -> None:
-        self.append_log("Settings — dialog coming in Phase 3", "yellow")
+        if self._settings_dlg is None:
+            from evealert.ui.settings_dialog import SettingsDialog  # noqa: PLC0415
+            self._settings_dlg = SettingsDialog(self, self.store)
+        self._settings_dlg.show_dialog()
+        # Refresh context line when dialog saves
+        if hasattr(self._settings_dlg, 'accepted'):
+            self._settings_dlg.accepted.connect(self.refresh_context_line)
 
     def _open_statistics(self) -> None:
         self.append_log("Statistics — window coming in Phase 5", "yellow")
