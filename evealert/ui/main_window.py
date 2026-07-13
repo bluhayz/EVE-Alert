@@ -1,25 +1,424 @@
-"""Placeholder MainWindow — replaced in Phase 2 (issue #126)."""
+"""Full MainWindow for the PySide6 UI (Phase 2, #126).
 
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QMainWindow, QVBoxLayout, QWidget
+Replaces the Phase 1 placeholder.  The detection engine (AlertAgent) runs
+in a daemon thread; all engine→UI traffic flows exclusively through QtBridge
+signals, never via direct widget access from the engine thread.
+"""
+
+import threading
+from datetime import datetime
+
+from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtGui import QColor, QTextCharFormat
+from PySide6.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from evealert import __version__
+from evealert.manager.alertmanager import AlertAgent
+from evealert.settings.helper import get_resource_path
+from evealert.settings.store import SettingsStore, get_settings_store
+from evealert.ui import theme
+from evealert.ui.qt_bridge import QtBridge
+from evealert.ui.tray import AppTray
 
+
+# ---------------------------------------------------------------------------
+# _MainProxy — thin stub passed to AlertAgent so self.main.xxx still resolves
+# ---------------------------------------------------------------------------
+
+class _MainProxy:
+    """Minimal object passed as ``main`` to AlertAgent in the Qt path.
+
+    AlertAgent._ui() calls functions on self.main for identity checking.
+    This proxy satisfies those checks, routing everything to QtBridge.
+    """
+
+    def __init__(self, bridge: QtBridge):
+        self._bridge = bridge
+        # Legacy attribute checked by alertmanager (now superseded by self._webhook)
+        self.webhook = None
+
+    def after(self, ms: int, fn=None) -> None:  # noqa: ARG002 — ms ignored
+        if fn is not None:
+            QTimer.singleShot(0, fn)
+
+    def write_message(self, text: str, color: str = "normal") -> None:
+        self._bridge.log(text, color)
+
+    def update_alert_button(self) -> None:
+        self._bridge.refresh_region_toggles()
+
+    def update_faction_button(self) -> None:
+        self._bridge.refresh_region_toggles()
+
+    def open_error_window(self, msg: str) -> None:
+        self._bridge.show_error(msg)
+
+
+# ---------------------------------------------------------------------------
+# MainWindow
+# ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
-    """Minimal placeholder — Phase 2 will replace this with the full layout."""
+    """Primary application window for EVE Alert (Qt path).
+
+    Layout (top → bottom):
+      header card  — status dot + title + version
+      context line — system, webhook state, web UI state
+      row 1        — Start (primary) | Stop (danger) | [stretch] | Exit
+      row 2        — Config Mode | Settings | Statistics
+      row 3        — Show Alert Region | Show Faction Region
+      log pane     — QPlainTextEdit, stretch=1
+      status bar   — hotkey hints
+    """
+
+    # Signal emitted from the pynput thread; connected to _on_hotkey (main thread)
+    hotkey_pressed = Signal(str)  # "alert" | "faction" | "esc"
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"EVE Alert — v{__version__}")
         self.setMinimumSize(640, 520)
 
+        # Engine objects
+        self.store: SettingsStore = get_settings_store()
+        self.bridge = QtBridge(self)
+        self._proxy = _MainProxy(self.bridge)
+        self.alert = AlertAgent(self._proxy)
+
+        # Connect bridge signals → slots (queued to main thread automatically)
+        self.bridge.log_message.connect(self.append_log)
+        self.bridge.toggles_changed.connect(self.refresh_toggles)
+        self.bridge.error.connect(self._on_engine_error)
+
+        self._build_ui()
+        self._build_tray()
+        self._setup_hotkeys()
+
+        # 1 s poll timer to sync status from engine state
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(1000)
+        self._poll_timer.timeout.connect(self._sync_run_state)
+        self._poll_timer.start()
+
+        # Initial UI state
+        self.refresh_context_line()
+        self._sync_run_state()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setAlignment(Qt.AlignCenter)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(6)
 
-        label = QLabel("EVE Alert UI — Phase 1 scaffold\nPhase 2 will wire the detection engine.")
-        label.setAlignment(Qt.AlignCenter)
-        label.setProperty("class", "muted")
-        layout.addWidget(label)
+        # Header card
+        header_frame = QWidget()
+        header_frame.setProperty("class", "card")
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(10, 6, 10, 6)
+
+        self._status_label = QLabel("● Stopped")
+        self._status_label.setProperty("class", "status-off")
+        header_layout.addWidget(self._status_label)
+
+        title_label = QLabel("EVE Alert")
+        title_label.setProperty("class", "title")
+        header_layout.addWidget(title_label, 1)
+
+        ver_label = QLabel(f"v{__version__}")
+        ver_label.setProperty("class", "muted")
+        header_layout.addWidget(ver_label)
+
+        root.addWidget(header_frame)
+
+        # Context line
+        self._context_label = QLabel("")
+        self._context_label.setProperty("class", "muted")
+        root.addWidget(self._context_label)
+
+        # Row 1 — Start | Stop | [stretch] | Exit
+        row1 = QHBoxLayout()
+        self._btn_start = QPushButton("▶  Start")
+        self._btn_start.setProperty("class", "primary")
+        self._btn_start.clicked.connect(self.start_detection)
+
+        self._btn_stop = QPushButton("■  Stop")
+        self._btn_stop.setProperty("class", "danger")
+        self._btn_stop.setEnabled(False)
+        self._btn_stop.clicked.connect(self.stop_detection)
+
+        btn_exit = QPushButton("Exit")
+        btn_exit.clicked.connect(self.exit_app)
+
+        row1.addWidget(self._btn_start)
+        row1.addWidget(self._btn_stop)
+        row1.addStretch()
+        row1.addWidget(btn_exit)
+        root.addLayout(row1)
+
+        # Row 2 — Config Mode | Settings | Statistics
+        row2 = QHBoxLayout()
+        self._btn_config = QPushButton("Config Mode")
+        self._btn_config.clicked.connect(self._open_config)
+
+        self._btn_settings = QPushButton("Settings")
+        self._btn_settings.clicked.connect(self._open_settings)
+
+        self._btn_stats = QPushButton("Statistics")
+        self._btn_stats.clicked.connect(self._open_statistics)
+
+        for btn in (self._btn_config, self._btn_settings, self._btn_stats):
+            row2.addWidget(btn)
+        row2.addStretch()
+        root.addLayout(row2)
+
+        # Row 3 — region toggles
+        row3 = QHBoxLayout()
+        self._btn_alert_region = QPushButton("Show Alert Region")
+        self._btn_alert_region.setProperty("class", "primary")
+        self._btn_alert_region.clicked.connect(self._toggle_alert_region)
+
+        self._btn_faction_region = QPushButton("Show Faction Region")
+        self._btn_faction_region.setProperty("class", "primary")
+        self._btn_faction_region.clicked.connect(self._toggle_faction_region)
+
+        row3.addWidget(self._btn_alert_region)
+        row3.addWidget(self._btn_faction_region)
+        row3.addStretch()
+        root.addLayout(row3)
+
+        # Log pane
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.document().setMaximumBlockCount(500)
+        root.addWidget(self._log, 1)
+
+        # Status bar
+        self.statusBar().showMessage(
+            "F1: alert region · F2: faction region · ESC: cancel selection"
+        )
+
+        self._apply_dynamic_properties()
+
+    def _apply_dynamic_properties(self) -> None:
+        """Force QSS re-evaluation after setting dynamic properties."""
+        for w in (self._status_label, self._context_label):
+            w.style().unpolish(w)
+            w.style().polish(w)
+
+    def _build_tray(self) -> None:
+        self._tray = AppTray(self)
+        self._tray.show()
+
+    def _setup_hotkeys(self) -> None:
+        """Start the pynput global-hotkey listener on a daemon thread."""
+        try:
+            from pynput import keyboard  # noqa: PLC0415
+
+            hotkeys = self.store.load().get("hotkeys", {})
+            alert_key = hotkeys.get("alert_region", "f1")
+            faction_key = hotkeys.get("faction_region", "f2")
+
+            from evealert.hotkeys import key_matches  # noqa: PLC0415
+
+            def _on_release(key):
+                if key_matches(key, alert_key):
+                    self.hotkey_pressed.emit("alert")
+                elif key_matches(key, faction_key):
+                    self.hotkey_pressed.emit("faction")
+                elif key_matches(key, "esc"):
+                    self.hotkey_pressed.emit("esc")
+
+            self._hotkey_listener = keyboard.Listener(on_release=_on_release)
+            self._hotkey_listener.daemon = True
+            self._hotkey_listener.start()
+        except Exception:
+            self._hotkey_listener = None
+
+        self.hotkey_pressed.connect(self._on_hotkey)
+
+    # ------------------------------------------------------------------
+    # Engine control
+    # ------------------------------------------------------------------
+
+    def start_detection(self) -> None:
+        if self.alert.is_running:
+            return
+        self._btn_start.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        t = threading.Thread(target=self.alert.start, daemon=True)
+        t.start()
+
+    def stop_detection(self) -> None:
+        self.alert.stop()
+
+    # ------------------------------------------------------------------
+    # Log pane
+    # ------------------------------------------------------------------
+
+    @Slot(str, str)
+    def append_log(self, text: str, color: str = "normal") -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{now}] {text}"
+
+        fmt = QTextCharFormat()
+        hex_color = theme.LOG_COLORS.get(color, theme.TEXT)
+        fmt.setForeground(QColor(hex_color))
+
+        cursor = self._log.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(line + "\n", fmt)
+
+        # Auto-scroll only when already at the bottom
+        scrollbar = self._log.verticalScrollBar()
+        if scrollbar.value() >= scrollbar.maximum() - 4:
+            self._log.ensureCursorVisible()
+
+        # Mirror to web server log buffer
+        try:
+            from evealert.tools.web_server import append_to_log_buffer  # noqa: PLC0415
+            append_to_log_buffer(line)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Region toggles
+    # ------------------------------------------------------------------
+
+    @Slot()
+    def refresh_toggles(self) -> None:
+        alert_active = self.alert.alert_vision.is_vision_open
+        faction_active = self.alert.alert_vision_faction.is_faction_vision_open
+
+        self._btn_alert_region.setProperty(
+            "class", "danger" if alert_active else "primary"
+        )
+        self._btn_faction_region.setProperty(
+            "class", "danger" if faction_active else "primary"
+        )
+        for btn in (self._btn_alert_region, self._btn_faction_region):
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    def _toggle_alert_region(self) -> None:
+        QTimer.singleShot(0, self.alert.set_vision)
+
+    def _toggle_faction_region(self) -> None:
+        QTimer.singleShot(0, self.alert.set_vision_faction)
+
+    # ------------------------------------------------------------------
+    # Context line + state sync
+    # ------------------------------------------------------------------
+
+    def refresh_context_line(self) -> None:
+        try:
+            settings = self.store.load()
+            system = settings.get("server", {}).get("system", "")
+            if system == "Enter a System Name":
+                system = ""
+            webhook_on = bool(settings.get("server", {}).get("webhook", ""))
+            web_on = settings.get("web_ui", {}).get("enabled", False)
+            parts = []
+            if system:
+                parts.append(f"System: {system}")
+            parts.append(f"Webhook: {'on' if webhook_on else 'off'}")
+            parts.append(f"Web UI: {'on' if web_on else 'off'}")
+            self._context_label.setText(" · ".join(parts))
+        except Exception:
+            pass
+
+    def _sync_run_state(self) -> None:
+        running = self.alert.is_running
+        if running:
+            self._status_label.setText("● Running")
+            self._status_label.setProperty("class", "status-on")
+        else:
+            self._status_label.setText("● Stopped")
+            self._status_label.setProperty("class", "status-off")
+        self._status_label.style().unpolish(self._status_label)
+        self._status_label.style().polish(self._status_label)
+
+        self._btn_start.setEnabled(not running)
+        self._btn_stop.setEnabled(running)
+        self._tray.sync_run_state(running)
+
+    # ------------------------------------------------------------------
+    # Dialog launchers (filled in by Phases 3–5)
+    # ------------------------------------------------------------------
+
+    def _open_config(self) -> None:
+        self.append_log("Config Mode — settings dialog coming in Phase 4", "yellow")
+
+    def _open_settings(self) -> None:
+        self.append_log("Settings — dialog coming in Phase 3", "yellow")
+
+    def _open_statistics(self) -> None:
+        self.append_log("Statistics — window coming in Phase 5", "yellow")
+
+    # ------------------------------------------------------------------
+    # Hotkeys
+    # ------------------------------------------------------------------
+
+    @Slot(str)
+    def _on_hotkey(self, kind: str) -> None:
+        if kind == "alert":
+            self.append_log("Hotkey: alert region (Config Mode fill-in Phase 4)", "cyan")
+        elif kind == "faction":
+            self.append_log("Hotkey: faction region (Config Mode fill-in Phase 4)", "cyan")
+
+    # ------------------------------------------------------------------
+    # Error display
+    # ------------------------------------------------------------------
+
+    @Slot(str)
+    def _on_engine_error(self, message: str) -> None:
+        QMessageBox.critical(self, "EVE Alert — Engine Error", message)
+
+    # ------------------------------------------------------------------
+    # Window / tray / exit
+    # ------------------------------------------------------------------
+
+    def show_and_raise(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event) -> None:
+        """Hide to tray instead of closing."""
+        event.ignore()
+        self.hide()
+        self._tray.showMessage(
+            "EVE Alert",
+            "Running in the system tray. Double-click to restore.",
+            AppTray.MessageIcon.Information,
+            2000,
+        )
+
+    def exit_app(self) -> None:
+        """Hard exit: stop engine, hide tray, quit Qt."""
+        # Stop pynput listener
+        if self._hotkey_listener is not None:
+            try:
+                self._hotkey_listener.stop()
+            except Exception:
+                pass
+        # Stop engine cleanly
+        if self.alert.is_running:
+            self.alert.stop()
+        # Hide tray icon so it doesn't ghost
+        self._tray.hide()
+        QApplication.quit()
