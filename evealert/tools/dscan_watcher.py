@@ -188,10 +188,17 @@ class DscanWatcher:
         self._encoding: str | None = None  # detected once per file from the BOM
         # Track what's currently visible to detect disappearances
         self._visible: set[str] = set()
+        # Type names (col 2) of currently-visible entries — for ship cross-reference (#150)
+        self._visible_types: set[str] = set()
         # Cosmic-signature tracking (#145)
         self._sig_count: int = 0
         # Session timeline
         self.timeline: deque[DscanEntry] = deque(maxlen=_HISTORY_MAXLEN)
+
+    @property
+    def current_visible_types(self) -> set[str]:
+        """Set of ship type-column values currently on D-scan (#150)."""
+        return frozenset(self._visible_types)
 
     def stop(self) -> None:
         self._running = False
@@ -212,6 +219,7 @@ class DscanWatcher:
                 self._file_pos = new_path.stat().st_size if new_path else 0
                 self._encoding = None
                 self._visible.clear()
+                self._visible_types.clear()
 
             if self._log_path is not None:
                 self._tail_once()
@@ -250,6 +258,7 @@ class DscanWatcher:
         if size < self._file_pos:  # file truncated / rotated
             self._file_pos = 0
             self._visible.clear()
+            self._visible_types.clear()
         if size <= self._file_pos:
             return
 
@@ -281,7 +290,7 @@ class DscanWatcher:
             complete_text = text[: last_nl + 1]
         self._file_pos += len(complete_text.encode(encoding))
 
-        current_scan, probe_detected, sig_count = self._parse_lines(complete_text)
+        current_scan, current_types, probe_detected, sig_count = self._parse_lines(complete_text)
 
         # Signature delta (#145): fire callback when new sigs appear
         if read_to_eof and sig_count > self._sig_count:
@@ -320,15 +329,18 @@ class DscanWatcher:
                     pass
             if current_scan:
                 self._visible = current_scan
+                self._visible_types = current_types
         else:
             # Accumulate visibility across partial reads without evicting.
             self._visible |= current_scan
+            self._visible_types |= current_types
 
     def _parse_lines(self, text: str) -> tuple[set, bool, int]:
         """Parse D-scan lines, classifying by the Type column (index 2) and
         falling back to the object name (index 0).
         Returns (current_scan set, probe_detected, sig_count)."""
         current_scan: set[str] = set()
+        current_types: set[str] = set()
         probe_detected = False
         sig_count = 0
         for line in text.splitlines():
@@ -343,6 +355,8 @@ class DscanWatcher:
                 sig_count += 1
 
             current_scan.add(obj_name)
+            if type_name:
+                current_types.add(type_name)
             # Ship type (col 2) is the reliable classification source; the name
             # (col 0) is often a custom ship name that matches no keyword (#101).
             tier = classify_entry(type_name) if type_name else "unknown"
@@ -371,7 +385,7 @@ class DscanWatcher:
                     self._on_threat(tier, obj_name, threat_class)
                 except Exception:
                     pass
-        return current_scan, probe_detected, sig_count
+        return current_scan, current_types, probe_detected, sig_count
 
     @staticmethod
     def _find_dscan_dir() -> Path | None:

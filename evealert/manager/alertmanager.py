@@ -1266,6 +1266,16 @@ class AlertAgent:
                             f"[{danger_pct}% danger]{ship_str}",
                             "cyan",
                         )
+                        # Ship cross-reference (#150): match top_ship against D-scan types
+                        if zkb.top_ship and self._dscan_watcher:
+                            visible = self._dscan_watcher.current_visible_types
+                            if any(zkb.top_ship.lower() in v.lower() for v in visible):
+                                self._ui(
+                                    self.main.write_message,
+                                    f"    \u26a0 MATCH: {info.name} typically flies {zkb.top_ship}"
+                                    " \u2014 that type is on D-scan NOW",
+                                    "red",
+                                )
                 except Exception as exc:
                     logger.debug("Zkillboard profile augmentation failed: %s", exc)
 

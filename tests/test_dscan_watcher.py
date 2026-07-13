@@ -32,24 +32,24 @@ class ParseLinesTests(unittest.TestCase):
         # is the reliable "Force Recon Ship" -> red.
         w, threats, _ = self._watcher()
         line = "My Ship Name\t12 km\tForce Recon Ship\tRecon Ship"
-        current, probe, _sigs = w._parse_lines(line + "\n")
+        current, _types, probe, _sigs = w._parse_lines(line + "\n")
         self.assertIn("My Ship Name", current)
         self.assertEqual(threats[-1][0], "red")
 
     def test_name_fallback_when_no_type_column(self):
         w, threats, _ = self._watcher()
         # Only a name column; "Sabre" is a known red ship name.
-        current, probe, _sigs = w._parse_lines("Sabre\n")
+        current, _types, probe, _sigs = w._parse_lines("Sabre\n")
         self.assertEqual(threats[-1][0], "red")
 
     def test_probe_detected(self):
         w, _, _ = self._watcher()
-        _, probe, _sigs = w._parse_lines("Probe\t5 km\tCore Scanner Probe\tScanner Probe\n")
+        _, _types, probe, _sigs = w._parse_lines("Probe\t5 km\tCore Scanner Probe\tScanner Probe\n")
         self.assertTrue(probe)
 
     def test_cosmic_signature_counted(self):
         w, _, _ = self._watcher()
-        _, _, sig_count = w._parse_lines(
+        _, _types, _, sig_count = w._parse_lines(
             "ABC-123\t1234 km\tCosmic Signature\t\n"
             "DEF-456\t2000 km\tCosmic Signature\t\n"
         )
@@ -63,7 +63,7 @@ class ParseLinesTests(unittest.TestCase):
         # Inject a second sig manually
         w._sig_count = 1
         # Fire the callback path directly
-        _, _, sig_count = w._parse_lines(
+        _, _types, _, sig_count = w._parse_lines(
             "ABC-123\t1234 km\tCosmic Signature\t\n"
             "XYZ-789\t500 km\tCosmic Signature\t\n"
         )
