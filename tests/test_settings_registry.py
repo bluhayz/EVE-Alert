@@ -1,20 +1,18 @@
 """Tests for the settings field registry (#107).
 
 Pure/no-Tk: exercises path helpers, registry integrity, and the
-apply/save round-trip using fake widgets so the CTkTabview refactor's
-scalar-field wiring is covered without a display.
+apply/save round-trip using fake widgets.
 """
 
 import unittest
 
-from evealert.menu.setting import (
-    DEFAULT_SETTINGS,
+from evealert.settings.fields import (
     FIELDS,
     TAB_ORDER,
-    SettingMenu,
-    _get_by_path,
-    _set_by_path,
+    apply_registry_fields,
+    save_registry_fields,
 )
+from evealert.settings.store import DEFAULT_SETTINGS, _get_by_path, _set_by_path
 
 
 class PathHelperTests(unittest.TestCase):
@@ -44,8 +42,6 @@ class RegistryIntegrityTests(unittest.TestCase):
             self.assertIn(f.tab, TAB_ORDER, f"{f.path} tab not in TAB_ORDER")
 
     def test_paths_exist_in_default_settings(self):
-        # Every registry path must resolve to a leaf in DEFAULT_SETTINGS so the
-        # merged base always has a parent dict for save to write into.
         for f in FIELDS:
             sentinel = object()
             self.assertIsNot(
@@ -80,9 +76,8 @@ class _FakeEntry:
         self._v = str(val)
 
 
-class _StubMenu:
-    _apply_registry_fields = SettingMenu._apply_registry_fields
-    _save_registry_fields = SettingMenu._save_registry_fields
+class _Stub:
+    """Minimal object with fake widget attributes for each FieldSpec."""
 
     def __init__(self):
         for f in FIELDS:
@@ -91,34 +86,33 @@ class _StubMenu:
 
 class RegistryRoundTripTests(unittest.TestCase):
     def test_apply_then_save_round_trips(self):
-        stub = _StubMenu()
+        stub = _Stub()
         settings = {
             "dscan": {"enabled": True, "alert_red": False},
             "wormhole": {"thera_max_jumps": 9},
             "push": {"telegram_token": "SECRET"},
             "esi_oauth": {"client_id": "my-app"},
         }
-        stub._apply_registry_fields(settings)
-        # Widgets now reflect settings
+        apply_registry_fields(stub, settings)
         self.assertTrue(stub.dscan_enabled_var.get())
         self.assertFalse(stub.dscan_red_var.get())
         self.assertEqual(stub.thera_max_jumps_entry.get(), "9")
         self.assertEqual(stub.telegram_token_entry.get(), "SECRET")
 
         out = {}
-        stub._save_registry_fields(out)
+        save_registry_fields(stub, out)
         self.assertIs(out["dscan"]["enabled"], True)
         self.assertIs(out["dscan"]["alert_red"], False)
-        self.assertEqual(out["wormhole"]["thera_max_jumps"], 9)  # int coerced
+        self.assertEqual(out["wormhole"]["thera_max_jumps"], 9)
         self.assertEqual(out["push"]["telegram_token"], "SECRET")
         self.assertEqual(out["esi_oauth"]["client_id"], "my-app")
 
     def test_int_field_falls_back_to_default_on_garbage(self):
-        stub = _StubMenu()
+        stub = _Stub()
         stub.web_ui_port_entry = _FakeEntry("not-a-number")
         out = {}
-        stub._save_registry_fields(out)
-        self.assertEqual(out["web_ui"]["port"], 8765)  # default
+        save_registry_fields(stub, out)
+        self.assertEqual(out["web_ui"]["port"], 8765)
 
 
 if __name__ == "__main__":

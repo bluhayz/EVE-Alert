@@ -1,13 +1,10 @@
-"""GUI-independent UIBridge protocol + TkBridge implementation (Phase 0, #124).
+"""UIBridge protocol — the only interface between engine and GUI (Phase 0/7, #124/#131).
 
-AlertAgent talks only to UIBridge.  The Tk app provides TkBridge; Phase 2
-will provide QtBridge.  The engine never imports tkinter.
+After the Phase 7 cutover TkBridge is removed; all GUI calls flow through
+QtBridge (evealert/ui/qt_bridge.py).
 """
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    from evealert.menu.main import MainMenu
+from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -25,24 +22,3 @@ class UIBridge(Protocol):
     def show_error(self, message: str) -> None:
         """Display an error dialog (thread-safe)."""
         ...
-
-
-class TkBridge:
-    """UIBridge backed by the customtkinter MainMenu.
-
-    All calls are dispatched to the Tk main thread via after(0) so the
-    engine can call these methods from any thread safely.
-    """
-
-    def __init__(self, main: "MainMenu"):
-        self._main = main
-
-    def log(self, text: str, color: str = "normal") -> None:
-        self._main.after(0, lambda: self._main.write_message(text, color))
-
-    def refresh_region_toggles(self) -> None:
-        self._main.after(0, self._main.update_alert_button)
-        self._main.after(0, self._main.update_faction_button)
-
-    def show_error(self, message: str) -> None:
-        self._main.after(0, lambda: self._main.open_error_window(message))

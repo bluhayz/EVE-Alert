@@ -41,6 +41,7 @@ jobs:
           --icon evealert/img/eve.ico
           --add-data "evealert/img;img"
           --add-data "evealert/sound;sound"
+          --add-data "evealert/ui/theme.qss;ui"
           main.py
 
       - name: Upload Windows artifact

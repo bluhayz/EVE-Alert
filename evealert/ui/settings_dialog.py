@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from evealert.menu.setting import FIELDS, TAB_ORDER
+from evealert.settings.fields import FIELDS, TAB_ORDER
 from evealert.settings.helper import get_settings_path
 from evealert.settings.store import SettingsStore, _get_by_path, _set_by_path
 

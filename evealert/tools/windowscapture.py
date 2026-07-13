@@ -1,12 +1,9 @@
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import Optional, Tuple
 
 import mss
 import numpy as np
 
 from evealert.settings.logger import logging
-
-if TYPE_CHECKING:
-    from evealert.menu.main import MainMenu
 
 logger = logging.getLogger("tools")
 
@@ -20,7 +17,7 @@ class WindowCapture:
     and then used in the background alert thread.
     """
 
-    def __init__(self, mainmenu: "MainMenu"):
+    def __init__(self, mainmenu=None):  # mainmenu kept for API compat; not used
         self.main = mainmenu
         self._sct: Optional[mss.base.MSSBase] = None
 

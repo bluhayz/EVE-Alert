@@ -27,7 +27,6 @@ dynamic = [
     "version",
 ]
 dependencies = [
-    "customtkinter==5.2.2",
     "dhooks-lite>=0.2",
     "httpx>=0.27",
     "mss==10.0.0",
@@ -37,8 +36,6 @@ dependencies = [
     "platformdirs>=4.0",
     "pynput==1.7.7",
     "PySide6>=6.7,<7",
-    "pystray>=0.19",
-    "screeninfo==0.8.1",
     "sounddevice==0.5.1",
     "soundfile==0.12.1",
 ]

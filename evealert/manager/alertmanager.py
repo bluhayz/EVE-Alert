@@ -3,7 +3,7 @@ import logging
 import os
 import random
 import time
-from typing import TYPE_CHECKING, Callable
+from typing import Callable
 
 import numpy as np
 import soundfile as sf
@@ -38,15 +38,12 @@ from evealert.settings.stats_store import (
     save_lifetime_stats,
     save_session_report,
 )
-from evealert.bridge import TkBridge, UIBridge  # noqa: F401
+from evealert.bridge import UIBridge  # noqa: F401
 from evealert.settings.store import get_settings_store
 from evealert.settings.validator import ConfigValidator
 from evealert.statistics import AlarmStatistics
 from evealert.tools.vision import Vision
 from evealert.tools.windowscapture import WindowCapture
-
-if TYPE_CHECKING:
-    from evealert.menu.main import MainMenu
 
 # Sound file paths (safe to resolve at import time — no directory listing)
 ALARM_SOUND = get_resource_path(f"{SOUND_FOLDER}/{ALARM_SOUND_FILE}")
@@ -95,7 +92,7 @@ class AlertAgent:
     def __init__(self, main: "MainMenu"):
         self.main = main
         # Bridge + store must be created first so the rest of __init__ can use them
-        self._bridge: UIBridge = TkBridge(main)
+        self._bridge: UIBridge = main  # main is a UIBridge-compatible object (_MainProxy in Qt path)
         self._settings_store = get_settings_store()
         self._webhook = None  # dhooks_lite.Webhook; populated by load_settings()
         self.loop: asyncio.AbstractEventLoop | None = None

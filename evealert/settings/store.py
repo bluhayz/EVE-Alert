@@ -2,8 +2,8 @@
 
 SettingsStore owns the JSON load/merge/save cycle and the `changed` flag
 that AlertAgent polls to know when to reload.  The singleton returned by
-get_settings_store() is shared by both the GUI layer (SettingMenu) and
-the engine (AlertAgent) so the flag propagates correctly.
+get_settings_store() is shared by both the GUI layer and the engine so the
+flag propagates correctly.
 """
 
 import copy
@@ -11,16 +11,80 @@ import json
 import os
 import tempfile
 
+from evealert.constants import DEFAULT_COOLDOWN_TIMER
+from evealert.hotkeys import DEFAULT_HOTKEYS
 from evealert.settings.helper import get_settings_path
 from evealert.settings.logger import logging
 
 logger = logging.getLogger("settings")
 
 # ---------------------------------------------------------------------------
-# Re-exported from evealert.menu.setting (authoritative copy lives here)
+# DEFAULT_SETTINGS — authoritative defaults for all settings keys
 # ---------------------------------------------------------------------------
-# imported lazily below to avoid a circular import at module level
-# (setting.py imports constants and hotkeys before this module existed)
+DEFAULT_SETTINGS: dict = {
+    "log_level": "INFO",
+    "active_profile": "Default",
+    "alert_region_1": {"x": 0, "y": 0},
+    "alert_region_2": {"x": 0, "y": 0},
+    "faction_region_1": {"x": 0, "y": 0},
+    "faction_region_2": {"x": 0, "y": 0},
+    "detectionscale": {"value": 90},
+    "faction_scale": {"value": 90},
+    "cooldown_timer": {"value": DEFAULT_COOLDOWN_TIMER},
+    "volume": {"value": 100},
+    "server": {
+        "webhook": "",
+        "system": "Enter a System Name",
+        "mute": False,
+        "webhook_template": "{alarm_type} detected in {system} at {time} (session #{count})",
+    },
+    "hotkeys": DEFAULT_HOTKEYS,
+    "sounds": {"alarm": "", "faction": ""},
+    "profiles": {},
+    "image_thresholds": {},
+    "intelligence": {
+        "zkillboard_enabled": False,
+        "zkillboard_cooldown": 300,
+        "intel_log_enabled": False,
+        "intel_log_channel": "",
+    },
+    "cooldown_timer_enemy": {"value": DEFAULT_COOLDOWN_TIMER},
+    "cooldown_timer_faction": {"value": DEFAULT_COOLDOWN_TIMER},
+    "webhooks": {
+        "enemy": {"url": "", "min_count": 0},
+        "faction": {"url": "", "min_count": 0},
+    },
+    "esi": {"enabled": False, "show_corp": True, "show_alliance": True, "alert_flashy": False},
+    "threat_tiers": {},
+    "plugins": {"enabled": True},
+    "web_ui": {"enabled": False, "port": 8765},
+    "adjacent": {
+        "enabled": False, "max_jumps": 3, "poll_interval": 120,
+        "min_kills": 1, "destination_system": "",
+    },
+    "dscan": {"enabled": False, "alert_red": True, "alert_orange": False, "alert_probes": True},
+    "kos": {"cva_enabled": True, "custom_urls": []},
+    "kos_list": [],
+    "push": {
+        "telegram_token": "", "telegram_chat_id": "",
+        "pushover_user": "", "pushover_token": "", "ntfy_url": "",
+    },
+    "notifications": {"auto_screenshot": False, "escalation_threshold": 0},
+    "wormhole": {
+        "thera_enabled": False, "thera_max_jumps": 5,
+        "wh_drop_enabled": False, "wh_drop_threshold": 3,
+    },
+    "fleet": {
+        "composition_enabled": False, "killmail_enabled": False,
+        "tracked_character_ids": [],
+    },
+    "esi_oauth": {
+        "client_id": "", "standings_auto_classify": False,
+        "fleet_monitor": False, "structure_alerts": False,
+    },
+    "ocr": {"enabled": False, "region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0}},
+    "diagnostics": {"enabled": False},
+}
 
 
 def _set_by_path(settings: dict, path: str, value) -> None:
@@ -67,8 +131,6 @@ class SettingsStore:
         Returns the resolved settings dict and updates the internal cache
         so that ``get()`` reflects the freshly loaded values.
         """
-        from evealert.menu.setting import DEFAULT_SETTINGS  # lazy import avoids circular dep
-
         config_path = self._resolve_path()
         try:
             with open(config_path, encoding="utf-8") as f:
