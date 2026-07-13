@@ -342,9 +342,13 @@ class SettingsDialog(QDialog):
         self._esi_client_id.setPlaceholderText(
             "Required \u2014 register a free app at developers.eveonline.com"
         )
+        try:
+            from evealert.tools.esi_auth import REDIRECT_URI as _redirect_uri  # noqa: PLC0415
+        except Exception:
+            _redirect_uri = "http://localhost:8888/callback"
         esi_help = QLabel(
             "App type: <b>Authentication Only</b> \u2014 "
-            "Callback: <code>http://localhost:4557/callback</code> \u2014 "
+            f"Callback: <code>{_redirect_uri}</code> \u2014 "
             "Client ID must be a 32-character hex string"
         )
         esi_help.setWordWrap(True)
@@ -754,7 +758,8 @@ class SettingsDialog(QDialog):
         ):
             w.set_used_by({k: v for k, v in bindings.items() if k != name})
 
-    def _build_tts_check_button(self) -> None:        """Append a TTS health-check row + Test button to the Text-to-Speech section."""
+    def _build_tts_check_button(self) -> None:
+        """Append a TTS health-check row + Test button to the Text-to-Speech section."""
         key = "Alerts & Sound/Text-to-Speech"
         if key not in self._sections:
             return

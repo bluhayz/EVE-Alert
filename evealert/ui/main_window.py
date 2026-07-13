@@ -441,15 +441,17 @@ class MainWindow(QMainWindow):
 
             alert = self.alert
 
-            local_count = getattr(alert, "_local_hostile_count", 0)
-            dscan_classes: set = getattr(alert, "_dscan_last_classes", set())
+            # Snapshot engine state once — avoids RuntimeError from set mutation
+            # on the engine thread while we iterate (#189)
+            local_count = int(getattr(alert, "_local_hostile_count", 0))
+            dscan_classes: set = set(getattr(alert, "_dscan_last_classes", set()))
             top_class = ShipThreatClass.UNKNOWN
             if dscan_classes:
                 top_class = max(dscan_classes,
                                 key=lambda c: ShipThreatClass(c).urgency,
                                 default=ShipThreatClass.UNKNOWN)
             nm = getattr(alert, "_neighbor_monitor", None)
-            adj_kills = getattr(nm, "last_kill_count", 0) if nm else 0
+            adj_kills = int(getattr(nm, "last_kill_count", 0)) if nm else 0
 
             assessment = compute_threat_score(
                 local_hostile_count=local_count,
@@ -511,7 +513,13 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def closeEvent(self, event) -> None:
-        """Hide to tray instead of closing."""
+        """Hide to tray, or exit cleanly when no tray is available (#189)."""
+        from PySide6.QtWidgets import QSystemTrayIcon  # noqa: PLC0415
+        if self._tray is None or not QSystemTrayIcon.isSystemTrayAvailable():
+            # No tray — close means quit so the app doesn't become unreachable
+            event.accept()
+            self.exit_app()
+            return
         event.ignore()
         self.hide()
         if self._tray is not None:

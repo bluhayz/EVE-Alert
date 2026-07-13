@@ -51,6 +51,8 @@ _ESI_TOKEN_URL = "https://login.eveonline.com/v2/oauth/token"
 _HTTP_TIMEOUT = 10.0
 _REDIRECT_PORT = 8888
 _REDIRECT_URI = f"http://localhost:{_REDIRECT_PORT}/callback"
+# Public alias so UI modules can import the canonical URI without touching private names
+REDIRECT_URI: str = _REDIRECT_URI
 
 # EVE Alert registered client ID.
 # Blank means unconfigured — users must register a free app at
