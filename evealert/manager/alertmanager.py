@@ -258,6 +258,7 @@ class AlertAgent:
 
         # v4.0: ESI OAuth deep integration
         self._esi_standings_classify = False
+        self._standings_filter_blues = False  # (#147)
         self._esi_fleet_monitor = False
         self._esi_structure_alerts = False
         self._esi_standings_cache: dict = {}  # character_id → standing float
@@ -664,6 +665,9 @@ class AlertAgent:
             esi = settings.get("esi_oauth", {})
             self._esi_standings_classify = bool(
                 esi.get("standings_auto_classify", False)
+            )
+            self._standings_filter_blues = bool(
+                esi.get("standings_filter_blues", False)
             )
             self._esi_fleet_monitor = bool(esi.get("fleet_monitor", False))
             self._esi_structure_alerts = bool(esi.get("structure_alerts", False))
@@ -1309,6 +1313,14 @@ class AlertAgent:
                         elif standing >= 5.0:
                             tier_color = "green"
                             tier_label = f"excellent standing ({standing:+.1f})"
+                            # Blues filter (#147): skip KOS/threat for allies
+                            if self._standings_filter_blues:
+                                self._ui(
+                                    self.main.write_message,
+                                    f"    [ALLY] {info.name} — standing {standing:+.1f} (filtered)",
+                                    "green",
+                                )
+                                continue
                         else:
                             tier_color = "cyan"
                             tier_label = f"standing {standing:+.1f}"

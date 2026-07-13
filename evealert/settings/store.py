@@ -81,6 +81,7 @@ DEFAULT_SETTINGS: dict = {
     },
     "esi_oauth": {
         "client_id": "", "standings_auto_classify": False,
+        "standings_filter_blues": False,
         "fleet_monitor": False, "structure_alerts": False,
     },
     "ocr": {"enabled": False, "region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0}},

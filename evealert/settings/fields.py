@@ -67,6 +67,9 @@ FIELDS: list = [
               "Client ID", "esi_client_id_entry", ""),
     FieldSpec("esi_oauth.standings_auto_classify", "bool", "Intel & ESI", "EVE SSO / ESI OAuth",
               "Auto-classify standing contacts in Local", "esi_standings_var", False),
+    # Standings-aware filter (#147)
+    FieldSpec("esi_oauth.standings_filter_blues", "bool", "Intel & ESI", "EVE SSO / ESI OAuth",
+              "Filter out allied pilots (standing ≥+5) from threat display", "esi_filter_blues_var", False),
     FieldSpec("esi_oauth.fleet_monitor", "bool", "Intel & ESI", "EVE SSO / ESI OAuth",
               "Display fleet membership on start", "esi_fleet_var", False),
     FieldSpec("esi_oauth.structure_alerts", "bool", "Intel & ESI", "EVE SSO / ESI OAuth",
