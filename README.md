@@ -1,6 +1,6 @@
 # EVE Alert
 
-EVE Alert monitors your EVE Online Local chat window for enemy and neutral player icons using OpenCV template matching, then fires audio alarms, Discord webhooks, and mobile push notifications — giving you a heads-up without breaking your focus. Beyond screen detection it layers in a full intel suite: pilot background checks via ESI, zKillboard kill activity, D-scan threat classification, KOS list checks, adjacent-system and wormhole awareness, and (since v4.0) EVE SSO login for personal standings, fleet, and structure-fuel data.
+EVE Alert monitors your EVE Online Local chat window for enemy and neutral player icons using OpenCV template matching, then fires audio alarms, Discord webhooks, and mobile push notifications — giving you a heads-up without breaking your focus. Beyond screen detection it layers in a full intel suite: pilot background checks via ESI, zKillboard kill activity, D-scan threat classification (with per-ship threat classes), KOS list checks, adjacent-system and wormhole awareness, EVE SSO login for personal standings, and (since v6.0) a composite threat score, TTS voice alerts, cyno detection, intel channel parsing with jump-distance lookups, space profiles, and standings-aware ally filtering.
 
 [![Tests](https://github.com/bluhayz/EVE-Alert/actions/workflows/tests.yml/badge.svg)](https://github.com/bluhayz/EVE-Alert/actions/workflows/tests.yml)
 [![Latest Release](https://img.shields.io/github/v/release/bluhayz/EVE-Alert)](https://github.com/bluhayz/EVE-Alert/releases)
@@ -72,6 +72,17 @@ A second, independent region (Faction Region) watches for faction spawn or other
 - Rotating log files (5 MB x 3 backups) with configurable log level
 - Support for multiple UI scaling variants of template images (e.g. `image_1_90%.png`, `image_1_100%.png`)
 - Pre-built releases: Windows `.exe` and macOS `.dmg` — no Python required for end users
+
+### AFK situational awareness (v6.0)
+
+- **D-scan ship class classification** — D-scan threat entries now include a fine-grained class label: TACKLE, DICTOR, FORCE_RECON, COVERT_OPS, CYNO, COMBAT, INDUSTRIAL. Labels appear inline in the log (`D-SCAN RED: Sabre [DICTOR — bubble incoming]`).
+- **TTS voice alerts** — optional spoken alarm readout via `pyttsx3`. Configurable speech rate; Check and Test buttons in Settings. Install with `pip install "evealert[tts]"`.
+- **Composite threat score** — combines local count, KOS status, zKillboard danger ratio, D-scan ship class, and adjacent kills into a 1–10 score (CAUTION / HIGH / CRITICAL) logged after each ESI intel block. Cyno detection forces 10/CRITICAL.
+- **Per-enemy re-alert** — set `alerts.rearm_minutes` to re-alarm on a pilot who has been continuously present beyond the configured window (0 = disabled).
+- **Space profiles (F3 hotkey)** — three one-click presets (Null-sec / Wormhole / High-sec) apply a coordinated set of settings overrides and reload the agent live. Press **F3** to cycle through profiles.
+- **Intel channel improvements** — structured parsing of coalition intel messages: system name, hostile count, clear signals, ship mentions. Jump distance from your home system is looked up via ESI and appended to each report.
+- **Cyno detection** — dedicated CRITICAL alarm when a cynosural field or cyno ship appears on D-scan. Bypasses the normal cooldown; also speaks via TTS.
+- **Standings-aware ally filtering** — enable `standings_filter_blues` to suppress allied pilots (standing ≥ +5.0) from threat display, KOS checks, and the composite threat score.
 
 ---
 

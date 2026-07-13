@@ -1,5 +1,64 @@
 # Changelog
 
+## [6.0.0] 2026-07-13
+
+### Added — AFK Situational Awareness
+
+- **#140 D-scan ship class classification** — `ShipThreatClass` enum (TACKLE /
+  DICTOR / FORCE_RECON / COVERT_OPS / CYNO / COMBAT / INDUSTRIAL / UNKNOWN)
+  with per-class urgency weights. `classify_ship()` maps ship names/types via an
+  ordered `SHIP_CLASS_MAP` list. `DscanEntry` gains a `threat_class` field; D-scan
+  log lines now include human-readable labels such as
+  `D-SCAN RED: Sabre [DICTOR — bubble incoming]`.
+
+- **#139 TTS voice alerts** — optional text-to-speech readout of alarm details
+  using `pyttsx3` (Windows SAPI5, no extra install on Windows). `speak()` runs on
+  a daemon thread so the detection loop is never blocked. Settings: **Alerts &
+  Sound → Text-to-Speech** — enable toggle, speech rate (50–400 wpm), and Check /
+  Test buttons. Install with `pip install "evealert[tts]"`.
+
+- **#141 Composite threat score** — `compute_threat_score()` aggregates up to
+  five signals (local hostile count, KOS status, zKillboard danger ratio, D-scan
+  ship class, adjacent system kills) into a 1–10 score with a
+  `CAUTION / HIGH / CRITICAL` label and reasoning list. Cynosural-field detection
+  always returns 10 / CRITICAL. Logged after the ESI intel block on every Enemy
+  alarm.
+
+- **#144 Per-enemy re-alert after sustained presence** — a new
+  `alerts.rearm_minutes` setting (0 = disabled) re-arms the alarm for a pilot
+  who has been continuously present in local beyond the configured time window.
+  Replaces the previous bare-float `_seen_enemies` dict with a `_EnemySighting`
+  record that tracks `first_seen`, `last_alarm`, and `rearm_at`.
+
+- **#143 Pre-configured space profiles + F3 hotkey** — three built-in profiles
+  (Null-sec, Wormhole, High-sec) write a coordinated set of settings overrides in
+  one call and reload the agent without restart. Press **F3** to cycle through
+  profiles while the overlay is running; current profile is logged in cyan.
+  Profiles tune D-scan alerts, escalation threshold, TTS, zKillboard, KOS, and
+  re-alert interval.
+
+- **#142 Intel channel improvements** — `intel_parser.py` parses free-text intel
+  channel messages into `IntelReport` objects (system name, hostile count, clear
+  signal, ship mentions). `IntelWatcher` gains an `on_intel(IntelReport)` callback
+  that fires alongside the existing raw-line callback. Hostile reports are logged
+  as `Intel: N hostile(s) in SYSTEM [ships]` in red; clear signals as
+  `Intel: SYSTEM CLEAR` in green. When a home system is configured, an async ESI
+  route lookup appends the jump count (`Intel: D7-ZAC is 3 jumps from 1DQ1-A`).
+
+- **#146 Cynosural field detection** — when a cynosural field object or cyno ship
+  appears on D-scan, an immediate CRITICAL alarm fires:
+  `⚠ CYNO DETECTED: <name> — CAPITAL DROP IMMINENT — LEAVE NOW`. Bypasses the
+  normal cooldown so each re-light triggers a fresh alarm. Also announces via TTS
+  when TTS is enabled.
+
+- **#147 Standings-aware local monitoring** — new
+  `esi_oauth.standings_filter_blues` setting. When enabled alongside ESI OAuth,
+  pilots with a personal standing ≥ +5.0 are labelled `[ALLY]` in green and
+  excluded from KOS checks, threat-score counting, and hostile display — reducing
+  noise in mixed-fleet space.
+
+---
+
 ## [5.0.1] 2026-07-13
 
 ### Fixed
