@@ -1,6 +1,7 @@
 """Unit tests for AlertManager core functionality."""
 
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -27,6 +28,8 @@ class TestAlertAgent(unittest.TestCase):
         # Create temporary settings file
         self.temp_dir = tempfile.mkdtemp()
         self.settings_path = Path(self.temp_dir) / "settings.json"
+        # Redirect stats writes to temp dir so tests never touch the real file (#159)
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
 
         # Default test settings
         self.test_settings = {
@@ -58,6 +61,7 @@ class TestAlertAgent(unittest.TestCase):
         """Clean up test fixtures."""
         import shutil
 
+        os.environ.pop("EVEALERT_STATS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_agent_initialization(self):
@@ -236,6 +240,8 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
         # Create temporary settings
         self.temp_dir = tempfile.mkdtemp()
         self.settings_path = Path(self.temp_dir) / "settings.json"
+        # Redirect stats writes to temp dir (#159)
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
 
         test_settings = {
             "alert_region_1": {"x": 100, "y": 100},
@@ -262,6 +268,7 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
         """Clean up async test fixtures."""
         import shutil
 
+        os.environ.pop("EVEALERT_STATS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def test_no_premature_event_loop(self):

@@ -18,7 +18,15 @@ if TYPE_CHECKING:
 
 
 def get_stats_path() -> str:
-    """Return the path to the lifetime statistics JSON file."""
+    """Return the path to the lifetime statistics JSON file.
+
+    When the EVEALERT_STATS_PATH environment variable is set (e.g. in tests),
+    that path is used instead of the platform config directory so tests never
+    read or write the user's real statistics (#159).
+    """
+    override = os.environ.get("EVEALERT_STATS_PATH")
+    if override:
+        return override
     config_dir = Path(user_config_dir("evealert"))
     config_dir.mkdir(parents=True, exist_ok=True)
     return str(config_dir / "statistics.json")

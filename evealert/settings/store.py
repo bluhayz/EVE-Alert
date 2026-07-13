@@ -132,11 +132,12 @@ class SettingsStore:
     # Public API
     # ------------------------------------------------------------------
 
-    def load(self) -> dict:
-        """Read settings.json, merge with defaults, apply active profile.
+    def load_raw(self) -> dict:
+        """Read settings.json, merge with defaults — NO profile overlay.
 
-        Returns the resolved settings dict and updates the internal cache
-        so that ``get()`` reflects the freshly loaded values.
+        Updates the internal cache with the raw base values so that
+        save() and set() never accidentally persist profile overrides.
+        Use this in the Settings dialog before saving user edits.
         """
         config_path = self._resolve_path()
         try:
@@ -146,22 +147,39 @@ class SettingsStore:
         except (OSError, json.JSONDecodeError):
             logger.debug("SettingsStore: cannot read %s — using defaults", config_path)
             settings = copy.deepcopy(DEFAULT_SETTINGS)
-
-        # Apply active profile overlay
-        active = settings.get("active_profile", "Default")
-        profiles = settings.get("profiles", {})
-        if active in profiles:
-            for key, value in profiles[active].items():
-                if isinstance(value, dict) and isinstance(settings.get(key), dict):
-                    settings[key] = {**settings[key], **value}
-                else:
-                    settings[key] = value
-
         self._cache = settings
         return settings
 
-    def save(self, settings: dict) -> None:
-        """Atomically write settings to disk and set the changed flag."""
+    def load(self) -> dict:
+        """Read settings.json, merge with defaults, apply active profile.
+
+        Returns a *copy* of the merged dict with profile overrides applied
+        on top for the engine to consume.  The internal cache is kept at
+        the raw (overlay-free) base values so that save() never persists
+        profile keys as permanent base settings (#156).
+        """
+        base = self.load_raw()            # updates self._cache to raw base
+        # Apply active profile overlay onto a copy — never touch self._cache
+        result = copy.deepcopy(base)
+        active = result.get("active_profile", "Default")
+        profiles = result.get("profiles", {})
+        if active in profiles:
+            for key, value in profiles[active].items():
+                if isinstance(value, dict) and isinstance(result.get(key), dict):
+                    result[key] = {**result[key], **value}
+                else:
+                    result[key] = value
+        return result
+
+    def save(self, settings: dict | None = None) -> None:
+        """Atomically write settings to disk and set the changed flag.
+
+        When called without arguments, saves the current in-memory cache
+        (populated by the most recent load()).  This allows callers that
+        modify state via set() to persist without first calling load().
+        """
+        if settings is None:
+            settings = self._cache
         config_path = self._resolve_path()
         try:
             dir_name = os.path.dirname(config_path)
@@ -186,6 +204,14 @@ class SettingsStore:
     def get(self, path: str, default=None):
         """Read a dotted-path value from the last-loaded (cached) settings."""
         return _get_by_path(self._cache, path, default)
+
+    def set(self, path: str, value) -> None:
+        """Write a dotted-path value into the in-memory cache.
+
+        Changes are not persisted until save() is called.
+        """
+        _set_by_path(self._cache, path, value)
+        self.changed = True
 
     # ------------------------------------------------------------------
     # Internal helpers

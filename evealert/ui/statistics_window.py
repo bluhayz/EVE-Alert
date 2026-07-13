@@ -67,6 +67,11 @@ def _ro_table(*headers) -> QTableWidget:
 # ---------------------------------------------------------------------------
 
 class StatisticsWindow(QWidget):
+    """Statistics / session history / threat heatmap viewer."""
+
+    # Emitted from the heatmap worker thread — payload is dict on success,
+    # Exception on failure.  Connected to _on_heatmap_ready (main thread).
+    _heatmap_ready = Signal(object)
     """Top-level statistics window — two tabs: Live Stats and Sessions.
 
     Refreshes every second while visible; stops when hidden.
@@ -80,6 +85,8 @@ class StatisticsWindow(QWidget):
         self._stats = stats
 
         self._build_ui()
+
+        self._heatmap_ready.connect(self._on_heatmap_ready)
 
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -332,38 +339,38 @@ class StatisticsWindow(QWidget):
                 loop = asyncio.new_event_loop()
                 result = loop.run_until_complete(get_constellation_heatmap(system, days=7))
                 loop.close()
-                self._populate_heatmap(result)
+                self._heatmap_ready.emit(result)     # safe Signal cross-thread delivery
             except Exception as exc:
-                self._heatmap_status.setText(f"Error: {exc}")
+                self._heatmap_ready.emit(exc)         # send Exception so slot shows error
 
         threading.Thread(target=_run, daemon=True, name="eve-alert-heatmap").start()
 
-    def _populate_heatmap(self, heatmap: dict) -> None:
-        """Populate the heatmap table from the result dict (called from thread)."""
-        # Qt widgets must be updated from the main thread — use a zero-ms timer
-        def _update() -> None:
-            if not heatmap:
-                self._heatmap_status.setText("No data returned (system unknown or no kills).")
-                return
-            self._heatmap_status.setText(
-                f"Constellation — {len(heatmap)} system(s), 7-day kill summary"
-            )
-            self._heatmap_table.setRowCount(len(heatmap))
-            for row, (name, entry) in enumerate(sorted(
-                heatmap.items(), key=lambda kv: kv[1].kills_7d, reverse=True
-            )):
-                hist_str = " ".join(f"{v:2d}" for v in entry.kill_histogram)
-                peak_str = f"{entry.peak_hour_utc:02d}:00"
-                for col, val in enumerate([
-                    name,
-                    str(entry.kills_24h),
-                    str(entry.kills_7d),
-                    peak_str,
-                    hist_str,
-                ]):
-                    item = QTableWidgetItem(val)
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                    self._heatmap_table.setItem(row, col, item)
-            self._heatmap_table.resizeColumnsToContents()
-
-        QTimer.singleShot(0, _update)
+    def _on_heatmap_ready(self, payload: object) -> None:
+        """Slot called on the main Qt thread when the heatmap worker finishes (#158)."""
+        if isinstance(payload, Exception):
+            self._heatmap_status.setText(f"Error: {payload}")
+            return
+        heatmap = payload
+        if not heatmap:
+            self._heatmap_status.setText("No data returned (system unknown or no kills).")
+            return
+        self._heatmap_status.setText(
+            f"Constellation \u2014 {len(heatmap)} system(s), 7-day kill summary"
+        )
+        self._heatmap_table.setRowCount(len(heatmap))
+        for row, (name, entry) in enumerate(sorted(
+            heatmap.items(), key=lambda kv: kv[1].kills_7d, reverse=True
+        )):
+            hist_str = " ".join(f"{v:2d}" for v in entry.kill_histogram)
+            peak_str = f"{entry.peak_hour_utc:02d}:00"
+            for col, val in enumerate([
+                name,
+                str(entry.kills_24h),
+                str(entry.kills_7d),
+                peak_str,
+                hist_str,
+            ]):
+                item = QTableWidgetItem(val)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self._heatmap_table.setItem(row, col, item)
+        self._heatmap_table.resizeColumnsToContents()
