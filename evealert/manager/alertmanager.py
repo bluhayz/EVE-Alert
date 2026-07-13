@@ -219,6 +219,7 @@ class AlertAgent:
         self._dscan_alert_orange = False
         self._dscan_alert_probes = True
         self._dscan_watcher = None
+        self._dscan_last_classes: set = set()  # ShipThreatClass values seen this cycle
 
         # v3.4: KOS checker
         self._kos_cva_enabled = True
@@ -1243,12 +1244,30 @@ class AlertAgent:
         except Exception as exc:
             logger.debug("Screenshot failed: %s", exc)
 
-    def _on_dscan_threat(self, tier: str, name: str) -> None:
+    def _on_dscan_threat(self, tier: str, name: str, threat_class=None) -> None:
         """Called when a RED or ORANGE ship appears on D-scan."""
+        from evealert.data.ship_classes import ShipThreatClass  # noqa: PLC0415
+
+        # Store the class so the threat score can use it
+        if threat_class and threat_class != ShipThreatClass.UNKNOWN:
+            self._dscan_last_classes.add(threat_class)
+
+        # Build a human-readable label for the class
+        class_labels = {
+            ShipThreatClass.TACKLE:      "TACKLE — get out NOW",
+            ShipThreatClass.DICTOR:      "DICTOR — bubble incoming",
+            ShipThreatClass.FORCE_RECON: "FORCE RECON — cloaked threat",
+            ShipThreatClass.COVERT_OPS:  "COVERT OPS — scanning",
+            ShipThreatClass.CYNO:        "CYNO — capital drop imminent",
+            ShipThreatClass.COMBAT:      "combat ship",
+        }
+        class_label = class_labels.get(threat_class, "") if threat_class else ""
+        suffix = f" [{class_label}]" if class_label else ""
+
         if tier == "red" and self._dscan_alert_red:
-            self._ui(self.main.write_message, f"D-SCAN RED: {name}", "red")
+            self._ui(self.main.write_message, f"D-SCAN RED: {name}{suffix}", "red")
         elif tier == "orange" and self._dscan_alert_orange:
-            self._ui(self.main.write_message, f"D-SCAN ORANGE: {name}", "yellow")
+            self._ui(self.main.write_message, f"D-SCAN ORANGE: {name}{suffix}", "yellow")
 
     def _on_dscan_probe(self) -> None:
         """Called when probes are detected on D-scan."""
@@ -1260,10 +1279,10 @@ class AlertAgent:
             )
 
     def _on_dscan_entry(self, entry) -> None:
-        """Called for every D-scan entry (for the session timeline)."""
-        # Timeline is stored on the DscanWatcher itself; nothing to do here
-        # unless the Statistics window requests it.
-        pass
+        """Called for every D-scan entry — update last-seen ship class set."""
+        from evealert.data.ship_classes import ShipThreatClass  # noqa: PLC0415
+        if hasattr(entry, 'threat_class') and entry.threat_class != ShipThreatClass.UNKNOWN:
+            self._dscan_last_classes.add(entry.threat_class)
 
     async def _display_system_info(self) -> None:
         """One-shot task: show pipe/pocket classification and sovereignty on start."""

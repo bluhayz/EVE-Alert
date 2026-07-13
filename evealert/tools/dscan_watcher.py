@@ -27,6 +27,8 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, NamedTuple
 
+from evealert.data.ship_classes import ShipThreatClass, classify_ship
+
 logger = logging.getLogger("alert.dscan")
 
 _POLL_INTERVAL = 1.5  # seconds between file polls
@@ -148,9 +150,10 @@ def classify_entry(name: str) -> str:
 
 class DscanEntry(NamedTuple):
     name: str
-    tier: str  # red / orange / yellow / green / probe / unknown
+    tier: str          # red / orange / yellow / green / probe / unknown
+    threat_class: ShipThreatClass  # fine-grained class (TACKLE / CYNO / etc.)
     timestamp: float
-    appeared: bool  # True = appeared, False = disappeared
+    appeared: bool     # True = appeared, False = disappeared
 
 
 # ------------------------------------------------------------------
@@ -162,14 +165,14 @@ class DscanWatcher:
     """Async task that tails the EVE D-scan log and fires callbacks.
 
     Callbacks:
-      on_threat(tier: str, name: str)  — called for each new RED/ORANGE entry
-      on_probe()                        — called when probes detected
-      on_entry(entry: DscanEntry)       — called for every new entry (for timeline)
+      on_threat(tier, name, threat_class)  — called for each new RED/ORANGE entry
+      on_probe()                           — called when probes detected
+      on_entry(entry: DscanEntry)          — called for every new entry (for timeline)
     """
 
     def __init__(
         self,
-        on_threat: Callable[[str, str], None] = lambda t, n: None,
+        on_threat: Callable[[str, str, ShipThreatClass], None] = lambda t, n, c: None,
         on_probe: Callable[[], None] = lambda: None,
         on_entry: Callable[[DscanEntry], None] = lambda e: None,
     ) -> None:
@@ -290,6 +293,7 @@ class DscanWatcher:
                 entry = DscanEntry(
                     name=name,
                     tier=classify_entry(name),
+                    threat_class=classify_ship(name),
                     timestamp=time.time(),
                     appeared=False,
                 )
@@ -324,8 +328,14 @@ class DscanWatcher:
             if tier == "unknown":
                 tier = classify_entry(obj_name)
 
+            # Fine-grained class: prefer type column, fall back to name
+            threat_class = classify_ship(type_name) if type_name else ShipThreatClass.UNKNOWN
+            if threat_class == ShipThreatClass.UNKNOWN:
+                threat_class = classify_ship(obj_name)
+
             entry = DscanEntry(
-                name=obj_name, tier=tier, timestamp=time.time(), appeared=True
+                name=obj_name, tier=tier, threat_class=threat_class,
+                timestamp=time.time(), appeared=True
             )
             self.timeline.append(entry)
             try:
@@ -337,7 +347,7 @@ class DscanWatcher:
                 probe_detected = True
             elif tier in ("red", "orange"):
                 try:
-                    self._on_threat(tier, obj_name)
+                    self._on_threat(tier, obj_name, threat_class)
                 except Exception:
                     pass
         return current_scan, probe_detected

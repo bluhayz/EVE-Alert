@@ -21,7 +21,7 @@ class ParseLinesTests(unittest.TestCase):
     def _watcher(self):
         threats, entries = [], []
         w = DscanWatcher(
-            on_threat=lambda t, n: threats.append((t, n)),
+            on_threat=lambda t, n, c=None: threats.append((t, n, c)),
             on_probe=lambda: None,
             on_entry=lambda e: entries.append(e),
         )
