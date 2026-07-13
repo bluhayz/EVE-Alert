@@ -28,6 +28,11 @@ FIELDS: list = [
               "Auto-screenshot on alarm", "auto_screenshot_var", False),
     FieldSpec("notifications.escalation_threshold", "int", "Alerts & Sound", "Alarm Options",
               "Escalate at N hostiles (0 = off)", "escalation_threshold_entry", 0),
+    # Text-to-speech (#139)
+    FieldSpec("notifications.tts_enabled", "bool", "Alerts & Sound", "Text-to-Speech",
+              "Speak alarm details aloud (requires pyttsx3)", "tts_enabled_var", False),
+    FieldSpec("notifications.tts_rate", "int", "Alerts & Sound", "Text-to-Speech",
+              "Speech rate (words/min, 50–400)", "tts_rate_entry", 175),
     # --- Intel & ESI tab -----------------------------------------------------
     FieldSpec("intelligence.zkillboard_enabled", "bool", "Intel & ESI", "Intelligence",
               "Enable Zkillboard lookup on alarm", "zkillboard_var", False),

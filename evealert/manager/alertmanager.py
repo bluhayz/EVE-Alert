@@ -230,6 +230,8 @@ class AlertAgent:
         self._auto_screenshot = False
         self._escalation_threshold = 0
         self._local_hostile_count = 0  # track for escalation
+        self._tts_enabled = False
+        self._tts_rate = 175
 
         # v3.6: wormhole awareness
         self._thera_enabled = False
@@ -631,6 +633,8 @@ class AlertAgent:
             notif = settings.get("notifications", {})
             self._auto_screenshot = bool(notif.get("auto_screenshot", False))
             self._escalation_threshold = int(notif.get("escalation_threshold", 0))
+            self._tts_enabled = bool(notif.get("tts_enabled", False))
+            self._tts_rate = int(notif.get("tts_rate", 175))
 
             # Wormhole settings
             wh = settings.get("wormhole", {})
@@ -872,6 +876,13 @@ class AlertAgent:
         self._ui(self.main.write_message, alarm_text, "red")
         self.statistics.add_alarm(alarm_type)
         save_lifetime_stats(self.statistics)
+        # TTS (#139) — speak alarm text aloud if enabled
+        if self._tts_enabled:
+            try:
+                from evealert.tools.tts import speak  # noqa: PLC0415
+                speak(alarm_text, self._tts_rate)
+            except Exception:
+                pass
         await self.play_sound(sound, alarm_type)
         await self.send_webhook_message(alarm_type)
 

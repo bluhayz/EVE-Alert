@@ -69,7 +69,8 @@ DEFAULT_SETTINGS: dict = {
         "telegram_token": "", "telegram_chat_id": "",
         "pushover_user": "", "pushover_token": "", "ntfy_url": "",
     },
-    "notifications": {"auto_screenshot": False, "escalation_threshold": 0},
+    "notifications": {"auto_screenshot": False, "escalation_threshold": 0,
+                      "tts_enabled": False, "tts_rate": 175},
     "wormhole": {
         "thera_enabled": False, "thera_max_jumps": 5,
         "wh_drop_enabled": False, "wh_drop_threshold": 3,

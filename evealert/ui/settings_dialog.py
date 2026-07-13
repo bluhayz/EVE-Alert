@@ -135,6 +135,7 @@ class SettingsDialog(QDialog):
 
         # Post-registry additions that inject into auto-created sections
         self._build_ocr_check_button()
+        self._build_tts_check_button()
 
         # Footer buttons
         buttons = QDialogButtonBox(
@@ -678,6 +679,57 @@ class SettingsDialog(QDialog):
             dlg.exec()
         except Exception as e:
             QMessageBox.information(self, "Threshold Editor", f"Coming in Phase 6: {e}")
+
+    def _build_tts_check_button(self) -> None:
+        """Append a TTS health-check row + Test button to the Text-to-Speech section."""
+        key = "Alerts & Sound/Text-to-Speech"
+        if key not in self._sections:
+            return
+        form = self._sections[key][1]
+
+        self._tts_status = QLabel("Not checked")
+        self._tts_status.setProperty("class", "muted")
+
+        btn_check = QPushButton("Check TTS")
+        btn_check.clicked.connect(self._check_tts)
+
+        btn_test = QPushButton("Test")
+        btn_test.clicked.connect(self._test_tts)
+
+        row = QHBoxLayout()
+        row.addWidget(btn_check)
+        row.addWidget(btn_test)
+        row.addWidget(self._tts_status, 1)
+        form.addRow("Status:", row)
+
+    # ------------------------------------------------------------------
+    # TTS check
+    # ------------------------------------------------------------------
+
+    def _check_tts(self) -> None:
+        """Test whether pyttsx3 is available and can initialise."""
+        try:
+            from evealert.tools.tts import is_tts_available  # noqa: PLC0415
+            if is_tts_available():
+                self._tts_status.setText("\u2713 TTS ready (pyttsx3)")
+                self._tts_status.setStyleSheet("color: #3FB950;")
+            else:
+                self._tts_status.setText("\u2717 pyttsx3 not available  (pip install pyttsx3)")
+                self._tts_status.setStyleSheet("color: #F85149;")
+        except Exception as e:
+            self._tts_status.setText(f"\u2717 {e}")
+            self._tts_status.setStyleSheet("color: #F85149;")
+
+    def _test_tts(self) -> None:
+        """Speak a sample phrase to test TTS output."""
+        try:
+            from evealert.tools.tts import speak  # noqa: PLC0415
+            speak("EVE Alert — text to speech test", rate=175)
+            self._tts_status.setText("Speaking\u2026")
+            self._tts_status.setStyleSheet("")
+        except Exception as e:
+            self._tts_status.setText(f"\u2717 {e}")
+            self._tts_status.setStyleSheet("color: #F85149;")
 
     # ------------------------------------------------------------------
     # Tesseract / OCR check

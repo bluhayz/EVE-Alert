@@ -48,6 +48,10 @@ dev = [
     "pytest-cov>=5",
     "respx>=0.21",
 ]
+# Text-to-speech: pip install ".[tts]"
+tts = [
+    "pyttsx3>=2.90",
+]
 # Windows-only extras: pip install ".[windows]"
 windows = [
     "pygetwindow>=0.0.9",
