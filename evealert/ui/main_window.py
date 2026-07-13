@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         self.bridge.log_message.connect(self.append_log)
         self.bridge.toggles_changed.connect(self.refresh_toggles)
         self.bridge.error.connect(self._on_engine_error)
+        # Alarm flash signal — wired after tray is built (see _build_tray)
 
         self._build_ui()
         self._build_tray()
@@ -226,6 +227,8 @@ class MainWindow(QMainWindow):
         try:
             self._tray = AppTray(self)
             self._tray.show()
+            # Wire alarm flash after tray exists (#168)
+            self.bridge.alarm_fired.connect(self._tray.on_alarm)
         except Exception:
             logger.debug("System tray not available; running without tray icon.")
             self._tray = None

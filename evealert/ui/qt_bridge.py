@@ -19,9 +19,13 @@ class QtBridge(QObject):
     log_message = Signal(str, str)
     toggles_changed = Signal()
     error = Signal(str)
+    # Emitted when a red (alarm) message is logged — tray icon can flash (#168)
+    alarm_fired = Signal(str)
 
     def log(self, text: str, color: str = "normal") -> None:
         self.log_message.emit(text, color)
+        if color == "red":
+            self.alarm_fired.emit(text)
 
     def refresh_region_toggles(self) -> None:
         self.toggles_changed.emit()
