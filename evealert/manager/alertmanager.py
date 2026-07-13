@@ -241,6 +241,9 @@ class AlertAgent:
         self._local_hostile_count = 0  # track for escalation
         self._tts_enabled = False
         self._tts_rate = 175
+        # Automation bridge (#153)
+        self._automation_enabled = False
+        self._automation_webhook_url = ""
 
         # v3.6: wormhole awareness
         self._thera_enabled = False
@@ -648,6 +651,10 @@ class AlertAgent:
             self._escalation_threshold = int(notif.get("escalation_threshold", 0))
             self._tts_enabled = bool(notif.get("tts_enabled", False))
             self._tts_rate = int(notif.get("tts_rate", 175))
+            # Automation bridge (#153)
+            auto = settings.get("automation", {})
+            self._automation_enabled = bool(auto.get("enabled", False))
+            self._automation_webhook_url = str(auto.get("webhook_url", "")).strip()
 
             # Wormhole settings
             wh = settings.get("wormhole", {})
@@ -929,6 +936,11 @@ class AlertAgent:
                 speak(alarm_text, self._tts_rate)
             except Exception:
                 pass
+        # Automation bridge (#153) — POST JSON to configured webhook
+        if self._automation_enabled and self._automation_webhook_url:
+            self.loop.create_task(
+                self._post_automation_webhook(alarm_text, alarm_type)
+            )
         await self.play_sound(sound, alarm_type)
         await self.send_webhook_message(alarm_type)
 
@@ -1780,6 +1792,34 @@ class AlertAgent:
             isk_m = k.total_value / 1_000_000
             msg = f"  [{k.kill_time[:16]}] {k.victim_name} ({k.victim_ship}) — {isk_m:.1f}M ISK"
             self._ui(self.main.write_message, msg, "yellow")
+
+    async def _post_automation_webhook(self, alarm_text: str, alarm_type: str) -> None:
+        """POST alarm JSON to the user-configured automation webhook URL (#153).
+
+        Payload: {type, text, timestamp} so AutoHotkey / PyAutoGUI scripts can
+        listen on localhost and trigger an in-game keyboard macro.
+        """
+        from evealert.tools.http_common import DEFAULT_HEADERS  # noqa: PLC0415
+
+        payload = {
+            "type": alarm_type,
+            "text": alarm_text,
+            "timestamp": time.time(),
+        }
+        try:
+            import httpx  # noqa: PLC0415
+
+            async with httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=3.0) as client:
+                await client.post(self._automation_webhook_url, json=payload)
+        except Exception as exc:
+            logger.debug("Automation webhook failed: %s", exc)
+
+        # Also update the /api/alarm/latest slot on the built-in web server
+        try:
+            from evealert.tools.web_server import set_latest_alarm  # noqa: PLC0415
+            set_latest_alarm(payload)
+        except Exception:
+            pass
 
     async def send_webhook_message(self, alarm_type: str) -> None:
         """Send Discord webhook notification(s) with template formatting and multi-target support."""

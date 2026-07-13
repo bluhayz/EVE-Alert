@@ -10,6 +10,7 @@ Endpoints:
   GET /          — HTML dashboard (auto-refreshes every 3 s)
   GET /api/status — JSON: running, session_alarms, total_alarms, version, uptime
   GET /api/log   — JSON: last 50 log lines (newest first)
+  GET /api/alarm/latest  — JSON: most-recent alarm payload (null when none)
 """
 
 import asyncio
@@ -26,6 +27,14 @@ logger = logging.getLogger("alert.web")
 
 _LOG_BUFFER: deque[str] = deque(maxlen=50)
 _START_TIME: float = time.time()
+# Latest alarm payload for /api/alarm/latest (#153)
+_LATEST_ALARM: dict | None = None
+
+
+def set_latest_alarm(payload: dict) -> None:
+    """Update the latest-alarm slot (called by alertmanager on each alarm)."""
+    global _LATEST_ALARM  # noqa: PLW0603
+    _LATEST_ALARM = payload
 
 _HTML = """<!DOCTYPE html>
 <html>
@@ -105,6 +114,9 @@ class WebStatusServer:
 
             if path == "/api/status":
                 body = self._json_status()
+                response = self._http_response("200 OK", "application/json", body)
+            elif path == "/api/alarm/latest":
+                body = json.dumps(_LATEST_ALARM)
                 response = self._http_response("200 OK", "application/json", body)
             elif path == "/api/log":
                 body = json.dumps({"lines": list(_LOG_BUFFER)})

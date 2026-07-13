@@ -88,6 +88,7 @@ DEFAULT_SETTINGS: dict = {
     "ocr": {"enabled": False, "region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0}},
     "diagnostics": {"enabled": False},
     "alerts": {"rearm_minutes": 0},
+    "automation": {"enabled": False, "webhook_url": ""},
 }
 
 

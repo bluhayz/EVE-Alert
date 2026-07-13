@@ -33,6 +33,12 @@ FIELDS: list = [
     # Re-arm after sustained presence (#144)
     FieldSpec("alerts.rearm_minutes", "int", "Alerts & Sound", "Alarm Options",
               "Re-alert after N minutes of continuous presence (0 = off)", "rearm_minutes_entry", 0),
+    # Automation bridge (#153)
+    FieldSpec("automation.enabled", "bool", "Alerts & Sound", "Automation Bridge",
+              "POST alarm JSON to webhook_url on each alarm", "automation_enabled_var", False),
+    FieldSpec("automation.webhook_url", "str", "Alerts & Sound", "Automation Bridge",
+              "Localhost URL to receive alarm POSTs (e.g. http://127.0.0.1:9999/alarm)",
+              "automation_url_entry", ""),
     # Text-to-speech (#139)
     FieldSpec("notifications.tts_enabled", "bool", "Alerts & Sound", "Text-to-Speech",
               "Speak alarm details aloud (requires pyttsx3)", "tts_enabled_var", False),
