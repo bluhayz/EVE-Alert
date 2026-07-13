@@ -247,9 +247,9 @@ class MainWindow(QMainWindow):
                     self.hotkey_pressed.emit("alert")
                 elif key_matches(key, self._hotkey_faction_key):
                     self.hotkey_pressed.emit("faction")
-                elif key_matches(key, "f3"):
+                elif key_matches(key, self._hotkey_profile_key):
                     self.hotkey_pressed.emit("profile")
-                elif key_matches(key, "f4"):
+                elif key_matches(key, self._hotkey_status_key):
                     self.hotkey_pressed.emit("status")
                 elif key_matches(key, "esc"):
                     self.hotkey_pressed.emit("esc")
@@ -265,8 +265,10 @@ class MainWindow(QMainWindow):
     def reload_hotkeys(self) -> None:
         """Re-read hotkey bindings from the store (called after settings save)."""
         hotkeys = self.store.load_raw().get("hotkeys", {})
-        self._hotkey_alert_key = hotkeys.get("alert_region", "f1")
+        self._hotkey_alert_key   = hotkeys.get("alert_region",  "f1")
         self._hotkey_faction_key = hotkeys.get("faction_region", "f2")
+        self._hotkey_profile_key = hotkeys.get("profile_cycle",  "f3")
+        self._hotkey_status_key  = hotkeys.get("status_readout", "f4")
 
     # ------------------------------------------------------------------
     # Engine control

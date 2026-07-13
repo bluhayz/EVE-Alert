@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from evealert.settings.fields import FIELDS, TAB_ORDER
 from evealert.settings.helper import get_settings_path
 from evealert.settings.store import SettingsStore, _get_by_path, _set_by_path
+from evealert.ui.hotkey_edit import HotkeyEdit
 
 
 class _LoginThread(QThread):
@@ -314,12 +315,21 @@ class SettingsDialog(QDialog):
         form6.addRow("Faction:", faction_row)
         snd.addWidget(box6)
 
-        # Hotkeys
+        # Hotkeys (#165 — HotkeyEdit capture widgets)
         box7, form7 = _group("Hotkeys")
-        self._hotkey_alert = QLineEdit(); self._hotkey_alert.setMaximumWidth(80)
-        self._hotkey_faction = QLineEdit(); self._hotkey_faction.setMaximumWidth(80)
-        form7.addRow("Alert Region:", self._hotkey_alert)
-        form7.addRow("Faction Region:", self._hotkey_faction)
+        self._hotkey_alert   = HotkeyEdit("f1")
+        self._hotkey_faction = HotkeyEdit("f2")
+        self._hotkey_profile = HotkeyEdit("f3")
+        self._hotkey_status  = HotkeyEdit("f4")
+        form7.addRow("Alert Region:",    self._hotkey_alert)
+        form7.addRow("Faction Region:",  self._hotkey_faction)
+        form7.addRow("Profile Cycle:",   self._hotkey_profile)
+        form7.addRow("Status Readout:",  self._hotkey_status)
+        # Conflict wiring — update used_by dicts after building so all 4 exist
+        self._sync_hotkey_used_by()
+        for w in (self._hotkey_alert, self._hotkey_faction,
+                  self._hotkey_profile, self._hotkey_status):
+            w.binding_changed.connect(lambda _: self._sync_hotkey_used_by())
         snd.addWidget(box7)
 
     # ── Non-registry: Intel & ESI tab ─────────────────────────────────
@@ -464,8 +474,11 @@ class SettingsDialog(QDialog):
         self._alarm_sound_label.setText(os.path.basename(self._alarm_sound_path) if self._alarm_sound_path else "(bundled default)")
         self._faction_sound_label.setText(os.path.basename(self._faction_sound_path) if self._faction_sound_path else "(bundled default)")
         hk = settings.get("hotkeys", {})
-        self._hotkey_alert.setText(hk.get("alert_region", "f1"))
-        self._hotkey_faction.setText(hk.get("faction_region", "f2"))
+        self._hotkey_alert.set_binding(hk.get("alert_region", "f1"))
+        self._hotkey_faction.set_binding(hk.get("faction_region", "f2"))
+        self._hotkey_profile.set_binding(hk.get("profile_cycle", "f3"))
+        self._hotkey_status.set_binding(hk.get("status_readout", "f4"))
+        self._sync_hotkey_used_by()
 
         # Intel & ESI (non-registry)
         esi_oauth = settings.get("esi_oauth", {})
@@ -520,8 +533,10 @@ class SettingsDialog(QDialog):
         }
         patch["sounds"] = {"alarm": self._alarm_sound_path, "faction": self._faction_sound_path}
         patch["hotkeys"] = {
-            "alert_region": self._hotkey_alert.text().strip().lower() or "f1",
-            "faction_region": self._hotkey_faction.text().strip().lower() or "f2",
+            "alert_region":   self._hotkey_alert.get_binding()   or "f1",
+            "faction_region": self._hotkey_faction.get_binding() or "f2",
+            "profile_cycle":  self._hotkey_profile.get_binding() or "f3",
+            "status_readout": self._hotkey_status.get_binding()  or "f4",
         }
 
         # Intel & ESI (non-registry)
@@ -710,8 +725,23 @@ class SettingsDialog(QDialog):
         except Exception as e:
             QMessageBox.information(self, "Threshold Editor", f"Coming in Phase 6: {e}")
 
-    def _build_tts_check_button(self) -> None:
-        """Append a TTS health-check row + Test button to the Text-to-Speech section."""
+    def _sync_hotkey_used_by(self) -> None:
+        """Update conflict maps on all four HotkeyEdit widgets (#165)."""
+        bindings = {
+            "Alert Region":    self._hotkey_alert.get_binding(),
+            "Faction Region":  self._hotkey_faction.get_binding(),
+            "Profile Cycle":   self._hotkey_profile.get_binding(),
+            "Status Readout":  self._hotkey_status.get_binding(),
+        }
+        for w, name in (
+            (self._hotkey_alert,   "Alert Region"),
+            (self._hotkey_faction, "Faction Region"),
+            (self._hotkey_profile, "Profile Cycle"),
+            (self._hotkey_status,  "Status Readout"),
+        ):
+            w.set_used_by({k: v for k, v in bindings.items() if k != name})
+
+    def _build_tts_check_button(self) -> None:        """Append a TTS health-check row + Test button to the Text-to-Speech section."""
         key = "Alerts & Sound/Text-to-Speech"
         if key not in self._sections:
             return

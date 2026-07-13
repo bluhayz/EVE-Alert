@@ -58,8 +58,10 @@ _SPECIAL_KEY_MAP: dict = {
 
 # Default hotkeys shipped with the app
 DEFAULT_HOTKEYS: dict[str, str] = {
-    "alert_region": "f1",
+    "alert_region":  "f1",
     "faction_region": "f2",
+    "profile_cycle":  "f3",
+    "status_readout": "f4",
 }
 
 
