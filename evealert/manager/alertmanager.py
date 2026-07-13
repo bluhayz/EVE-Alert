@@ -1668,35 +1668,31 @@ class AlertAgent:
                 self.currently_playing_sounds.pop(alarm_type, None)
 
     def _build_enemy_alarm_text(self) -> str:
-        """Build the Enemy alarm headline, including pilot names when available.
+        """Build the Enemy alarm headline, including OCR'd pilot names when available.
 
-        Does a quick synchronous read of the EVE Local chat log so that names
-        appear in the very first alarm line rather than a follow-up log entry.
-        Falls back to 'Enemy Appears!' gracefully if no names can be read.
+        Captures the configured Local-chat screen region via OCR (Tesseract)
+        so the alarm headline reads 'Enemy Appears! — Bad Pilot, Other Pilot'
+        instead of firing a plain message and logging names separately.
+        Falls back to 'Enemy Appears!' when OCR is disabled or unavailable.
         """
         base = "Enemy Appears!"
+        if not self._ocr_enabled:
+            return base
         try:
-            from evealert.tools.esi_standings import (  # noqa: PLC0415
-                extract_joining_characters,
-            )
-            from evealert.tools.intel_watcher import (  # noqa: PLC0415
-                find_intel_log,
-                get_eve_chatlog_dir,
+            from evealert.tools.ocr_local import (  # noqa: PLC0415
+                read_local_names,
+                resolve_region,
             )
 
-            chatlog_dir = get_eve_chatlog_dir()
-            if not chatlog_dir:
-                return base
-            local_log = find_intel_log(chatlog_dir, "Local")
-            if not local_log:
-                return base
-            with open(local_log, encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()[-50:]
-            names = extract_joining_characters(lines)
-            if names:
-                return f"{base} — {', '.join(names)}"
+            region = resolve_region(
+                self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
+            )
+            if region:
+                names = read_local_names(region)
+                if names:
+                    return f"{base} — {', '.join(names)}"
         except Exception as exc:
-            logger.debug("_build_enemy_alarm_text: name lookup failed: %s", exc)
+            logger.debug("_build_enemy_alarm_text: OCR failed: %s", exc)
         return base
 
     async def run(self) -> None:
