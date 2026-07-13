@@ -1382,13 +1382,17 @@ class AlertAgent:
         if threat_class and threat_class != ShipThreatClass.UNKNOWN:
             self._dscan_last_classes.add(threat_class)
 
+        # Dedicated CYNO alarm (#146) — fires regardless of tier, bypasses cooldown
+        if threat_class == ShipThreatClass.CYNO:
+            self.loop.create_task(self._fire_cyno_alarm(name))
+            return
+
         # Build a human-readable label for the class
         class_labels = {
             ShipThreatClass.TACKLE:      "TACKLE — get out NOW",
             ShipThreatClass.DICTOR:      "DICTOR — bubble incoming",
             ShipThreatClass.FORCE_RECON: "FORCE RECON — cloaked threat",
             ShipThreatClass.COVERT_OPS:  "COVERT OPS — scanning",
-            ShipThreatClass.CYNO:        "CYNO — capital drop imminent",
             ShipThreatClass.COMBAT:      "combat ship",
         }
         class_label = class_labels.get(threat_class, "") if threat_class else ""
@@ -1398,6 +1402,28 @@ class AlertAgent:
             self._ui(self.main.write_message, f"D-SCAN RED: {name}{suffix}", "red")
         elif tier == "orange" and self._dscan_alert_orange:
             self._ui(self.main.write_message, f"D-SCAN ORANGE: {name}{suffix}", "yellow")
+
+    async def _fire_cyno_alarm(self, object_name: str) -> None:
+        """Immediate CRITICAL alarm for cynosural field detection (#146).
+
+        Bypasses the normal cooldown and dedup checks — a cyno means a capital
+        ship is about to drop.  A fresh alarm fires every time a cyno appears
+        in D-scan (they can re-light).
+        """
+        alarm_text = f"⚠ CYNO DETECTED: {object_name} — CAPITAL DROP IMMINENT — LEAVE NOW"
+        self._ui(self.main.write_message, alarm_text, "red")
+        # TTS (#139)
+        if self._tts_enabled:
+            try:
+                from evealert.tools.tts import speak  # noqa: PLC0415
+                speak("Cynosural field detected. Capital drop imminent. Leave now.",
+                      self._tts_rate)
+            except Exception:
+                pass
+        # Sound + stats (reuse existing machinery)
+        await self.play_sound(ALARM_SOUND, "Enemy")
+        self.statistics.add_alarm("Enemy")
+        save_lifetime_stats(self.statistics)
 
     def _on_dscan_probe(self) -> None:
         """Called when probes are detected on D-scan."""
