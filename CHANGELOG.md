@@ -1,5 +1,58 @@
 # Changelog
 
+## [6.2.0] 2026-07-13
+
+### Fixed
+
+- **#154 F1/F2 hotkey hijack** — hotkeys only fire when Config Mode dialog is
+  `isVisible()`; after the dialog closes F1/F2 are silently ignored so EVE
+  in-game fire-weapons/functions work normally.
+
+- **#155 Space profiles crash** — `SettingsStore` gains a `set(path, value)`
+  method and `save()` now accepts an optional dict (defaults to the in-memory
+  cache). Wrong KOS key `kos.cva_kos_enabled` corrected to `kos.cva_enabled`
+  in all three built-in profiles.
+
+- **#156 Profile overlay baked into base settings** — `load()` now applies the
+  profile overlay to a *copy* only; the internal cache always holds raw base
+  values. New `load_raw()` method exposed for callers (Settings dialog) that
+  need to read without overlay. Save and Apply both call `load_raw()` so profile
+  values are never permanently written to disk.
+
+- **#157 ESI client-ID placeholder** — replaced misleading "Leave blank for
+  built-in public client" text with "Required — register a free app at
+  developers.eveonline.com"; added a muted help label with app type, callback
+  URL, and format requirements.
+
+- **#158 Heatmap Qt thread violations** — replaced cross-thread widget writes
+  and `QTimer.singleShot` (which crashes from non-Qt threads) with a `Signal(object)`.
+  Worker emits the result dict (or Exception) to `_on_heatmap_ready` which runs
+  safely on the main Qt thread.
+
+- **#159 Tests writing to real statistics.json** — `get_stats_path()` now
+  respects `EVEALERT_STATS_PATH` env var; both test classes set it to a
+  temp-dir path in setUp and unset it in tearDown.
+
+- **#160 Blocking Discord webhook** — all three `dhooks_lite.execute()` calls
+  wrapped in `loop.run_in_executor(None, ...)` so the asyncio detection loop
+  is not stalled during HTTP round-trips.
+
+- **#161 Hotkey remaps need restart** — bindings stored on `self._hotkey_alert_key` /
+  `self._hotkey_faction_key`; listener closure reads them on every keypress. New
+  `reload_hotkeys()` called from Settings Save and Apply so new bindings take
+  effect immediately without restarting.
+
+- **#162 Qt shell polish** — removed accumulating dead `accepted.connect` signal
+  on every `_open_settings()` call; `_save_and_apply` now calls `self.hide()`
+  (Save closes); `_apply_only` saves without closing; `_build_tray` wrapped in
+  try/except with `None` fallback; all three `self._tray` call sites guarded.
+
+- **#163 Heatmap zKB caps at 200 kills** — `_zkb_kills_for_system` now paginates
+  up to 5 pages (≈ 1 000 kills) stopping early when a page returns fewer than
+  200 entries; 500 ms polite pause between pages.
+
+---
+
 ## [6.1.0] 2026-07-13
 
 ### Added
