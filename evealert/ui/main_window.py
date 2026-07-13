@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self._settings_dlg = None
         self._stats_dlg = None
         self._config_dlg = None
+        self._current_profile: str | None = None  # active space profile key (#143)
 
         # 1 s poll timer to sync status from engine state
         self._poll_timer = QTimer(self)
@@ -214,7 +215,7 @@ class MainWindow(QMainWindow):
 
         # Status bar
         self.statusBar().showMessage(
-            "F1: alert region · F2: faction region · ESC: cancel selection"
+            "F1: alert region · F2: faction region · F3: cycle space profile · ESC: cancel selection"
         )
 
         self._apply_dynamic_properties()
@@ -245,6 +246,8 @@ class MainWindow(QMainWindow):
                     self.hotkey_pressed.emit("alert")
                 elif key_matches(key, faction_key):
                     self.hotkey_pressed.emit("faction")
+                elif key_matches(key, "f3"):
+                    self.hotkey_pressed.emit("profile")
                 elif key_matches(key, "esc"):
                     self.hotkey_pressed.emit("esc")
 
@@ -400,6 +403,21 @@ class MainWindow(QMainWindow):
                 self._config_dlg.start_selection(kind)
             else:
                 self.append_log(f"Hotkey {kind}: open Config Mode first", "yellow")
+        elif kind == "profile":
+            self._cycle_space_profile()
+
+    def _cycle_space_profile(self) -> None:
+        """F3: advance to the next space profile and apply it."""
+        try:
+            from evealert.tools.space_profiles import next_profile, apply_profile  # noqa: PLC0415
+
+            self._current_profile = next_profile(self._current_profile)
+            label = apply_profile(self._current_profile)
+            # Reload agent settings without restart
+            self.alert.load_settings()
+            self.append_log(f"Space profile \u2192 {label}", "cyan")
+        except Exception as exc:
+            self.append_log(f"Profile switch failed: {exc}", "yellow")
 
     # ------------------------------------------------------------------
     # Error display
