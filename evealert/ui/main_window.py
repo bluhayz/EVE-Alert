@@ -6,17 +6,14 @@ signals, never via direct widget access from the engine thread.
 """
 
 import threading
-from datetime import datetime
 
 from PySide6.QtCore import QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QTextCharFormat
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -27,6 +24,7 @@ from evealert.manager.alertmanager import AlertAgent
 from evealert.settings.helper import get_resource_path
 from evealert.settings.store import SettingsStore, get_settings_store
 from evealert.ui import theme
+from evealert.ui.log_pane import LogPane
 from evealert.ui.qt_bridge import QtBridge
 from evealert.ui.tray import AppTray
 
@@ -208,10 +206,8 @@ class MainWindow(QMainWindow):
         root.addLayout(row3)
 
         # Log pane
-        self._log = QPlainTextEdit()
-        self._log.setReadOnly(True)
-        self._log.document().setMaximumBlockCount(500)
-        root.addWidget(self._log, 1)
+        self._log_pane = LogPane()
+        root.addWidget(self._log_pane, 1)
 
         # Status bar
         self.statusBar().showMessage(
@@ -290,28 +286,15 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def append_log(self, text: str, color: str = "normal") -> None:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{now}] {text}"
-
-        fmt = QTextCharFormat()
-        hex_color = theme.LOG_COLORS.get(color, theme.TEXT)
-        fmt.setForeground(QColor(hex_color))
-
-        cursor = self._log.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText(line + "\n", fmt)
-
-        # Auto-scroll only when already at the bottom
-        scrollbar = self._log.verticalScrollBar()
-        if scrollbar.value() >= scrollbar.maximum() - 4:
-            self._log.ensureCursorVisible()
-
-        # Mirror to web server log buffer
+        # Mirror to web server log buffer first
         try:
             from evealert.tools.web_server import append_to_log_buffer  # noqa: PLC0415
-            append_to_log_buffer(line)
+            now = __import__('datetime').datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            append_to_log_buffer(f"[{now}] {text}")
         except Exception:
             pass
+        # Delegate to the LogPane for display
+        self._log_pane.append(text, color)
 
     # ------------------------------------------------------------------
     # Region toggles
