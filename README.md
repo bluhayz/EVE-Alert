@@ -84,6 +84,16 @@ A second, independent region (Faction Region) watches for faction spawn or other
 - **Cyno detection** — dedicated CRITICAL alarm when a cynosural field or cyno ship appears on D-scan. Bypasses the normal cooldown; also speaks via TTS.
 - **Standings-aware ally filtering** — enable `standings_filter_blues` to suppress allied pilots (standing ≥ +5.0) from threat display, KOS checks, and the composite threat score.
 
+### Further enhancements (v6.1)
+
+- **WH signature delta** — `DscanWatcher` fires an alarm whenever the cosmic-signature count increases: possible wormhole connection incoming.
+- **Ship cross-reference** — when a hostile's zKillboard top-ship matches a type currently on D-scan, an immediate red `⚠ MATCH` line is logged.
+- **F4 status readout** — press **F4** to hear the current threat state spoken aloud (local count, D-scan class, adjacent kills, threat score).
+- **EVE automation bridge** — POST alarm JSON to a localhost webhook URL on each alarm so AutoHotkey / PyAutoGUI scripts can trigger in-game keypresses.
+- **Constellation threat heatmap** — 7-day per-system kill histogram accessible from the Statistics window **Threat Heatmap** tab.
+- **Peak hours alerts** — hourly check warns 15 min before a historically high-activity hour in the constellation.
+- **Mobile notification wizard** — guided 4-page setup for Telegram, Pushover, or ntfy.sh with a live test step.
+
 ---
 
 ## Requirements

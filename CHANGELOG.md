@@ -1,5 +1,52 @@
 # Changelog
 
+## [6.1.0] 2026-07-13
+
+### Added
+
+- **#145 Wormhole signature delta monitoring** — `DscanWatcher` now counts
+  "Cosmic Signature" entries on each D-scan poll and fires `on_new_signature(old, new)`
+  when the count increases. Alertmanager logs a red warning: *"NEW SIGNATURE
+  DETECTED: 1 new cosmic sig(s) (2 → 3) — possible wormhole connection!"*.
+  Configurable via `dscan.alert_new_signatures` (default True).
+
+- **#150 Ship cross-reference via zKillboard** — After the zKillboard profile
+  line, if the pilot's `top_ship` matches any type currently visible on D-scan,
+  a red `⚠ MATCH: <pilot> typically flies <ship> — that type is on D-scan NOW`
+  line is logged. `DscanWatcher` now also tracks type-column values in
+  `_visible_types`; exposed via `current_visible_types` property.
+
+- **#152 F4 status readout hotkey** — Press **F4** to have EVE Alert speak the
+  current threat situation aloud: local hostile count, highest-urgency D-scan
+  class, adjacent system kills, and composite threat score. Degrades gracefully
+  when TTS is unavailable. Also logs the summary to the log pane.
+
+- **#153 EVE automation bridge** — When `automation.enabled = true` and
+  `automation.webhook_url` is set, EVE Alert POSTs `{type, text, timestamp}`
+  JSON to the configured URL on every alarm. AutoHotkey / PyAutoGUI scripts can
+  listen on localhost and trigger an in-game keypress (safe-spot warp, dock).
+  The built-in web server also exposes `GET /api/alarm/latest` for polling-based
+  consumers.
+
+- **#148 Constellation threat heatmap** — New `evealert/tools/threat_heatmap.py`
+  with `get_constellation_heatmap(system, days=7)`. Resolves the constellation
+  via ESI, fetches per-system kill history from zKillboard, and bins kills into
+  24-bucket UTC histograms. Results are session-cached for 1 hour. Accessible
+  from the new **Threat Heatmap** tab in the Statistics window.
+
+- **#151 Historical threat pattern alerts** — `_peak_hours_monitor()` async task
+  runs hourly and checks the upcoming hour's kill rate against the 7-day average
+  for the configured constellation. When the rate is ≥ `peak_threshold_multiplier`
+  (default 1.5×), a yellow warning fires 15 minutes before the hour. Configurable
+  via `intelligence.peak_hours_warning` and `intelligence.peak_threshold_multiplier`.
+
+- **#149 Mobile notification setup wizard** — New `NotificationWizardDialog`:
+  a 4-page guided QDialog that walks through Telegram, Pushover, or ntfy.sh
+  setup with inline registration instructions and a live test step before saving.
+  Accessible via **Settings → Alerts & Sound → "Setup Mobile Notifications…"**.
+
+---
+
 ## [6.0.0] 2026-07-13
 
 ### Added — AFK Situational Awareness
