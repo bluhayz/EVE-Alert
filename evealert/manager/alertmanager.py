@@ -384,6 +384,7 @@ class AlertAgent:
                 self._intel_watcher = IntelWatcher(
                     channel_pattern=self._intel_log_channel,
                     callback=self._on_intel_line,
+                    on_intel=self._on_intel_report,
                 )
                 self.loop.create_task(self._intel_watcher.run())
 
@@ -1037,7 +1038,54 @@ class AlertAgent:
         except Exception as exc:
             logger.debug("Plugin on_intel hook failed: %s", exc)
 
-    async def _augment_with_esi(self) -> None:
+    def _on_intel_report(self, report) -> None:
+        """Called from IntelWatcher with a parsed IntelReport (#142).
+
+        Logs a structured summary line and schedules an async jump-distance
+        lookup if the user's home system is configured.
+        """
+        try:
+            if report.is_clear:
+                system_str = f"{report.system} " if report.system else ""
+                self._ui(self.main.write_message, f"Intel: {system_str}CLEAR", "green")
+            else:
+                count_str = f"{report.hostile_count}" if report.hostile_count else "?"
+                ship_str = f" [{', '.join(report.ships[:3])}]" if report.ships else ""
+                system_str = report.system or "unknown system"
+                self._ui(
+                    self.main.write_message,
+                    f"Intel: {count_str} hostile(s) in {system_str}{ship_str}",
+                    "red",
+                )
+                # Queue a jump-distance lookup if we have a home system
+                home = self._settings_store.get("server.system", "").strip()
+                if home and home != "Enter a System Name" and report.system:
+                    self.loop.create_task(
+                        self._lookup_jump_distance(home, report.system)
+                    )
+        except Exception as exc:
+            logger.debug("_on_intel_report failed: %s", exc)
+
+    async def _lookup_jump_distance(self, origin: str, destination: str) -> None:
+        """Compute jump distance between two systems via ESI route and log it."""
+        try:
+            from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
+
+            cache = get_universe_cache()
+            origin_id = await cache.get_system_id(origin)
+            dest_id = await cache.get_system_id(destination)
+            if origin_id and dest_id:
+                route = await cache.get_route(origin_id, dest_id)
+                if route is not None:
+                    jumps = len(route) - 1
+                    label = f"{jumps} jump{'s' if jumps != 1 else ''}"
+                    self._ui(
+                        self.main.write_message,
+                        f"Intel: {destination} is {label} from {origin}",
+                        "cyan",
+                    )
+        except Exception as exc:
+            logger.debug("Jump distance lookup failed: %s", exc)
         """Background task: enriched ESI + Zkillboard pilot intel on Enemy alarm.
 
         Posts per-pilot lines to the log pane covering:

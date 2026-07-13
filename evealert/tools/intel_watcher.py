@@ -20,6 +20,8 @@ import platform
 from pathlib import Path
 from typing import Callable
 
+from evealert.tools.intel_parser import IntelReport, parse_line
+
 logger = logging.getLogger("alert.intel")
 
 # How often (seconds) to poll the log file for new lines
@@ -59,9 +61,18 @@ def find_intel_log(chatlog_dir: Path, channel_pattern: str) -> Path | None:
 class IntelWatcher:
     """Async task that tails an EVE intel chat log and raises callbacks on new lines.
 
+    Callbacks:
+      callback(raw_line)         — every non-empty line (backward compat)
+      on_intel(IntelReport)      — parsed intel reports; not called for clear lines
+                                    unless parse_all=True
+
     Usage::
 
-        watcher = IntelWatcher(channel_pattern="Intel", callback=handle_line)
+        watcher = IntelWatcher(
+            channel_pattern="Intel",
+            callback=handle_raw,
+            on_intel=handle_report,
+        )
         asyncio.ensure_future(watcher.run())
         ...
         watcher.stop()
@@ -72,6 +83,8 @@ class IntelWatcher:
         channel_pattern: str,
         callback: Callable[[str], None],
         chatlog_dir: Path | None = None,
+        on_intel: Callable[[IntelReport], None] | None = None,
+        parse_all: bool = True,
     ) -> None:
         self.channel_pattern = channel_pattern.strip() or "Intel"
         self.callback = callback
@@ -79,6 +92,8 @@ class IntelWatcher:
         self._running = False
         self._log_path: Path | None = None
         self._file_pos: int = 0
+        self._on_intel: Callable[[IntelReport], None] | None = on_intel
+        self._parse_all: bool = parse_all  # if False, skip clear-only reports
 
     # ------------------------------------------------------------------
     # Public interface
@@ -162,3 +177,11 @@ class IntelWatcher:
                     self.callback(line)
                 except Exception:
                     pass
+                if self._on_intel is not None:
+                    try:
+                        report = parse_line(line)
+                        if report is not None:
+                            if self._parse_all or not report.is_clear:
+                                self._on_intel(report)
+                    except Exception:
+                        pass
