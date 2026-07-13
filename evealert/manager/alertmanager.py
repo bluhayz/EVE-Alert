@@ -1101,6 +1101,10 @@ class AlertAgent:
 
             self._ui(self.main.write_message, "ESI — Local pilot intel:", "cyan")
 
+            _any_kos = False
+            _kos_tier_label = ""
+            _max_danger_ratio = 0.0
+
             for info in results:
                 # ── Threat tier check ────────────────────────────────────────
                 tier = None
@@ -1159,6 +1163,8 @@ class AlertAgent:
                 try:
                     zkb = await client.get_zkillboard_profile(info.character_id)
                     if zkb and (zkb.kills_total > 0 or zkb.losses_total > 0):
+                        if zkb.danger_ratio > _max_danger_ratio:
+                            _max_danger_ratio = zkb.danger_ratio
                         danger_pct = int(zkb.danger_ratio * 100)
                         ship_str = f" | flies {zkb.top_ship}" if zkb.top_ship else ""
                         self._ui(
@@ -1186,6 +1192,8 @@ class AlertAgent:
                         info.alliance_name or "",
                     )
                     if kos_result:
+                        _any_kos = True
+                        _kos_tier_label = kos_result.label
                         self._ui(
                             self.main.write_message,
                             f"    ⚠ KOS ({kos_result.source}): {info.name} — {kos_result.label}",
@@ -1226,6 +1234,31 @@ class AlertAgent:
 
         except Exception as exc:
             logger.debug("ESI augmentation error: %s", exc)
+
+        # ── Composite threat score (#141) ─────────────────────────────────
+        try:
+            from evealert.tools.threat_score import compute_threat_score  # noqa: PLC0415
+            from evealert.data.ship_classes import ShipThreatClass  # noqa: PLC0415
+
+            top_class = max(
+                self._dscan_last_classes,
+                key=lambda c: ShipThreatClass(c).urgency,
+                default=ShipThreatClass.UNKNOWN,
+            )
+            assessment = compute_threat_score(
+                local_hostile_count=len(names) if names else 0,
+                is_kos=_any_kos,
+                kos_tier=_kos_tier_label,
+                danger_ratio=_max_danger_ratio,
+                dscan_threat_class=top_class.value if top_class != ShipThreatClass.UNKNOWN else "",
+                adjacent_kills=self._neighbor_monitor.last_kill_count
+                    if self._neighbor_monitor and hasattr(self._neighbor_monitor, "last_kill_count") else 0,
+                is_cyno=ShipThreatClass.CYNO in self._dscan_last_classes,
+            )
+            colour = {"CRITICAL": "red", "HIGH": "yellow", "CAUTION": "cyan"}[assessment.label]
+            self._ui(self.main.write_message, str(assessment), colour)
+        except Exception as exc:
+            logger.debug("Threat score computation failed: %s", exc)
 
     # ------------------------------------------------------------------
     # D-scan callbacks (v3.3) — called from DscanWatcher on the alert thread
