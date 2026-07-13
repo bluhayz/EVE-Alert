@@ -160,17 +160,9 @@ class SettingsDialog(QDialog):
         self._profile_combo = QComboBox()
         self._profile_combo.setMinimumWidth(160)
         layout.addWidget(self._profile_combo)
-        for text, slot in [
-            ("Save", self._save_profile),
-            ("New…", self._new_profile),
-            ("Load", self._load_profile),
-            ("Delete", self._delete_profile),
-        ]:
-            btn = QPushButton(text)
-            if text == "Delete":
-                btn.setProperty("class", "danger")
-            layout.addWidget(btn)
-            btn.clicked.connect(slot)
+        manage_btn = QPushButton("Manage Profiles\u2026")
+        manage_btn.clicked.connect(self._open_profile_manager)
+        layout.addWidget(manage_btn)
         layout.addStretch()
         return bar
 
@@ -601,6 +593,14 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     # Profiles
     # ------------------------------------------------------------------
+
+    def _open_profile_manager(self) -> None:
+        """Open the Profile Manager dialog (#166)."""
+        from evealert.ui.profile_manager import ProfileManagerDialog  # noqa: PLC0415
+        dlg = ProfileManagerDialog(self, self._store)
+        dlg.exec()
+        # Refresh the active-profile combo after manager closes
+        self._populate_settings()
 
     def _save_profile(self) -> None:
         name = self._profile_combo.currentText()
