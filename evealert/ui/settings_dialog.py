@@ -133,6 +133,9 @@ class SettingsDialog(QDialog):
         # Registry-driven sections (appended after non-registry)
         self._build_registry_controls()
 
+        # Post-registry additions that inject into auto-created sections
+        self._build_ocr_check_button()
+
         # Footer buttons
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -372,6 +375,24 @@ class SettingsDialog(QDialog):
                 w.setMinimumWidth(300)
                 form.addRow(spec.label + ":", w)
             self._controls[spec.path] = w
+
+    def _build_ocr_check_button(self) -> None:
+        """Append a Tesseract health-check row to the OCR Name Detection section."""
+        key = "Intel & ESI/OCR Name Detection"
+        if key not in self._sections:
+            return  # section not created yet (no OCR fields in FIELDS)
+        form = self._sections[key][1]
+
+        self._tesseract_status = QLabel("Not checked")
+        self._tesseract_status.setProperty("class", "muted")
+
+        btn = QPushButton("Check Tesseract")
+        btn.clicked.connect(self._check_tesseract)
+
+        row = QHBoxLayout()
+        row.addWidget(btn)
+        row.addWidget(self._tesseract_status, 1)
+        form.addRow("Status:", row)
 
     # ------------------------------------------------------------------
     # Load / Save
@@ -657,6 +678,35 @@ class SettingsDialog(QDialog):
             dlg.exec()
         except Exception as e:
             QMessageBox.information(self, "Threshold Editor", f"Coming in Phase 6: {e}")
+
+    # ------------------------------------------------------------------
+    # Tesseract / OCR check
+    # ------------------------------------------------------------------
+
+    def _check_tesseract(self) -> None:
+        """Test whether Tesseract is installed and report the version."""
+        try:
+            import pytesseract  # noqa: PLC0415
+            from evealert.tools.ocr_local import reset_availability_cache  # noqa: PLC0415
+
+            reset_availability_cache()  # force a fresh probe (may have been installed since last check)
+            version = pytesseract.get_tesseract_version()
+            msg = f"✓ Tesseract {version} — OCR ready"
+            self._tesseract_status.setText(msg)
+            self._tesseract_status.setProperty("class", "")
+            self._tesseract_status.setStyleSheet("color: #3FB950;")  # SUCCESS green
+        except ImportError:
+            self._tesseract_status.setText("✗ pytesseract not installed  (pip install pytesseract)")
+            self._tesseract_status.setStyleSheet("color: #F85149;")
+        except Exception as exc:
+            msg = str(exc)
+            if "tesseract" in msg.lower() or "not found" in msg.lower():
+                self._tesseract_status.setText(
+                    "✗ Tesseract engine not found — install from https://github.com/tesseract-ocr/tesseract"
+                )
+            else:
+                self._tesseract_status.setText(f"✗ {msg}")
+            self._tesseract_status.setStyleSheet("color: #F85149;")
 
     # ------------------------------------------------------------------
     # Public API
