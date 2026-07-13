@@ -5,7 +5,7 @@
 > Read this before touching any source file.
 >
 > Companion references in `docs/`:
-> - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full v4.0 module inventory, data flow, singleton caveats
+> - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module inventory, data flow, threading model
 > - [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) — every external API endpoint used, timeouts, failure modes
 > - [docs/FEATURES.md](docs/FEATURES.md) — feature ↔ settings-key ↔ module lookup table
 
@@ -13,81 +13,60 @@
 
 ## 1. Project Purpose
 
-EVE-Alert is a desktop PvP alert tool for the MMO **EVE Online**. It monitors a
-configurable region of the screen (typically the in-game Local Chat roster) using
-OpenCV template matching, and fires audio alarms plus optional Discord webhook
-notifications when enemy players or faction spawns are detected.
+EVE-Alert is a desktop PvP alert and situational-awareness tool for the MMO
+**EVE Online**. It monitors a configurable region of the screen (typically the
+in-game Local Chat roster) using OpenCV template matching, and fires audio
+alarms, TTS readouts, Discord webhooks, and mobile push notifications when
+enemy players or faction spawns are detected. A large intel layer augments
+alarms with ESI pilot lookups, zKillboard activity, D-scan classification,
+threat scoring, and wormhole/route awareness.
 
-**Primary platforms:** Windows (primary), macOS (supported). Distributed as a
-standalone `.exe` (Windows) or `.app`/`.dmg` (macOS) built with PyInstaller.
+**Primary platform:** Windows. (macOS support ended with the v5 PySide6
+migration; code is not intentionally broken on macOS but is untested there.)
+Distributed as a standalone `.exe` built with PyInstaller.
 
 **Version:** `evealert/__init__.py:__version__` is the single source of truth.
+
+**GUI framework:** **PySide6 (Qt 6)** since v5.0. The customtkinter/Tkinter UI
+(`evealert/menu/`, `evealert/tray.py`, `evealert/tools/overlay.py`) was deleted
+at cutover — any reference to those paths or to `after(0, ...)` marshalling in
+older docs/commits is historical.
 
 ---
 
 ## 2. Architecture Overview
 
-### Component Relationship Diagram
+Three execution contexts:
 
-```mermaid
-graph TD
-    subgraph MainThread ["Main Thread (Tkinter event loop)"]
-        MM["MainMenu\n(customtkinter.CTk)"]
-        MMB["MainMenuButtons"]
-        MM2["MenuManager"]
-        SM["SettingMenu\n(CTkToplevel)"]
-        CM["ConfigModeMenu\n(CTkToplevel)"]
-        SW["StatisticsWindow\n(CTkToplevel)"]
-        OS["OverlaySystem\n(CTkToplevel + Canvas)"]
-        KL["pynput keyboard.Listener\n(daemon thread)"]
-        MM --> MMB
-        MM --> MM2
-        MM --> OS
-        MM2 --> SM
-        MM2 --> CM
-        MMB --> SW
-        MM --> KL
-    end
+| Context | Owner | Runs |
+|---|---|---|
+| **Qt main thread** | `QApplication` (`evealert/ui/app.py`) | All widgets: `MainWindow`, dialogs, tray, timers |
+| **Alert daemon thread** | `AlertAgent.start()` creates its own asyncio loop | Vision loops, alarm dispatch, every async intel task |
+| **Helper threads** | pynput listener, `_LoginThread(QThread)`, TTS thread, heatmap worker | Global hotkeys, SSO login, speech, blocking fetches |
 
-    subgraph AlertThread ["Alert Daemon Thread (asyncio event loop)"]
-        AA["AlertAgent.start()\ncreates asyncio.new_event_loop()"]
-        VT["vision_thread (asyncio Task)\nenemy detection loop"]
-        VFT["vision_faction_thread (asyncio Task)\nfaction detection loop"]
-        RT["run (asyncio Task)\nalarm trigger + cooldown"]
-        WC["WindowCapture\n(mss — lazy init in this thread)"]
-        V1["Vision(ALERT_FILES)\nOpenCV template matching"]
-        V2["Vision(FACTION_FILES)\nOpenCV template matching"]
-        ST["AlarmStatistics\n(in-memory dataclass)"]
-        AA --> VT
-        AA --> VFT
-        AA --> RT
-        VT --> WC
-        VFT --> WC
-        VT --> V1
-        VFT --> V2
-        RT --> ST
-    end
+### Engine ↔ UI decoupling (Phase 0 of the migration, #124)
 
-    MM -- "Thread(target=alert.start, daemon=True).start()" --> AA
-    RT -- "self.main.after(0, callable)" --> MM
-    AA -- "self.main.after(0, update_alert_button)" --> MM
-    SM -- "load_settings() / save_settings()" --> FS["settings.json\n(platformdirs user_config_dir)"]
-    AA -- "load_settings() reads from SettingMenu" --> SM
-    RT -- "dhooks_lite Webhook.execute()" --> Discord["Discord Webhook (optional)"]
-    RT -- "sounddevice.play()" --> Audio["Audio output"]
+- `evealert/bridge.py` defines the **`UIBridge` protocol**: `log(text, color)`,
+  `refresh_region_toggles()`, `show_error(msg)`. The engine only ever talks to
+  this interface.
+- `evealert/ui/qt_bridge.py` implements it as **`QtBridge(QObject)`** whose
+  methods emit Qt signals (`log_message`, `toggles_changed`, `error`). Signal
+  emission is thread-safe; Qt queues delivery to main-thread slots
+  automatically. **This replaces the old `after(0, ...)` discipline entirely.**
+- `evealert/settings/store.py` owns **`SettingsStore`** — GUI-free settings
+  load/merge/save plus the `changed` hot-reload flag, shared by engine and UI
+  via `get_settings_store()`. `DEFAULT_SETTINGS` lives here.
+- `MainWindow` passes a small `_MainProxy` object to `AlertAgent` that routes
+  the legacy `main.write_message(...)`-style calls into the bridge.
+
 ```
-
-### Key Design Points
-
-- The **Tkinter event loop** owns all GUI widgets and runs on the main thread.
-- The **asyncio event loop** is created fresh inside `AlertAgent.start()` which
-  runs in a daemon thread. This loop runs three concurrent tasks.
-- `WindowCapture` uses `mss.mss()` created lazily on first call to
-  `get_screenshot_value()`, ensuring the OS screen-capture handle is bound to
-  the alert thread, not the GUI thread.
-- The **pynput keyboard listener** runs in its own daemon thread (started by
-  Tkinter's `init_menu`), stored as `self._keyboard_listener` and stopped in
-  `clean_up()`.
+AlertAgent (asyncio, daemon thread)
+    │  bridge.log("Enemy Appears!", "red")        ← any thread, safe
+    ▼
+QtBridge.log_message.emit(...)  ──queued──►  MainWindow.append_log(...)   [Qt main thread]
+    ▲
+SettingsStore.changed  ◄── SettingsDialog.save()   (engine polls + clears each run() cycle)
+```
 
 ---
 
@@ -96,66 +75,74 @@ graph TD
 > **This is the most important section for AI agents.** Violating these rules
 > causes silent corruption or hard crashes.
 
-### Rule 1 — Never mutate Tkinter widgets from the alert thread
+### Rule 1 — Engine→UI traffic goes through the bridge, nothing else
 
-All customtkinter/tkinter widget calls (`configure`, `insert`, `delete`,
-`after`, etc.) are **not thread-safe**. If code in `AlertAgent` or any async
-task needs to update the GUI:
+Engine/async code must never touch a widget, and UI code must never mutate
+engine state from a worker thread. Use `self.bridge.log(...)` /
+`refresh_region_toggles()` / `show_error(...)` from the engine; use Qt signals
+for any UI worker thread (see `NotificationWizardDialog._test_done` for the
+canonical pattern: declare a `Signal`, `emit()` from the worker, connect to a
+main-thread slot).
 
 ```python
-# CORRECT — schedule on main thread
-self.main.after(0, lambda: self.main.write_message("hello", "green"))
+# CORRECT (engine thread)
+self.bridge.log("hello", "green")
 
-# WRONG — direct call from alert thread (may silently corrupt state or crash)
-self.main.write_message("hello", "green")
+# CORRECT (UI worker thread)
+self._result_ready.emit(payload)          # slot runs on main thread
+
+# WRONG — widget call from a worker thread
+self._status_label.setText("...")
+# WRONG — QTimer.singleShot from a non-Qt thread (timers need a Qt thread)
+QTimer.singleShot(0, update_fn)
 ```
 
 ### Rule 2 — `mss.mss()` must be created in the alert thread
 
-`WindowCapture.__init__` sets `self._sct = None`. The actual `mss.mss()`
-instance is created inside `_get_sct()` on first call to `get_screenshot_value()`
-which happens inside `vision_check()` → called from `AlertAgent.start()` in the
-daemon thread. **Never** move `mss.mss()` construction to `__init__`.
+`WindowCapture` lazily creates its `mss` instance on first capture, which
+happens inside the alert thread. **Never** move `mss.mss()` construction to
+`__init__`.
 
 ### Rule 3 — The asyncio event loop is created in the daemon thread
 
-`AlertAgent.__init__` sets `self.loop = None`. The actual loop is created in
-`AlertAgent.start()`:
+`AlertAgent.__init__` sets `self.loop = None`; `AlertAgent.start()` (running in
+the daemon thread) creates it. Do not create the loop in `__init__`.
+
+### Rule 4 — Stop the event loop thread-safely
 
 ```python
-self.loop = asyncio.new_event_loop()
-asyncio.set_event_loop(self.loop)
-```
-
-Do not create `asyncio.new_event_loop()` in `__init__`.
-
-### Rule 4 — Stop the event loop thread-safely from the main thread
-
-```python
-# CORRECT
+# CORRECT (from any thread, including the loop's own)
 self.alert.loop.call_soon_threadsafe(self.alert.loop.stop)
-
-# WRONG
-self.alert.loop.stop()  # called directly from main thread
 ```
 
-See `MainMenu.clean_up()` for the canonical shutdown sequence.
+`AlertAgent.stop()` cancels all long-running tasks first (see #102), and
+`MainWindow.exit_app()` is the canonical shutdown sequence.
 
-### Rule 5 — pynput keyboard listener must be stopped on teardown
+### Rule 5 — pynput listener lifecycle
 
-The listener is stored as `self._keyboard_listener`. Always call
-`self._keyboard_listener.stop()` before destroying the main window.
+`MainWindow._setup_hotkeys()` starts the global-hotkey listener
+(daemon thread). Its callback must only `self.hotkey_pressed.emit(...)` —
+never touch widgets. `exit_app()` stops it.
 
 ### Rule 6 — Cooldown timers are absolute future timestamps
 
 ```python
-# CORRECT — store the future expiry time
 self.cooldown_timers[alarm_type] = time.time() + self.cooldowntimer
-
-# Check: current_time < expiry means still cooling
 if time.time() < self.cooldown_timers[alarm_type]:
-    return  # still in cooldown
+    return  # still cooling
 ```
+
+### Rule 7 — Settings writes are read-merge-write
+
+Always `settings = store.load()` (or `load_raw()` once #156 lands) → patch the
+keys you own → `store.save(settings)`. **Never** seed a save from
+`DEFAULT_SETTINGS` — that pattern deleted user profiles once (#108).
+
+### Rule 8 — Never mock `SettingsStore` with `MagicMock` in tests
+
+Use a real store on a temp path: `reset_settings_store(tmp_path / "s.json")`.
+A MagicMock accepts calls that don't exist on the real class and has already
+masked a shipped crash (#155).
 
 ---
 
@@ -165,309 +152,207 @@ if time.time() < self.cooldown_timers[alarm_type]:
 
 | File | Purpose |
 |------|---------|
-| `main.py` | Entry point — sets CTk appearance, prints ASCII banner, instantiates `MainMenu`, calls `mainloop()` |
-| `pyproject.toml` | Build config (hatchling), runtime deps, optional dev/build deps, version path |
-| `pytest.ini` | Pytest config — `python_classes = *Tests`, `python_functions = test_*` |
+| `main.py` | Entry point — ASCII banner, then `evealert.ui.app.run()` |
+| `pyproject.toml` | Build config (hatchling), deps (PySide6, opencv, httpx, …), extras: `dev`, `tts`, `build-windows` |
+| `pytest.ini` | Pytest config |
 
-### `evealert/`
+### `evealert/` (core)
 
 | File | Purpose |
 |------|---------|
-| `__init__.py` | Package version: `__version__`, `__title__` |
-| `constants.py` | All magic numbers and string constants — timing, UI dimensions, OpenCV params, audio, log config, image prefixes |
-| `exceptions.py` | Custom exception hierarchy rooted at `EVEAlertException` |
-| `hotkeys.py` | `parse_hotkey()`, `key_matches()`, `DEFAULT_HOTKEYS` — keyboard hotkey parsing shared by `SettingMenu` and `MainMenu` |
-| `statistics.py` | `AlarmEvent` dataclass + `AlarmStatistics` dataclass — in-memory per-session alarm tracking with history deque (max 50) |
-| `tray.py` | `TrayManager` — pystray daemon thread, minimize-to-tray, Show/Start/Stop/Exit tray menu |
+| `__init__.py` | `__version__`, `__title__` |
+| `bridge.py` | `UIBridge` protocol — the engine's only view of the UI |
+| `constants.py` | Magic numbers: timing, OpenCV params, audio, image prefixes |
+| `exceptions.py` | Custom exception hierarchy |
+| `hotkeys.py` | `parse_hotkey()`, `key_matches()`, `DEFAULT_HOTKEYS` |
+| `statistics.py` | `AlarmEvent` + `AlarmStatistics` (session tracking, history deque) |
+| `data/ship_classes.py` | `ShipThreatClass` enum (+ `urgency`), `SHIP_CLASS_MAP`, `classify_ship()` — D-scan ship classification data (v6.0) |
 
 ### `evealert/manager/`
 
 | File | Purpose |
 |------|---------|
-| `alertmanager.py` | `AlertAgent` — entire detection engine: asyncio task management, screenshot loop, template match dispatch, sound playback, webhook firing, cooldown logic |
+| `alertmanager.py` | `AlertAgent` — the entire engine: vision tasks, alarm dispatch (sound/TTS/webhooks/push/automation), rearm logic (`_EnemySighting`), ESI augmentation + threat score, D-scan/intel/neighbor/wormhole/peak-hours task wiring, settings hot-reload |
 
-### `evealert/menu/`
-
-| File | Purpose |
-|------|---------|
-| `main.py` | `MainMenu` (CTk root window), `MainMenuButtons`, `MenuManager` — wires together all subsystems, handles start/stop, keyboard hotkeys, overlay, status polling |
-| `setting.py` | `SettingMenu` + `DEFAULT_SETTINGS` — settings Toplevel window, load/save/merge/apply logic, audio test buttons |
-| `config.py` | `ConfigModeMenu` — F1/F2 hotkey guide Toplevel, tracks `alert_region`/`faction_region` selection state |
-| `image_manager.py` | `ImageManagerWindow` — add/remove/preview user template images; copies to platformdirs user `img/` directory |
-| `statistics.py` | `StatisticsWindow` — two-tab Toplevel: Live Stats (real-time counts/history) and Sessions (past per-session JSON reports) |
-| `threshold_editor.py` | `ThresholdEditorWindow` — per-image confidence toggle + slider; saves to `settings.json["image_thresholds"]` |
-
-### `evealert/tools/`
+### `evealert/ui/` (PySide6 — all widgets live here)
 
 | File | Purpose |
 |------|---------|
-| `intel_watcher.py` | `IntelWatcher` — async file-tail of EVE chat log; new lines forwarded via callback; `get_eve_chatlog_dir()` / `find_intel_log()` helpers |
-| `overlay.py` | `OverlaySystem` — semi-transparent fullscreen marquee overlay for interactive region selection; writes result to `settings.json` |
-| `vision.py` | `Vision` — OpenCV template matching engine; `find()` for enemy, `find_faction()` for faction; accepts `per_image_thresholds` dict |
-| `window_finder.py` | `find_eve_window()` — cross-platform EVE client window detection (`pygetwindow` on Windows, `osascript` on macOS) |
-| `windowscapture.py` | `WindowCapture` — `mss`-based screen region capture; lazy `_sct` init (see Rule 2) |
-| `zkillboard.py` | `ZkillboardClient` — async ESI system-ID lookup + Zkillboard kill fetch with TTL cache; module-level `get_client()` singleton |
-| `esi_standings.py` | `EsiLookup` — public-ESI pilot intel (corp/alliance/age/sec status/corp history + zKillboard kill profile); `extract_joining_characters()` Local-log parser (v3.0/3.1) |
-| `esi_auth.py` | `EsiAuth` — EVE SSO OAuth2 token lifecycle + authed helpers: personal standings, fleet membership, structure fuel warnings (v4.0) |
-| `universe.py` | `UniverseCache` — system ID/name cache, stargate jump-graph BFS, pipe/pocket classification, sovereignty map, route threat (v3.2) |
-| `neighbor_monitor.py` | `NeighborMonitor` — polls zKillboard for kills within N jumps (v3.2) |
-| `dscan_watcher.py` | `DscanWatcher` — tails EVE D-scan logs, classifies ships into RED/ORANGE/YELLOW/GREEN tiers, probe detection, session timeline (v3.3) |
-| `kos_checker.py` | `KosChecker` — CVA KOS API + custom KOS endpoints + local hostile list, TTL-cached (v3.4) |
-| `push_notifier.py` | `PushNotifier` — Telegram Bot / Pushover / ntfy.sh push channels (v3.5) |
-| `wormhole.py` | Thera connection lookup (Eve-Scout), WH class inference, `WhDropDetector` rapid-join heuristic (v3.6) |
-| `fleet_context.py` | Fleet composition analysis, `ActivityProfile` TZ histogram, `KillmailMonitor` tracked-character poller (v3.7) |
-| `web_server.py` | `WebStatusServer` — stdlib-asyncio localhost dashboard + `/api/status`, `/api/log` JSON endpoints (v3.0) |
-| `plugin_loader.py` | `PluginManager` — loads user `.py` plugins; `on_start/on_stop/on_enemy/on_faction/on_intel` hooks in a thread pool (v3.0) |
-| `update_checker.py` | `check_for_update()` — GitHub Releases version comparison (v2.6) |
+| `app.py` | `create_app()` / `run()` — QApplication, icon, loads `theme.qss` |
+| `__main__.py` | `python -m evealert.ui` entry |
+| `theme.py` | Color tokens (`BG`, `ACCENT`, `LOG_COLORS`, …) + `load_qss()` |
+| `theme.qss` | The stylesheet; button variants via `class` dynamic property (`primary`/`secondary`/`danger`/`warning`) |
+| `qt_bridge.py` | `QtBridge(QObject)` — UIBridge → Qt signals |
+| `main_window.py` | `MainWindow` + `_MainProxy`; header/status, start/stop, log pane, hotkey routing (F1–F4), tray wiring, dialog launchers |
+| `tray.py` | `AppTray(QSystemTrayIcon)` — Show/Start/Stop/Exit menu |
+| `settings_dialog.py` | Registry-generated form (from `settings/fields.py`) + hand-built sections; profile bar; SSO login (`_LoginThread`) |
+| `config_dialog.py` | Config Mode: selection guidance, region status, launches overlays |
+| `region_overlay.py` | `RegionOverlay` — frameless fullscreen QRubberBand selector (devicePixelRatio-aware) |
+| `statistics_window.py` | Live stats cards, history/sessions tables, Threat Heatmap tab |
+| `image_manager.py` | Template image add/remove/preview (validates with `cv2.imread`) |
+| `threshold_editor.py` | Per-image confidence override rows |
+| `notification_wizard.py` | 4-page Telegram/Pushover/ntfy setup wizard with live test |
+| `onboarding_wizard.py` | (planned, #164) first-run setup |
 
 ### `evealert/settings/`
 
 | File | Purpose |
 |------|---------|
-| `helper.py` | `get_resource_path()` (PyInstaller-aware via `sys._MEIPASS`), `get_settings_path()` (platformdirs), `get_user_img_path()`, icon path constants |
-| `logger.py` | Rotating file handler factory, pre-built named loggers (`main_log`, `alert_log`, `menu_log`, `tools_log`, `test_log`, `validator_log`) |
-| `stats_store.py` | `load_lifetime_stats()`, `save_lifetime_stats()` (atomic write), `save_session_report()`, `list_session_reports()` — persistent alarm statistics |
-| `validator.py` | `ConfigValidator` — static validation methods for region coords, detection scale, cooldown, webhook URL, audio files, full settings dict |
+| `store.py` | `SettingsStore` + `DEFAULT_SETTINGS` + `_get_by_path`/`_set_by_path`; singleton via `get_settings_store()` / `reset_settings_store()` (tests) |
+| `fields.py` | `FieldSpec` registry (`FIELDS`, `TAB_ORDER`) driving the generated settings form |
+| `helper.py` | `get_resource_path()` (PyInstaller-aware), `get_settings_path()`, user img path |
+| `logger.py` | Rotating file logging setup |
+| `stats_store.py` | Lifetime stats + per-session JSON reports (atomic writes) |
+| `validator.py` | `ConfigValidator` static checks |
 
-### `evealert/img/`
-
-| Pattern | Content |
-|---------|---------|
-| `image_*.png` | Enemy detection templates (e.g. `image_1_90%.png`, `image_1_100%.png`) |
-| `faction_*.jpg` | Faction spawn detection templates |
-| `online.png` / `offline.png` | Status indicator icons |
-| `eve.ico` / `eve.png` | Application icon (Windows / macOS) |
-
-### `evealert/sound/`
+### `evealert/tools/`
 
 | File | Purpose |
 |------|---------|
-| `alarm.wav` | Enemy alarm sound |
-| `faction.wav` | Faction spawn alarm sound |
-| `error.wav` | Internal error condition |
+| `vision.py` | OpenCV template matching (`TM_CCOEFF_NORMED`), per-image thresholds, unreadable-template guard |
+| `windowscapture.py` | `mss` capture, lazy thread-affine init |
+| `window_finder.py` | EVE client window detection |
+| `http_common.py` | Canonical `USER_AGENT` / `DEFAULT_HEADERS` for ALL external HTTP |
+| `zkillboard.py` | Kills-on-alarm lookup; `clean_zkb_entries()` (normalizes zKB `[null]`) |
+| `esi_standings.py` | Public-ESI pilot intel + `extract_joining_characters()` |
+| `esi_auth.py` | EVE SSO OAuth2 (PKCE + state + JWT identity); authed helpers: standings, fleet, structure fuel. Requires a user-registered client ID (32-hex) |
+| `universe.py` | System cache, jump-graph BFS, route threat, sov map; `resolve_ids()` (`POST /universe/ids/`) is the ONLY name→ID resolver |
+| `neighbor_monitor.py` | Adjacent-system kill polling |
+| `dscan_watcher.py` | D-scan tail: threat tiers, ship classes, probes, cyno, signature-delta, `current_visible_types` |
+| `intel_watcher.py` | Chat-log tail; raw-line + parsed-report callbacks |
+| `intel_parser.py` | Free-text intel → `IntelReport` (system, count, clear, ships) |
+| `kos_checker.py` | KOS APIs (CVA legacy/off by default) + local list; dead-source quarantine |
+| `push_notifier.py` | Telegram / Pushover / ntfy |
+| `wormhole.py` | Eve-Scout Thera connections, WH class, `WhDropDetector` |
+| `fleet_context.py` | Fleet composition, TZ profile, killmail monitor (`_ZKB_SEMAPHORE` serializes zKB) |
+| `threat_score.py` | `compute_threat_score()` → `ThreatAssessment` (1–10, CAUTION/HIGH/CRITICAL; cyno ⇒ 10) |
+| `threat_heatmap.py` | Constellation 24-bucket kill histograms (session cache 1 h) |
+| `space_profiles.py` | F3 presets (nullsec/wormhole/highsec) — settings overlays |
+| `tts.py` | `is_tts_available()` / `speak()` (pyttsx3, daemon thread, serialized) |
+| `ocr_local.py` | Optional Tesseract OCR of pilot names |
+| `web_server.py` | Localhost dashboard + `/api/status`, `/api/log`, `/api/alarm/latest` |
+| `plugin_loader.py` | User plugin discovery + hook dispatch |
+| `net_safety.py` | SSRF/localhost guards for user-supplied URLs |
+| `update_checker.py` | GitHub Releases version check |
 
 ---
 
 ## 5. Settings System
 
-### Schema — `DEFAULT_SETTINGS` (defined in `evealert/menu/setting.py`)
+**`DEFAULT_SETTINGS` lives in `evealert/settings/store.py`** and is the schema
+source of truth. Top-level blocks as of v6.1: `log_level`, `active_profile`,
+`alert_region_1/2`, `faction_region_1/2`, `detectionscale`, `faction_scale`,
+`cooldown_timer[_enemy|_faction]`, `volume`, `server`, `hotkeys`, `sounds`,
+`profiles`, `image_thresholds`, `intelligence` (incl. peak-hours), `webhooks`,
+`esi`, `threat_tiers`, `plugins`, `web_ui`, `adjacent`, `dscan`, `kos`,
+`kos_list`, `push`, `notifications` (incl. TTS), `wormhole`, `fleet`,
+`esi_oauth`, `ocr`, `diagnostics`, `alerts` (rearm), `automation`.
+See [docs/FEATURES.md](docs/FEATURES.md) for block → module mapping.
 
-```json
-{
-  "log_level": "INFO",
-  "active_profile": "Default",
-  "alert_region_1": {"x": 0, "y": 0},
-  "alert_region_2": {"x": 0, "y": 0},
-  "faction_region_1": {"x": 0, "y": 0},
-  "faction_region_2": {"x": 0, "y": 0},
-  "detectionscale": {"value": 90},
-  "faction_scale": {"value": 90},
-  "cooldown_timer": {"value": 60},
-  "volume": {"value": 100},
-  "server": {
-    "webhook": "",
-    "system": "Enter a System Name",
-    "mute": false
-  },
-  "hotkeys": {"alert_region": "f1", "faction_region": "f2"},
-  "sounds": {"alarm": "", "faction": ""},
-  "profiles": {},
-  "image_thresholds": {},
-  "intelligence": {
-    "zkillboard_enabled": false,
-    "zkillboard_cooldown": 300,
-    "intel_log_enabled": false,
-    "intel_log_channel": ""
-  }
-}
-```
+- **Registry-driven UI:** most leaf settings are declared once as a `FieldSpec`
+  in `evealert/settings/fields.py`; the settings dialog generates the widget,
+  load, and save automatically. **Adding a simple setting = add a default in
+  `store.py` + one `FieldSpec`.** Only structured settings (regions, lists,
+  buttons) need hand-built dialog code.
+- **Hot reload:** `store.save()` sets `store.changed = True`; `AlertAgent.run()`
+  polls it each cycle and calls `load_settings()` — no restart needed.
+- **Profiles:** `profiles` holds named override dicts; `store.load()` applies
+  the `active_profile` overlay. ⚠ Until #156 lands, saving from the settings
+  dialog while a profile is active bakes the overlay into base settings — see
+  that issue before touching profile code.
+- **Migration:** `SettingsStore._merge()` deep-fills missing keys from defaults
+  and never lets an empty default wipe a populated user sub-dict.
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `log_level` | `str` | Python logging level name (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
-| `active_profile` | `str` | Name of the currently loaded detection profile (`"Default"` = no profile overlay) |
-| `alert_region_1` | `{x, y}` | Top-left pixel of the enemy detection region |
-| `alert_region_2` | `{x, y}` | Bottom-right pixel of the enemy detection region |
-| `faction_region_1` | `{x, y}` | Top-left pixel of the faction detection region |
-| `faction_region_2` | `{x, y}` | Bottom-right pixel of the faction detection region |
-| `detectionscale.value` | `int` 1–100 | Enemy detection confidence threshold (divided by 100 inside `Vision`) |
-| `faction_scale.value` | `int` 1–100 | Faction detection confidence threshold (divided by 100 inside `Vision`) |
-| `cooldown_timer.value` | `int` 0–3600 | Seconds before an alarm type can sound again after `MAX_SOUND_TRIGGERS` |
-| `volume.value` | `int` 0–100 | Audio volume percentage (converted to `0.0–1.0` float before use) |
-| `server.webhook` | `str` | Discord webhook URL (empty = disabled) |
-| `server.system` | `str` | EVE system name included in webhook messages and Zkillboard lookups |
-| `server.mute` | `bool` | When `true`, suppresses all audio output |
-| `hotkeys.alert_region` | `str` | Key name for Alert Region selection (default `"f1"`; uses pynput key names) |
-| `hotkeys.faction_region` | `str` | Key name for Faction Region selection (default `"f2"`) |
-| `sounds.alarm` | `str` | Absolute path to a custom enemy alarm WAV; empty = use bundled `alarm.wav` |
-| `sounds.faction` | `str` | Absolute path to a custom faction alarm WAV; empty = use bundled `faction.wav` |
-| `profiles` | `dict` | Named detection profile snapshots: `{name: {full settings copy}}` |
-| `image_thresholds` | `dict` | Per-template override: `{"image_1.png": 80}` or `null` (null = use global `detectionscale`) |
-| `intelligence.zkillboard_enabled` | `bool` | Fetch recent kills on Enemy alarm via ESI + Zkillboard |
-| `intelligence.zkillboard_cooldown` | `int` | Seconds between Zkillboard lookups for the same system (default 300) |
-| `intelligence.intel_log_enabled` | `bool` | Tail EVE chat log file for intel channel messages |
-| `intelligence.intel_log_channel` | `str` | Partial filename to match the intel channel log (e.g. `"Intel"`) |
+### Storage locations (`platformdirs.user_config_dir("evealert")`)
 
-> **Schema drift note:** the JSON block above reflects the v2.5-era core. Since
-> then `DEFAULT_SETTINGS` (in `evealert/menu/setting.py` — always the source of
-> truth) has grown these additional top-level blocks:
-> `cooldown_timer_enemy`, `cooldown_timer_faction`, `server.webhook_template`,
-> `webhooks` (per-type URLs + min_count), `esi`, `threat_tiers`, `plugins`,
-> `web_ui`, `adjacent`, `dscan`, `kos`, `kos_list`, `push`, `notifications`,
-> `wormhole`, `fleet`, `esi_oauth`. See
-> [docs/FEATURES.md](docs/FEATURES.md) for what each block controls and where
-> it is consumed.
-
-### Storage Locations
-
-`get_settings_path()` uses `platformdirs.user_config_dir("evealert")`:
-
-| Platform | Path |
-|----------|------|
-| Windows | `%APPDATA%\evealert\settings.json` |
-| macOS | `~/Library/Application Support/evealert/settings.json` |
-| Linux | `~/.config/evealert/settings.json` |
-
-Log files are stored in a `logs/` subdirectory alongside `settings.json`.
-
-### Save vs. Load
-
-- `load_settings()` — reads JSON, merges with defaults, populates GUI widgets. **Read-only; does not write.**
-- `save_settings(settings)` — writes dict as JSON, calls `apply_settings()`. Only called on explicit user Save or overlay region write.
-- `save()` — reads widget state, builds dict, calls `save_settings()`. Sets `self.changed = True`.
-- `apply_settings_runtime()` — pushes values directly to running `AlertAgent` without disk write.
-
-### Version Migration
-
-`merge_settings_with_defaults()` recursively fills missing keys from `DEFAULT_SETTINGS`, so new schema keys are back-filled automatically on upgrade.
+| Item | Windows path |
+|---|---|
+| Settings | `%APPDATA%\evealert\settings.json` |
+| Lifetime stats | `%APPDATA%\evealert\statistics.json` |
+| Session reports | `%APPDATA%\evealert\sessions\` |
+| SSO token (0600) | `%APPDATA%\evealert\esi_token.json` |
+| User templates | `%APPDATA%\evealert\img\` |
+| Plugins | `%APPDATA%\evealert\plugins\` |
+| Logs | `%APPDATA%\evealert\logs\` |
 
 ---
 
 ## 6. Detection Pipeline
 
-Each detection cycle runs every `VISION_SLEEP_INTERVAL = 0.1 s`:
+Each cycle (`VISION_SLEEP_INTERVAL = 0.1 s`): mss screenshot of the region →
+`Vision.find()` template match (`TM_CCOEFF_NORMED`, per-image threshold
+overrides, `cv.groupRectangles`) → `self.enemy` boolean → `run()` →
+`_should_alarm_enemy()` dedup (position-quantized `_EnemySighting` records with
+optional rearm, #100/#144) → `alarm_detection()`:
 
-1. **Screenshot** — `WindowCapture.get_screenshot_value(y1, x1, x2, y2)` → `(H, W, 3)` NumPy array (alpha dropped)
-2. **Template loading** — `Vision.__init__` pre-loads all `image_*` / `faction_*` files from `evealert/img/`
-3. **Channel alignment** — both haystack and needle converted to BGR, dtypes aligned
-4. **Normalisation** — `cv.normalize(img, None, 0, 255, cv.NORM_MINMAX)` on both
-5. **Template match** — `cv.matchTemplate(haystack_norm, needle_norm, cv.TM_CCOEFF_NORMED)` → confidence heatmap
-6. **Threshold filter** — `detectionscale` integer ÷ 100, clamped to `[0.1, 1.0]`
-7. **Group rectangles** — `cv.groupRectangles` merges overlapping hits
-8. **Result** — non-empty list = detection positive
+log → stats (+persist) → TTS → automation webhook POST → sound (≤3 plays then
+cooldown) → Discord webhooks (all-events + per-type) → push → screenshot →
+escalation counter → plugins → zKillboard kills → ESI augmentation
+(joiner intel, KOS, standings/ally filter, WH-drop, fleet comp, threat score).
 
-Alarm dispatch: `run()` checks `self.enemy` / `self.faction` booleans (set by vision tasks) → `alarm_detection()` → log message + `AlarmStatistics.add_alarm()` + `play_sound()` + `send_webhook_message()`.
+D-scan, intel channels, adjacent systems, Thera, sov, peak-hours, and killmail
+monitors run as independent asyncio tasks started in `AlertAgent.start()` per
+their settings toggles, all cancelled in `stop()`.
 
 ---
 
 ## 7. Resource Path Resolution
 
-`get_resource_path(relative_path)` is the **only** correct way to locate bundled assets.
-
-```
-frozen (sys.frozen == True, PyInstaller)
-  → base = sys._MEIPASS  (onefile: temp extract dir; onedir: app dir)
-  → return base / relative_path
-
-development
-  → strip leading "evealert/" if present
-  → return PACKAGE_ROOT / stripped_path
-```
-
-### PyInstaller `--add-data` mapping
-
-The destination must match what `get_resource_path()` requests:
-
-| Argument | Resolves under `_MEIPASS` |
-|----------|--------------------------|
-| `evealert/img;img` (Windows `;`) | `_MEIPASS/img/` |
-| `evealert/sound;sound` (Windows) | `_MEIPASS/sound/` |
-| `evealert/img:img` (macOS `:`) | `_MEIPASS/img/` |
-| `evealert/sound:sound` (macOS) | `_MEIPASS/sound/` |
-
-**Never** use `__file__`-relative paths for assets. Always use `get_resource_path()`.
+`get_resource_path(relative_path)` is the **only** correct way to locate
+bundled assets (PyInstaller `sys._MEIPASS`-aware; strips a leading `evealert/`
+in dev). PyInstaller `--add-data` targets must match what callers request:
+`evealert/img;img`, `evealert/sound;sound`, and the Qt stylesheet
+`evealert/ui/theme.qss;ui`. **Never** use `__file__`-relative asset paths.
 
 ---
 
 ## 8. Release Process
 
-Push a commit tagged `v*.*.*` — GitHub Actions `release.yml` fires automatically.
+Push a tag `v*.*.*` — GitHub Actions `release.yml` builds the Windows exe:
 
-**Windows build** (`windows-latest`, Python 3.12):
 ```
 pyinstaller --onefile --noconsole --name EVE-Alert
   --icon evealert/img/eve.ico
   --add-data "evealert/img;img"
   --add-data "evealert/sound;sound"
+  --add-data "evealert/ui/theme.qss;ui"
   main.py
 ```
 
-**macOS build** (`macos-latest`, Python 3.12, requires `brew install portaudio`):
-```
-pyinstaller --windowed --name "EVE Alert"
-  --icon evealert/img/eve.png
-  --add-data "evealert/img:img"
-  --add-data "evealert/sound:sound"
-  main.py
-→ hdiutil create → EVE-Alert-macOS.dmg
-```
-
-**Local:** `make build-windows` / `make build-macos`
+Local: `make build-windows`. (macOS build targets were retired at v5.)
 
 ---
 
 ## 9. Development Workflow
 
 ```bash
-pip install -e ".[dev]"      # install test deps
-pre-commit install            # install git hooks
-make check                    # lint + tests (run before every push)
-make test                     # pytest with coverage only
-make lint                     # pre-commit on all files
+pip install -e ".[dev]"      # test deps (respx, pytest, PySide6, …)
+pre-commit install
+make check                    # lint + tests — run before every push
+make test                     # pytest with coverage
 ```
+
+GUI tests run headless with `QT_QPA_PLATFORM=offscreen`.
+
+⚠ Until #159 lands, some tests write to the REAL user config dir — see that
+issue for the isolation fixture spec.
 
 ---
 
 ## 10. Known Conventions
 
-### Thread safety shorthand
-
-```python
-# From alert thread — schedule GUI update on main thread
-self.main.after(0, lambda: self.main.write_message("msg", "green"))
-```
-
-### Detection threshold
-
-UI stores `int` 0–100. Vision code converts: `max(min(value / 100, 1.0), 0.1)`.
-
-### Volume
-
-Settings store `int` 0–100. Agent stores `float` 0.0–1.0: `volume / 100.0`.
-
-### Platform conditionals
-
-```python
-import platform
-if platform.system() == "Windows":
-    # Windows-specific code
-```
-
-Platform-conditional pixel offsets in `overlay.py`:
-- `x_offset = -10` on Windows (DWM border), `0` on macOS
-- `y_offset = +30` on Windows (title bar), `0` on macOS
-
-### Sound playback — non-blocking
-
-```python
-sd.play(data, samplerate)
-await loop.run_in_executor(None, sd.wait)  # wait in thread pool
-```
-
-### Log field convention
-
-`write_message()` inserts at `"1.0"` (newest first) and trims to 200 lines.
-
-### Settings `changed` flag
-
-`run()` polls `self.main.menu.setting.is_changed` every cycle, reloads settings if True, then clears the flag. This is the hot-reload mechanism — no restart needed when the user clicks Apply.
+- **Detection threshold:** UI stores int 0–100; vision converts to `[0.1, 1.0]`.
+- **Volume:** settings int 0–100 → engine float 0.0–1.0.
+- **Sound playback:** `sd.play(...)` then `await loop.run_in_executor(None, sd.wait)`.
+- **Log pane:** appends at bottom, 500-block cap, auto-scroll only when already
+  at bottom; colors via tags `normal|green|red|yellow|cyan` mapped in
+  `theme.LOG_COLORS`. Every line also mirrors to the web-server buffer.
+- **External HTTP:** every `httpx.AsyncClient` gets
+  `headers=http_common.DEFAULT_HEADERS` (merge for auth headers). zKillboard
+  list responses must pass through `clean_zkb_entries()` (the API returns
+  `[null]` for empty sets, and page size caps at ~200).
+- **Name→ID resolution:** only via `universe.resolve_ids()`
+  (`POST /universe/ids/`); the old ESI `/search/` endpoints are gone.
+- **QSS variants:** `widget.setProperty("class", "danger")` then
+  `style().unpolish(w); style().polish(w)` to restyle live widgets.
+- **Platform conditionals:** `platform.system() == "Windows"`.

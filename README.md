@@ -100,11 +100,10 @@ A second, independent region (Faction Region) watches for faction spawn or other
 
 | Requirement | Detail |
 |---|---|
-| Python | 3.10, 3.11, or 3.12 |
-| OS | Windows 10/11 (primary), macOS 12+ (supported) |
+| Python | 3.10, 3.11, or 3.12 (source installs only — releases bundle Python) |
+| OS | Windows 10/11. (macOS support ended with v5.0; running from source on macOS is untested and unsupported) |
 | Display scaling | Must be set to **100%** in OS Display Settings; other values cause region misalignment |
 | Audio | A default audio output device must be present |
-| macOS only | PortAudio must be installed separately (`brew install portaudio`) |
 
 ---
 
@@ -113,10 +112,8 @@ A second, independent region (Faction Region) watches for faction spawn or other
 ### Option A — Pre-built release (recommended for non-developers)
 
 1. Go to the [Releases page](https://github.com/bluhayz/EVE-Alert/releases).
-2. Download the latest `EVE-Alert.exe` (Windows) or `EVE-Alert.dmg` (macOS).
+2. Download the latest `EVE-Alert.exe`.
 3. Run it — no Python installation required.
-
-> **macOS note:** Right-click and choose "Open" the first time to bypass Gatekeeper, and grant Accessibility permissions for the global hotkeys (see [macOS Setup](#macos-setup)).
 
 ### Option B — From source
 
@@ -216,25 +213,6 @@ To use a custom sound, open **Settings** and click **Browse Alarm...** or **Brow
 
 ---
 
-## macOS Setup
-
-**PortAudio (required for audio):**
-
-```bash
-brew install portaudio
-```
-
-Without PortAudio, `sounddevice` cannot initialize and EVE Alert will show a warning and run without audio.
-
-**Accessibility permission (required for F1/F2 hotkeys):**
-
-1. Open **System Settings > Privacy & Security > Accessibility**.
-2. Add the EVE Alert app (or your terminal if running from source).
-
-Without this permission, the Config Mode hotkeys will not work.
-
----
-
 ## Development
 
 ### Setup
@@ -278,13 +256,8 @@ make build-windows
 # → dist/EVE-Alert.exe
 ```
 
-**macOS:**
-
-```bash
-pip install ".[build-macos]"
-make build-macos
-# → EVE-Alert-macOS.dmg
-```
+> macOS builds were retired with the v5.0 PySide6 migration; the release
+> pipeline is Windows-only.
 
 ---
 
@@ -292,7 +265,7 @@ make build-macos
 
 ```
 EVE-Alert/
-├── main.py                         # Entry point
+├── main.py                         # Entry point (launches the PySide6 app)
 ├── pyproject.toml                  # Package metadata, dependencies, build config
 ├── COCO.md                         # AI agent architecture context document
 ├── CHANGELOG.md
@@ -303,53 +276,71 @@ EVE-Alert/
 │
 ├── evealert/
 │   ├── __init__.py                 # Version string (__version__)
+│   ├── bridge.py                   # UIBridge protocol — engine's only view of the UI
 │   ├── constants.py                # All magic numbers and tuneable defaults
 │   ├── exceptions.py               # Custom exception types
 │   ├── hotkeys.py                  # Hotkey parsing and matching helpers
 │   ├── statistics.py               # Detection counter / statistics model
-│   ├── tray.py                     # System-tray integration (pystray)
+│   │
+│   ├── data/
+│   │   └── ship_classes.py         # D-scan ship threat classification map (v6.0)
 │   │
 │   ├── manager/
 │   │   └── alertmanager.py         # Core engine: vision loops, alarms, all intel task wiring
 │   │
-│   ├── menu/
-│   │   ├── main.py                 # Main window and button layout
-│   │   ├── config.py               # Config Mode window, EVE window auto-detect
+│   ├── ui/                         # PySide6 interface (v5.0+)
+│   │   ├── app.py                  # QApplication bootstrap + theme loading
+│   │   ├── main_window.py          # Main window, hotkey routing, engine wiring
+│   │   ├── qt_bridge.py            # UIBridge → Qt signals (thread-safe engine→UI)
+│   │   ├── settings_dialog.py      # Registry-generated settings form + profiles + SSO
+│   │   ├── config_dialog.py        # Config Mode / region selection guidance
+│   │   ├── region_overlay.py       # Fullscreen drag-to-select overlay (QRubberBand)
+│   │   ├── statistics_window.py    # Live stats, sessions, threat heatmap tabs
 │   │   ├── image_manager.py        # Add/remove/preview custom template images
-│   │   ├── setting.py              # Settings dialog + DEFAULT_SETTINGS schema
-│   │   ├── statistics.py           # Statistics window (live stats + sessions tab)
-│   │   └── threshold_editor.py     # Per-image threshold editor
+│   │   ├── threshold_editor.py     # Per-image threshold editor
+│   │   ├── notification_wizard.py  # Guided Telegram/Pushover/ntfy setup
+│   │   ├── tray.py                 # System tray (QSystemTrayIcon)
+│   │   └── theme.py / theme.qss    # Design tokens + stylesheet
 │   │
 │   ├── settings/
+│   │   ├── store.py                # SettingsStore + DEFAULT_SETTINGS (GUI-free)
+│   │   ├── fields.py               # FieldSpec registry driving the settings form
 │   │   ├── helper.py               # Resource path resolution (dev vs. PyInstaller)
 │   │   ├── logger.py               # Rotating file + console logger setup
 │   │   ├── stats_store.py          # Persistent lifetime stats + session reports
 │   │   └── validator.py            # Settings schema validation
 │   │
 │   ├── tools/
-│   │   ├── dscan_watcher.py        # D-scan log tail + ship threat classification
-│   │   ├── esi_auth.py             # EVE SSO OAuth2 + authed ESI helpers (v4.0)
-│   │   ├── esi_standings.py        # Public-ESI pilot intel + Local join parser
-│   │   ├── fleet_context.py        # Fleet composition, TZ profile, killmail monitor
-│   │   ├── intel_watcher.py        # EVE chat log tail watcher
-│   │   ├── kos_checker.py          # CVA / custom KOS API checks
-│   │   ├── neighbor_monitor.py     # Adjacent-system kill polling
-│   │   ├── overlay.py              # Region-selection marquee overlay
-│   │   ├── plugin_loader.py        # User plugin discovery and hook dispatch
-│   │   ├── push_notifier.py        # Telegram / Pushover / ntfy push channels
-│   │   ├── universe.py             # System cache, jump-graph BFS, sov, route threat
-│   │   ├── update_checker.py       # GitHub Releases version check
 │   │   ├── vision.py               # OpenCV template matching engine
-│   │   ├── web_server.py           # Localhost status dashboard + JSON API
-│   │   ├── window_finder.py        # Cross-platform EVE window detection
 │   │   ├── windowscapture.py       # mss-based screen region capture
-│   │   ├── wormhole.py             # Thera monitor, WH class, drop heuristic
-│   │   └── zkillboard.py           # Zkillboard + ESI kill lookup
+│   │   ├── window_finder.py        # EVE client window detection
+│   │   ├── http_common.py          # Shared User-Agent / headers for all external HTTP
+│   │   ├── zkillboard.py           # zKillboard kill lookups (+ [null] normalization)
+│   │   ├── esi_standings.py        # Public-ESI pilot intel + Local join parser
+│   │   ├── esi_auth.py             # EVE SSO OAuth2 (PKCE) + authed ESI helpers
+│   │   ├── universe.py             # System cache, jump-graph BFS, sov, route threat
+│   │   ├── neighbor_monitor.py     # Adjacent-system kill polling
+│   │   ├── dscan_watcher.py        # D-scan tail: tiers, ship classes, probes, cyno, sigs
+│   │   ├── intel_watcher.py        # EVE chat log tail watcher
+│   │   ├── intel_parser.py         # Free-text intel → structured reports (v6.0)
+│   │   ├── kos_checker.py          # KOS API checks (CVA legacy) + local list
+│   │   ├── push_notifier.py        # Telegram / Pushover / ntfy push channels
+│   │   ├── wormhole.py             # Thera monitor (Eve-Scout), WH class, drop heuristic
+│   │   ├── fleet_context.py        # Fleet composition, TZ profile, killmail monitor
+│   │   ├── threat_score.py         # Composite 1–10 threat score (v6.0)
+│   │   ├── threat_heatmap.py       # Constellation kill histograms (v6.1)
+│   │   ├── space_profiles.py       # F3 space-type presets (v6.0)
+│   │   ├── tts.py                  # Text-to-speech alerts (pyttsx3, v6.0)
+│   │   ├── ocr_local.py            # Optional Tesseract pilot-name OCR (v4.1)
+│   │   ├── web_server.py           # Localhost dashboard + JSON API (+ /api/alarm/latest)
+│   │   ├── net_safety.py           # SSRF/localhost guards for user-supplied URLs
+│   │   ├── plugin_loader.py        # User plugin discovery and hook dispatch
+│   │   └── update_checker.py       # GitHub Releases version check
 │   │
 │   ├── img/                        # Bundled template and UI images
 │   └── sound/                      # Bundled audio files
 │
-└── tests/                          # pytest suite (9 modules; GUI + newer intel tools untested)
+└── tests/                          # pytest suite (330+ tests across ~30 modules)
 ```
 
 ## Documentation
@@ -394,10 +385,24 @@ Set `EVEALERT_DEBUG=1` before launching to enable verbose logging from process s
 
 ## Known Issues & Limitations
 
-- **EVE SSO login requires your own EVE developer application.** The bundled default client ID is a non-functional placeholder, so ESI OAuth features (personal standings auto-classify, fleet membership display, structure fuel warnings) require registering an application at the [EVE Developers portal](https://developers.eveonline.com/) and entering your client ID under **Settings → Intel & ESI → EVE SSO / ESI OAuth**.
+- **EVE SSO login requires your own EVE developer application.** There is no built-in client ID, so ESI OAuth features (personal standings auto-classify, ally filter, fleet membership, structure fuel warnings) require registering a free application at the [EVE Developers portal](https://developers.eveonline.com/) (callback URL exactly `http://localhost:8888/callback`) and entering your client ID under **Settings → Intel & ESI → EVE SSO / ESI OAuth**.
 - **OCR pilot-name detection requires Tesseract installed separately.** The feature is off by default and degrades to a no-op with a log message when the Tesseract engine is not present on the machine.
+- **CVA KOS lookups are disabled by default** — the public CVA KOS API is offline; use custom KOS URLs or threat tiers instead.
+- The July 2026 code audit identified defects tracked in the [v6.2 — Stabilization milestone](https://github.com/bluhayz/EVE-Alert/milestone/21) — notably: F1/F2 can trigger region selection outside Config Mode (#154), the F3 space-profile hotkey is broken (#155), and saving Settings while a named profile is active bakes the profile into your base config (#156). Review that milestone before relying on profiles or the F-key extras.
 
-Found a bug? Please [open an issue](https://github.com/bluhayz/eve-alert/issues) with a diagnostics bundle (**Settings → Alerts & Sound → Diagnostics → Export Diagnostics Bundle**).
+## Roadmap
+
+Planned work is tracked as GitHub milestones with epic issues:
+
+| Milestone | Theme |
+|---|---|
+| [v6.2 — Stabilization & Test Integrity](https://github.com/bluhayz/EVE-Alert/milestone/21) | Fix all audit findings; trustworthy test suite |
+| [v6.3 — UX & Onboarding](https://github.com/bluhayz/EVE-Alert/milestone/22) | First-run wizard, hotkey capture, profile manager, log tooling |
+| [v7.0 — Real-Time Intel Platform](https://github.com/bluhayz/EVE-Alert/milestone/23) | zKillboard RedisQ live killstream, gate-camp detection, route advisor, standings manager |
+| [v7.1 — Multiboxing & Performance](https://github.com/bluhayz/EVE-Alert/milestone/24) | Multi-client support, vision performance pass, dxcam capture backend |
+| [v8.0 — Distribution & Ecosystem](https://github.com/bluhayz/EVE-Alert/milestone/25) | Auto-updater, signed installer + winget, crash reporting, plugin API v2 |
+
+Found a bug? Please [open an issue](https://github.com/bluhayz/EVE-Alert/issues) with a diagnostics bundle (**Settings → Alerts & Sound → Diagnostics → Export Diagnostics Bundle**).
 
 ---
 
