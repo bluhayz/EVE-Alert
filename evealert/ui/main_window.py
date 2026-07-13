@@ -119,6 +119,9 @@ class MainWindow(QMainWindow):
         self.refresh_context_line()
         self._sync_run_state()
 
+        # Auto-show onboarding wizard on first launch (#164)
+        QTimer.singleShot(200, self._maybe_show_onboarding)
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
@@ -391,6 +394,21 @@ class MainWindow(QMainWindow):
             from evealert.ui.statistics_window import StatisticsWindow  # noqa: PLC0415
             self._stats_dlg = StatisticsWindow(self, self.alert.statistics)
         self._stats_dlg.show_window()
+
+    def _maybe_show_onboarding(self) -> None:
+        """Auto-show the onboarding wizard if this is the first run (#164)."""
+        if self.store.get("ui.onboarding_completed", False):
+            return
+        r1 = self.store.get("alert_region_1", {})
+        if r1.get("x", 0) != 0 or r1.get("y", 0) != 0:
+            return  # region already configured — skip wizard
+        self.show_onboarding_wizard()
+
+    def show_onboarding_wizard(self) -> None:
+        """Launch the onboarding wizard (also callable from Settings)."""
+        from evealert.ui.onboarding_wizard import OnboardingWizardDialog  # noqa: PLC0415
+        dlg = OnboardingWizardDialog(self, self.store, self.alert)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Hotkeys

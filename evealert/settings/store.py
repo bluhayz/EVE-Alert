@@ -91,6 +91,7 @@ DEFAULT_SETTINGS: dict = {
     "diagnostics": {"enabled": False},
     "alerts": {"rearm_minutes": 0},
     "automation": {"enabled": False, "webhook_url": ""},
+    "ui": {"onboarding_completed": False},
 }
 
 

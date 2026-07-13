@@ -180,6 +180,13 @@ class SettingsDialog(QDialog):
     def _build_detection_sections(self) -> None:
         det = self._tab_layouts["Detection"]
 
+        # Setup wizard shortcut (#164)
+        wizard_box, wizard_form = _group("Onboarding")
+        wizard_btn = QPushButton("Run Setup Wizard\u2026")
+        wizard_btn.clicked.connect(self._run_setup_wizard)
+        wizard_form.addRow("First-time setup:", wizard_btn)
+        det.addWidget(wizard_box)
+
         # Alert region
         box, form = _group("Alert Region")
         self._alert_x1 = QSpinBox(); self._alert_x1.setRange(0, 9999)
@@ -593,6 +600,12 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
     # Profiles
     # ------------------------------------------------------------------
+
+    def _run_setup_wizard(self) -> None:
+        """Re-launch the onboarding wizard from Settings (#164)."""
+        parent = self.parent()
+        if hasattr(parent, "show_onboarding_wizard"):
+            parent.show_onboarding_wizard()
 
     def _open_profile_manager(self) -> None:
         """Open the Profile Manager dialog (#166)."""
