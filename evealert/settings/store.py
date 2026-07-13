@@ -62,7 +62,8 @@ DEFAULT_SETTINGS: dict = {
         "enabled": False, "max_jumps": 3, "poll_interval": 120,
         "min_kills": 1, "destination_system": "",
     },
-    "dscan": {"enabled": False, "alert_red": True, "alert_orange": False, "alert_probes": True},
+    "dscan": {"enabled": False, "alert_red": True, "alert_orange": False,
+              "alert_probes": True, "alert_new_signatures": True},
     "kos": {"cva_enabled": False, "custom_urls": []},  # CVA KOS domain offline (#135)
     "kos_list": [],
     "push": {

@@ -165,9 +165,10 @@ class DscanWatcher:
     """Async task that tails the EVE D-scan log and fires callbacks.
 
     Callbacks:
-      on_threat(tier, name, threat_class)  — called for each new RED/ORANGE entry
-      on_probe()                           — called when probes detected
-      on_entry(entry: DscanEntry)          — called for every new entry (for timeline)
+      on_threat(tier, name, threat_class)      — called for each new RED/ORANGE entry
+      on_probe()                               — called when probes detected
+      on_entry(entry: DscanEntry)              — called for every new entry (for timeline)
+      on_new_signature(old_count, new_count)   — fired when cosmic-sig count rises (#145)
     """
 
     def __init__(
@@ -175,16 +176,20 @@ class DscanWatcher:
         on_threat: Callable[[str, str, ShipThreatClass], None] = lambda t, n, c: None,
         on_probe: Callable[[], None] = lambda: None,
         on_entry: Callable[[DscanEntry], None] = lambda e: None,
+        on_new_signature: Callable[[int, int], None] = lambda old, new: None,
     ) -> None:
         self._on_threat = on_threat
         self._on_probe = on_probe
         self._on_entry = on_entry
+        self._on_new_signature = on_new_signature
         self._running = False
         self._log_path: Path | None = None
         self._file_pos: int = 0
         self._encoding: str | None = None  # detected once per file from the BOM
         # Track what's currently visible to detect disappearances
         self._visible: set[str] = set()
+        # Cosmic-signature tracking (#145)
+        self._sig_count: int = 0
         # Session timeline
         self.timeline: deque[DscanEntry] = deque(maxlen=_HISTORY_MAXLEN)
 
@@ -276,7 +281,18 @@ class DscanWatcher:
             complete_text = text[: last_nl + 1]
         self._file_pos += len(complete_text.encode(encoding))
 
-        current_scan, probe_detected = self._parse_lines(complete_text)
+        current_scan, probe_detected, sig_count = self._parse_lines(complete_text)
+
+        # Signature delta (#145): fire callback when new sigs appear
+        if read_to_eof and sig_count > self._sig_count:
+            old, new = self._sig_count, sig_count
+            self._sig_count = new
+            try:
+                self._on_new_signature(old, new)
+            except Exception:
+                pass
+        elif read_to_eof:
+            self._sig_count = sig_count
 
         if probe_detected:
             try:
@@ -308,18 +324,23 @@ class DscanWatcher:
             # Accumulate visibility across partial reads without evicting.
             self._visible |= current_scan
 
-    def _parse_lines(self, text: str) -> tuple[set, bool]:
+    def _parse_lines(self, text: str) -> tuple[set, bool, int]:
         """Parse D-scan lines, classifying by the Type column (index 2) and
-        falling back to the object name (index 0). Returns (current_scan set,
-        probe_detected)."""
+        falling back to the object name (index 0).
+        Returns (current_scan set, probe_detected, sig_count)."""
         current_scan: set[str] = set()
         probe_detected = False
+        sig_count = 0
         for line in text.splitlines():
             parts = line.strip().split("\t")
             obj_name = parts[0].strip() if parts else ""
             if not obj_name:
                 continue
             type_name = parts[2].strip() if len(parts) >= 3 else ""
+
+            # Count cosmic signatures (#145)
+            if "cosmic signature" in (type_name or obj_name).lower():
+                sig_count += 1
 
             current_scan.add(obj_name)
             # Ship type (col 2) is the reliable classification source; the name
@@ -350,7 +371,7 @@ class DscanWatcher:
                     self._on_threat(tier, obj_name, threat_class)
                 except Exception:
                     pass
-        return current_scan, probe_detected
+        return current_scan, probe_detected, sig_count
 
     @staticmethod
     def _find_dscan_dir() -> Path | None:

@@ -23,6 +23,8 @@ FIELDS: list = [
               "Alert on ORANGE ships", "dscan_orange_var", False),
     FieldSpec("dscan.alert_probes", "bool", "Detection", "D-Scan Monitor",
               "Alert on probes detected", "dscan_probes_var", True),
+    FieldSpec("dscan.alert_new_signatures", "bool", "Detection", "D-Scan Monitor",
+              "Alert when cosmic signature count increases (possible WH connection)", "dscan_new_sig_var", True),
     # --- Alerts & Sound tab --------------------------------------------------
     FieldSpec("notifications.auto_screenshot", "bool", "Alerts & Sound", "Alarm Options",
               "Auto-screenshot on alarm", "auto_screenshot_var", False),

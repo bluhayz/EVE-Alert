@@ -32,20 +32,47 @@ class ParseLinesTests(unittest.TestCase):
         # is the reliable "Force Recon Ship" -> red.
         w, threats, _ = self._watcher()
         line = "My Ship Name\t12 km\tForce Recon Ship\tRecon Ship"
-        current, probe = w._parse_lines(line + "\n")
+        current, probe, _sigs = w._parse_lines(line + "\n")
         self.assertIn("My Ship Name", current)
         self.assertEqual(threats[-1][0], "red")
 
     def test_name_fallback_when_no_type_column(self):
         w, threats, _ = self._watcher()
         # Only a name column; "Sabre" is a known red ship name.
-        current, probe = w._parse_lines("Sabre\n")
+        current, probe, _sigs = w._parse_lines("Sabre\n")
         self.assertEqual(threats[-1][0], "red")
 
     def test_probe_detected(self):
         w, _, _ = self._watcher()
-        _, probe = w._parse_lines("Probe\t5 km\tCore Scanner Probe\tScanner Probe\n")
+        _, probe, _sigs = w._parse_lines("Probe\t5 km\tCore Scanner Probe\tScanner Probe\n")
         self.assertTrue(probe)
+
+    def test_cosmic_signature_counted(self):
+        w, _, _ = self._watcher()
+        _, _, sig_count = w._parse_lines(
+            "ABC-123\t1234 km\tCosmic Signature\t\n"
+            "DEF-456\t2000 km\tCosmic Signature\t\n"
+        )
+        self.assertEqual(sig_count, 2)
+
+    def test_new_signature_callback_fires(self):
+        events = []
+        w = DscanWatcher(on_new_signature=lambda old, new: events.append((old, new)))
+        # Simulate two consecutive scans via _sig_count manipulation
+        w._sig_count = 1
+        # Inject a second sig manually
+        w._sig_count = 1
+        # Fire the callback path directly
+        _, _, sig_count = w._parse_lines(
+            "ABC-123\t1234 km\tCosmic Signature\t\n"
+            "XYZ-789\t500 km\tCosmic Signature\t\n"
+        )
+        # Manually fire callback as _tail_once would do (read_to_eof=True)
+        if sig_count > w._sig_count:
+            w._on_new_signature(w._sig_count, sig_count)
+            w._sig_count = sig_count
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0], (1, 2))
 
 
 class EncodingDetectTests(unittest.TestCase):

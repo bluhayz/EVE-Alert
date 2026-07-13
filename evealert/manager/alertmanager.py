@@ -226,6 +226,7 @@ class AlertAgent:
         self._dscan_alert_red = True
         self._dscan_alert_orange = False
         self._dscan_alert_probes = True
+        self._dscan_alert_new_sig = True  # (#145)
         self._dscan_watcher = None
         self._dscan_last_classes: set = set()  # ShipThreatClass values seen this cycle
 
@@ -423,6 +424,7 @@ class AlertAgent:
                     on_threat=self._on_dscan_threat,
                     on_probe=self._on_dscan_probe,
                     on_entry=self._on_dscan_entry,
+                    on_new_signature=self._on_dscan_new_signature,
                 )
                 self.loop.create_task(self._dscan_watcher.run())
             # Start web status server if enabled
@@ -632,6 +634,7 @@ class AlertAgent:
             self._dscan_alert_red = bool(ds.get("alert_red", True))
             self._dscan_alert_orange = bool(ds.get("alert_orange", False))
             self._dscan_alert_probes = bool(ds.get("alert_probes", True))
+            self._dscan_alert_new_sig = bool(ds.get("alert_new_signatures", True))
 
             # KOS settings
             kos = settings.get("kos", {})
@@ -1445,6 +1448,18 @@ class AlertAgent:
                 "D-SCAN: PROBES DETECTED — someone is scanning!",
                 "red",
             )
+
+    def _on_dscan_new_signature(self, old_count: int, new_count: int) -> None:
+        """Called when the cosmic signature count increases on D-scan (#145)."""
+        if not self._dscan_alert_new_sig:
+            return
+        delta = new_count - old_count
+        self._ui(
+            self.main.write_message,
+            f"D-SCAN: NEW SIGNATURE — {delta} new cosmic sig(s) ({old_count} → {new_count}) — "
+            "possible wormhole connection!",
+            "red",
+        )
 
     def _on_dscan_entry(self, entry) -> None:
         """Called for every D-scan entry — update last-seen ship class set."""
