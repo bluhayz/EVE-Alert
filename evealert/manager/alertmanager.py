@@ -265,7 +265,10 @@ class AlertAgent:
         self._standings_filter_blues = False  # (#147)
         self._esi_fleet_monitor = False
         self._esi_structure_alerts = False
-        self._esi_standings_cache: dict = {}  # character_id → standing float
+        self._esi_standings_cache: dict = {}
+        # Peak hours monitor (#151)
+        self._peak_hours_warning = True
+        self._peak_threshold_multiplier = 1.5  # character_id → standing float
 
         # v4.1: OCR pilot-name detection (#98)
         self._ocr_enabled = False
@@ -476,6 +479,9 @@ class AlertAgent:
                 or self._esi_structure_alerts
             ):
                 self.loop.create_task(self._esi_deep_integration_start())
+            # Peak hours monitor (#151)
+            if self._peak_hours_warning:
+                self.loop.create_task(self._peak_hours_monitor())
             # Notify plugins that detection has started
             try:
                 from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
@@ -607,6 +613,9 @@ class AlertAgent:
             self._zkillboard_cooldown = int(intel.get("zkillboard_cooldown", 300))
             self._intel_log_enabled = bool(intel.get("intel_log_enabled", False))
             self._intel_log_channel = str(intel.get("intel_log_channel", ""))
+            # Peak hours warning (#151)
+            self._peak_hours_warning = bool(intel.get("peak_hours_warning", True))
+            self._peak_threshold_multiplier = float(intel.get("peak_threshold_multiplier", 1.5))
 
             # ESI augmentation settings
             esi = settings.get("esi", {})
@@ -1652,6 +1661,64 @@ class AlertAgent:
                 await asyncio.sleep(300)  # 5-minute refresh
         except Exception as exc:
             logger.debug("ESI standings monitor error: %s", exc)
+
+    async def _peak_hours_monitor(self) -> None:
+        """Warn the pilot 15 min before a historically dangerous hour (#151).
+
+        Runs hourly; uses the constellation threat heatmap to compare the
+        upcoming hour's kill rate against the 7-day average.  Fires a warning
+        when the ratio exceeds _peak_threshold_multiplier.
+        """
+        while self.running:
+            try:
+                import math as _math  # noqa: PLC0415
+                from datetime import datetime, timezone  # noqa: PLC0415
+                from evealert.tools.threat_heatmap import get_constellation_heatmap  # noqa: PLC0415
+
+                system = self._settings_store.get("server.system", "").strip()
+                if not system or system == "Enter a System Name":
+                    await asyncio.sleep(300)
+                    continue
+
+                heatmap = await get_constellation_heatmap(system, days=7)
+                if not heatmap:
+                    await asyncio.sleep(3600)
+                    continue
+
+                # Aggregate histogram across all systems in the constellation
+                combined = [0] * 24
+                for entry in heatmap.values():
+                    for i, v in enumerate(entry.kill_histogram):
+                        combined[i] += v
+
+                total_kills = sum(combined)
+                if total_kills == 0:
+                    await asyncio.sleep(3600)
+                    continue
+
+                avg_per_hour = total_kills / 24
+                now_utc = datetime.now(timezone.utc)
+                # Check the hour that starts 15 minutes from now
+                next_hour = (now_utc.hour + 1) % 24
+                next_hour_kills = combined[next_hour]
+
+                if avg_per_hour > 0 and (next_hour_kills / avg_per_hour) >= self._peak_threshold_multiplier:
+                    self._ui(
+                        self.main.write_message,
+                        f"\u26a0 PEAK HOURS APPROACHING: hostile activity at {next_hour:02d}:00 UTC "
+                        f"is {int(next_hour_kills / avg_per_hour * 100)}% of daily average "
+                        f"({next_hour_kills} kills vs avg {avg_per_hour:.1f}/h). "
+                        "Consider docking up.",
+                        "yellow",
+                    )
+
+                # Sleep until 15 min before the next hour turn
+                minutes_to_next = 60 - now_utc.minute
+                sleep_secs = max((minutes_to_next - 15) * 60, 60)
+                await asyncio.sleep(sleep_secs)
+            except Exception as exc:
+                logger.debug("Peak hours monitor error: %s", exc)
+                await asyncio.sleep(3600)
 
     async def _thera_monitor(self) -> None:
         """Poll Eve-Scout every 15 min for Thera connections near the configured system."""

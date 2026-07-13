@@ -47,6 +47,8 @@ DEFAULT_SETTINGS: dict = {
         "zkillboard_cooldown": 300,
         "intel_log_enabled": False,
         "intel_log_channel": "",
+        "peak_hours_warning": True,
+        "peak_threshold_multiplier": 1.5,
     },
     "cooldown_timer_enemy": {"value": DEFAULT_COOLDOWN_TIMER},
     "cooldown_timer_faction": {"value": DEFAULT_COOLDOWN_TIMER},

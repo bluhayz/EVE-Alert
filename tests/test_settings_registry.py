@@ -35,7 +35,7 @@ class RegistryIntegrityTests(unittest.TestCase):
 
     def test_kinds_valid(self):
         for f in FIELDS:
-            self.assertIn(f.kind, ("bool", "int", "str"), f.path)
+            self.assertIn(f.kind, ("bool", "int", "str", "float"), f.path)
 
     def test_tabs_declared_in_order(self):
         for f in FIELDS:

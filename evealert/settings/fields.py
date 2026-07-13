@@ -51,6 +51,11 @@ FIELDS: list = [
               "Watch EVE intel chat log", "intel_log_var", False),
     FieldSpec("intelligence.intel_log_channel", "str", "Intel & ESI", "Intelligence",
               "Intel Channel", "intel_channel_entry", ""),
+    # Peak hours warning (#151)
+    FieldSpec("intelligence.peak_hours_warning", "bool", "Intel & ESI", "Intelligence",
+              "Warn before historically dangerous hour (constellation heatmap)", "peak_hours_var", True),
+    FieldSpec("intelligence.peak_threshold_multiplier", "float", "Intel & ESI", "Intelligence",
+              "Peak threshold multiplier (default 1.5 = 150% of daily avg)", "peak_mult_entry", 1.5),
     FieldSpec("esi.enabled", "bool", "Intel & ESI", "ESI Augmentation",
               "Show corp/alliance on Enemy alarm", "esi_enabled_var", False),
     FieldSpec("esi.show_corp", "bool", "Intel & ESI", "ESI Augmentation",
@@ -153,6 +158,9 @@ def apply_registry_fields(obj, settings: dict) -> None:
         value = _get_by_path(settings, spec.path, spec.default)
         if spec.kind == "bool":
             widget.set(bool(value))
+        elif spec.kind == "float":
+            widget.delete(0, "end")
+            widget.insert(0, str(value))
         else:
             widget.delete(0, "end")
             widget.insert(0, str(value))
@@ -173,6 +181,12 @@ def save_registry_fields(obj, settings_out: dict) -> None:
         elif spec.kind == "int":
             raw = str(widget.get()).strip()
             value = int(raw) if raw.lstrip("-").isdigit() else int(spec.default)
+        elif spec.kind == "float":
+            raw = str(widget.get()).strip()
+            try:
+                value = float(raw)
+            except ValueError:
+                value = float(spec.default)
         else:
             value = str(widget.get()).strip()
         _set_by_path(settings_out, spec.path, value)
