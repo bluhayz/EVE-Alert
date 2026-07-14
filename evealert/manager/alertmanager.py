@@ -1141,6 +1141,8 @@ class AlertAgent:
                     )
         except Exception as exc:
             logger.debug("Jump distance lookup failed: %s", exc)
+
+    async def _augment_with_esi(self) -> None:
         """Background task: enriched ESI + Zkillboard pilot intel on Enemy alarm.
 
         Posts per-pilot lines to the log pane covering:
@@ -1167,8 +1169,12 @@ class AlertAgent:
             local_log = find_intel_log(chatlog_dir, "Local") if chatlog_dir else None
             if local_log is not None:
                 try:
-                    with open(local_log, encoding="utf-8", errors="replace") as fh:
-                        lines = fh.readlines()[-50:]
+                    # EVE chat logs are UTF-16 LE; detect via BOM
+                    with open(local_log, "rb") as fh:
+                        raw = fh.read()
+                    enc = "utf-16-le" if raw.startswith(b"\xff\xfe") else "utf-8"
+                    text = raw[2:].decode(enc, errors="replace") if enc == "utf-16-le" else raw.decode(enc, errors="replace")
+                    lines = text.splitlines()[-50:]
                     names = extract_joining_characters(lines)
                 except OSError:
                     names = []

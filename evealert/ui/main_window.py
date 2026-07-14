@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         row1.addWidget(btn_exit)
         root.addLayout(row1)
 
-        # Row 2 — Config Mode | Settings | Statistics
+        # Row 2 — Config Mode | Settings | Statistics | Report Bug | Check for Updates
         row2 = QHBoxLayout()
         self._btn_config = QPushButton("Config Mode")
         self._btn_config.clicked.connect(self._open_config)
@@ -220,7 +220,11 @@ class MainWindow(QMainWindow):
         self._btn_report = QPushButton("Report Bug")
         self._btn_report.clicked.connect(self._open_bug_reporter)
 
-        for btn in (self._btn_config, self._btn_settings, self._btn_stats, self._btn_report):
+        self._btn_check_update = QPushButton("Check for Updates")
+        self._btn_check_update.clicked.connect(self._check_for_updates_manual)
+
+        for btn in (self._btn_config, self._btn_settings, self._btn_stats,
+                    self._btn_report, self._btn_check_update):
             row2.addWidget(btn)
         row2.addStretch()
         root.addLayout(row2)
@@ -437,6 +441,13 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_update_available(self, tag: str) -> None:
         """Show the update notification bar and wire the Update button."""
+        self._reset_update_button()  # re-enable the check button if it was spinning
+
+        if not tag:
+            # Manual check found no update
+            self.append_log(f"EVE Alert is up to date (v{__version__}).", "cyan")
+            return
+
         from evealert.tools.self_updater import is_updatable  # noqa: PLC0415
 
         self._update_label.setText(f"EVE Alert {tag} is available.")
@@ -456,6 +467,38 @@ class MainWindow(QMainWindow):
         # On non-updatable platforms show the bar as info-only (no button)
         self._update_btn.setVisible(is_updatable())
         self._update_bar.show()
+
+    def _check_for_updates_manual(self) -> None:
+        """Manual update check triggered by the 'Check for Updates' button."""
+        import asyncio  # noqa: PLC0415
+        from evealert import __version__  # noqa: PLC0415
+        from evealert.tools.update_checker import check_for_update  # noqa: PLC0415
+
+        self._btn_check_update.setEnabled(False)
+        self._btn_check_update.setText("Checking…")
+
+        async def _check() -> str | None:
+            return await check_for_update(__version__)
+
+        def _run() -> None:
+            try:
+                tag = asyncio.run(_check())
+            except Exception:
+                tag = None
+            # Marshal result back to Qt main thread via the update_available signal
+            self.bridge.update_available.emit(tag or "")
+
+        import threading  # noqa: PLC0415
+        threading.Thread(target=_run, daemon=True, name="eve-update-check").start()
+
+        # Re-enable button after a few seconds regardless of result
+        from PySide6.QtCore import QTimer  # noqa: PLC0415
+        QTimer.singleShot(6_000, self._reset_update_button)
+
+    @Slot()
+    def _reset_update_button(self) -> None:
+        self._btn_check_update.setEnabled(True)
+        self._btn_check_update.setText("Check for Updates")
 
     def _maybe_show_onboarding(self) -> None:
         """Auto-show the onboarding wizard if this is the first run (#164)."""
