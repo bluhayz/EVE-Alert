@@ -1163,10 +1163,20 @@ class AlertAgent:
             )
 
             chatlog_dir = get_eve_chatlog_dir()
+            self._ui(
+                self.main.write_message,
+                f"Intel [ESI]: chatlog dir = {chatlog_dir or 'NOT FOUND'}",
+                "cyan",
+            )
 
             # Gather Local names from the chat log (best-effort — may be absent).
             names: list = []
             local_log = find_intel_log(chatlog_dir, "Local") if chatlog_dir else None
+            self._ui(
+                self.main.write_message,
+                f"Intel [ESI]: Local log = {local_log or 'not found (chatlog dir missing or no Local file)'}",
+                "cyan",
+            )
             if local_log is not None:
                 try:
                     # EVE chat logs are UTF-16 LE; detect via BOM
@@ -1176,34 +1186,70 @@ class AlertAgent:
                     text = raw[2:].decode(enc, errors="replace") if enc == "utf-16-le" else raw.decode(enc, errors="replace")
                     lines = text.splitlines()[-50:]
                     names = extract_joining_characters(lines)
-                except OSError:
+                    self._ui(
+                        self.main.write_message,
+                        f"Intel [ESI]: Local log encoding={enc}, last-50 lines={len(lines)}, "
+                        f"joining characters found: {names or 'none'}",
+                        "cyan",
+                    )
+                except OSError as exc:
+                    self._ui(
+                        self.main.write_message,
+                        f"Intel [ESI]: could not read Local log — {exc}",
+                        "yellow",
+                    )
                     names = []
 
             # v4.1: OCR the configured region and merge detected names (#98).
             if self._ocr_enabled:
                 try:
                     from evealert.tools.ocr_local import (  # pylint: disable=import-outside-toplevel
+                        is_ocr_available,
                         read_local_names,
                         resolve_region,
                     )
 
-                    region = resolve_region(
-                        self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
-                    )
-                    ocr_names = read_local_names(region) if region else []
-                    if ocr_names:
+                    if not is_ocr_available():
                         self._ui(
                             self.main.write_message,
-                            f"OCR detected: {', '.join(ocr_names)}",
+                            "Intel [ESI/OCR]: OCR backend unavailable — skipping capture",
+                            "yellow",
+                        )
+                    else:
+                        region = resolve_region(
+                            self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
+                        )
+                        self._ui(
+                            self.main.write_message,
+                            f"Intel [ESI/OCR]: resolved region = {region or 'INVALID — check OCR region config'}",
                             "cyan",
                         )
-                        for name in ocr_names:
-                            if name not in names:
-                                names.append(name)
+                        ocr_names = read_local_names(region) if region else []
+                        self._ui(
+                            self.main.write_message,
+                            f"Intel [ESI/OCR]: raw OCR names = {ocr_names or 'none detected'}",
+                            "cyan",
+                        )
+                        if ocr_names:
+                            for name in ocr_names:
+                                if name not in names:
+                                    names.append(name)
                 except Exception as exc:
-                    logger.debug("OCR name detection failed: %s", exc)
+                    self._ui(
+                        self.main.write_message,
+                        f"Intel [ESI/OCR]: exception — {exc}",
+                        "yellow",
+                    )
+                    logger.debug("OCR name detection failed: %s", exc, exc_info=True)
+            else:
+                logger.debug("Intel [ESI]: OCR disabled, skipping capture")
 
             if not names:
+                self._ui(
+                    self.main.write_message,
+                    "Intel [ESI]: no pilot names found via Local log or OCR — ESI lookup skipped",
+                    "yellow",
+                )
                 return
 
             # v3.6: WH drop heuristic — count each NEW pilot once (names that
@@ -1224,8 +1270,18 @@ class AlertAgent:
                         break
 
             client = get_esi_client()
+            self._ui(
+                self.main.write_message,
+                f"Intel [ESI]: querying ESI for {len(names[:5])} pilot(s): {', '.join(names[:5])}",
+                "cyan",
+            )
             results = await client.lookup_many(names[:5])
             if not results:
+                self._ui(
+                    self.main.write_message,
+                    "Intel [ESI]: ESI lookup returned no results (network issue or unknown names)",
+                    "yellow",
+                )
                 return
 
             # v3.7: fleet composition analysis (3+ hostiles)
@@ -2033,22 +2089,57 @@ class AlertAgent:
         """
         base = "Enemy Appears!"
         if not self._ocr_enabled:
+            logger.debug("_build_enemy_alarm_text: OCR disabled — using base text")
             return base
         try:
             from evealert.tools.ocr_local import (  # noqa: PLC0415
+                is_ocr_available,
                 read_local_names,
                 resolve_region,
             )
 
+            if not is_ocr_available():
+                self._ui(
+                    self.main.write_message,
+                    "OCR [alarm]: no backend available (Windows.Media.Ocr / Tesseract) — name detection skipped",
+                    "yellow",
+                )
+                return base
+
             region = resolve_region(
                 self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
             )
-            if region:
-                names = read_local_names(region)
-                if names:
-                    return f"{base} — {', '.join(names)}"
+            if not region:
+                self._ui(
+                    self.main.write_message,
+                    f"OCR [alarm]: region is invalid (ocr_region={self._ocr_region}, "
+                    f"alert_region=({self.x1},{self.y1},{self.x2},{self.y2})) — skipped",
+                    "yellow",
+                )
+                return base
+
+            logger.debug("OCR [alarm]: capturing region %s", region)
+            names = read_local_names(region)
+            if names:
+                self._ui(
+                    self.main.write_message,
+                    f"OCR [alarm]: detected pilot(s): {', '.join(names)}",
+                    "cyan",
+                )
+                return f"{base} — {', '.join(names)}"
+            else:
+                self._ui(
+                    self.main.write_message,
+                    f"OCR [alarm]: capture at {region} returned no names (check region config)",
+                    "yellow",
+                )
         except Exception as exc:
-            logger.debug("_build_enemy_alarm_text: OCR failed: %s", exc)
+            self._ui(
+                self.main.write_message,
+                f"OCR [alarm]: exception — {exc}",
+                "yellow",
+            )
+            logger.debug("_build_enemy_alarm_text: OCR failed: %s", exc, exc_info=True)
         return base
 
     async def run(self) -> None:
