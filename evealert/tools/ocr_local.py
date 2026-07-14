@@ -24,6 +24,7 @@ import io
 import logging
 import re
 import sys
+from pathlib import Path
 
 logger = logging.getLogger("alert.ocr")
 
@@ -166,6 +167,29 @@ def _preprocess_for_ocr(pil_img):
         return pil_img  # fallback: return original if preprocessing fails
 
 
+def get_ocr_debug_path() -> Path:
+    """Return the path where the last failed OCR debug screenshot is saved."""
+    from platformdirs import user_config_dir  # noqa: PLC0415
+    return Path(user_config_dir("evealert")) / "ocr_debug_last.png"
+
+
+def _save_ocr_debug_screenshot(raw_img, region: tuple) -> None:
+    """Save *raw_img* as a debug PNG when OCR finds no names.
+
+    The file is always overwritten (keeps only the most recent miss).
+    Never raises — silently logs and returns on any error.
+    """
+    try:
+        path = get_ocr_debug_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw_img.save(str(path))
+        logger.debug(
+            "OCR miss — debug screenshot saved to %s (region %s)", path, region
+        )
+    except Exception as exc:
+        logger.debug("Could not save OCR debug screenshot: %s", exc)
+
+
 # --------------------------------------------------------------------------- #
 # Public helpers
 # --------------------------------------------------------------------------- #
@@ -240,11 +264,12 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
         "width": max(1, right - left),
         "height": max(1, bottom - top),
     }
+    raw_img = None
     try:
         with mss.mss() as sct:
             shot = sct.grab(grab)
-        img = Image.frombytes("RGB", shot.size, shot.rgb)
-        img = _preprocess_for_ocr(img)
+        raw_img = Image.frombytes("RGB", shot.size, shot.rgb)
+        img = _preprocess_for_ocr(raw_img)
     except Exception as exc:
         logger.debug("OCR screen capture failed: %s", exc)
         return []
@@ -262,4 +287,9 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
         except Exception as exc:
             logger.debug("pytesseract recognition failed: %s", exc)
 
-    return parse_eve_names(text)
+    names = parse_eve_names(text)
+    if not names and raw_img is not None:
+        # No names found — save a debug screenshot so the user can check
+        # whether the configured region is pointing at the right area.
+        _save_ocr_debug_screenshot(raw_img, region)
+    return names

@@ -15,11 +15,15 @@ import sys
 import textwrap
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QHBoxLayout,
     QLabel,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -66,6 +70,11 @@ class BugReporterDialog(QDialog):
         self._body_edit.setReadOnly(False)  # allow user to trim sensitive lines
         layout.addWidget(self._body_edit, 1)
 
+        # OCR debug screenshot notice (shown only when a debug file exists)
+        self._screenshot_bar = self._build_screenshot_bar()
+        if self._screenshot_bar:
+            layout.addWidget(self._screenshot_bar)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -73,6 +82,37 @@ class BugReporterDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _build_screenshot_bar(self):
+        """Return a widget showing the OCR debug screenshot path, or None."""
+        try:
+            from evealert.tools.ocr_local import get_ocr_debug_path  # noqa: PLC0415
+            path = get_ocr_debug_path()
+            if not path.exists():
+                return None
+        except Exception:
+            return None
+
+        from PySide6.QtWidgets import QWidget  # noqa: PLC0415
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(0, 2, 0, 2)
+
+        lbl = QLabel(
+            f"<b>OCR debug screenshot</b> available — attach to the issue:<br>"
+            f"<small>{path}</small>"
+        )
+        lbl.setWordWrap(True)
+
+        btn_open = QPushButton("Open folder")
+        btn_open.setFixedWidth(100)
+        btn_open.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        )
+
+        row.addWidget(lbl, 1)
+        row.addWidget(btn_open)
+        return bar
 
     def _populate(self) -> None:
         self._title_edit.setPlainText("Bug: ")
@@ -84,6 +124,7 @@ class BugReporterDialog(QDialog):
         ])
 
         log_text = self._collect_log()
+        debug_screenshot_note = self._collect_ocr_debug_note()
 
         body = textwrap.dedent(f"""\
             ## Environment
@@ -109,6 +150,7 @@ class BugReporterDialog(QDialog):
             {log_text}
             ```
             </details>
+            {debug_screenshot_note}
         """)
         self._body_edit.setPlainText(body)
         self._body = body
@@ -119,6 +161,25 @@ class BugReporterDialog(QDialog):
             return self._log_pane.get_log_text(max_chars=_MAX_LOG_CHARS) or "(no log entries)"
         except Exception:
             return "(log unavailable)"
+
+    def _collect_ocr_debug_note(self) -> str:
+        """Return a Markdown note about the OCR debug screenshot if one exists."""
+        try:
+            from evealert.tools.ocr_local import get_ocr_debug_path  # noqa: PLC0415
+            path = get_ocr_debug_path()
+            if path.exists():
+                import time  # noqa: PLC0415
+                age_s = int(time.time() - path.stat().st_mtime)
+                age_str = f"{age_s // 60} min ago" if age_s >= 60 else f"{age_s}s ago"
+                return (
+                    f"\n## OCR debug screenshot ({age_str})\n"
+                    f"A screenshot of the OCR capture region was saved when names "
+                    f"could not be detected.  Please attach it to this issue:\n"
+                    f"```\n{path}\n```\n"
+                )
+        except Exception:
+            pass
+        return ""
 
     # ------------------------------------------------------------------
     # Public API
