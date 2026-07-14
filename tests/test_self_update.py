@@ -145,8 +145,9 @@ class SelfUpdaterTests(unittest.TestCase):
         script_path = write_swap_script(current, new, 12345, relaunch=True)
         content = script_path.read_text(encoding="utf-8")
         self.assertIn("12345", content)
-        self.assertIn(str(current), content)
-        self.assertIn(str(new), content)
+        # Paths are stored with forward slashes in the script regardless of OS
+        self.assertIn(str(current).replace("\\", "/"), content)
+        self.assertIn(str(new).replace("\\", "/"), content)
         self.assertIn("Start-Process", content)
 
     def test_write_swap_script_no_relaunch(self):
