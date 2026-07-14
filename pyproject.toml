@@ -48,7 +48,8 @@ dev = [
     "pytest-cov>=5",
     "respx>=0.21",
 ]
-# Text-to-speech: pip install ".[tts]"
+# Text-to-speech uses Windows built-in System.Speech via PowerShell — no extra
+# package needed.  pyttsx3 remains an optional fallback: pip install ".[tts]"
 tts = [
     "pyttsx3>=2.90",
 ]

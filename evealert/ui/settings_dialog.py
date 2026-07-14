@@ -785,14 +785,16 @@ class SettingsDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _check_tts(self) -> None:
-        """Test whether pyttsx3 is available and can initialise."""
+        """Test whether Windows TTS (System.Speech) is available."""
         try:
+            import shutil
             from evealert.tools.tts import is_tts_available  # noqa: PLC0415
             if is_tts_available():
-                self._tts_status.setText("\u2713 TTS ready (pyttsx3)")
+                engine = "System.Speech via PowerShell" if shutil.which("powershell") else "pyttsx3"
+                self._tts_status.setText(f"\u2713 TTS ready ({engine})")
                 self._tts_status.setStyleSheet("color: #3FB950;")
             else:
-                self._tts_status.setText("\u2717 pyttsx3 not available  (pip install pyttsx3)")
+                self._tts_status.setText("\u2717 TTS not available (powershell not found)")
                 self._tts_status.setStyleSheet("color: #F85149;")
         except Exception as e:
             self._tts_status.setText(f"\u2717 {e}")

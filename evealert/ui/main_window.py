@@ -436,7 +436,7 @@ class MainWindow(QMainWindow):
             from evealert.tools.threat_score import compute_threat_score  # noqa: PLC0415
 
             if not is_tts_available():
-                self.append_log("Status readout: TTS not available (pip install pyttsx3)", "yellow")
+                self.append_log("Status readout: TTS not available (powershell not found)", "yellow")
                 return
 
             alert = self.alert
