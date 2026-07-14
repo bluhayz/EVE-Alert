@@ -1,19 +1,29 @@
 """OCR-based pilot name detection for EVE Alert (#98).
 
 When an Enemy alarm fires, capture the configured Local-chat region and run
-OCR (Tesseract via pytesseract) to read the pilot name(s) on screen. Parsed
-names are fed into the existing KOS + ESI/Zkillboard intel pipeline.
+OCR to read the pilot name(s) on screen.  Parsed names are fed into the
+existing KOS + ESI/Zkillboard intel pipeline.
 
-This is entirely optional and OFF by default:
-  - pytesseract (a thin wrapper) may be bundled, but the Tesseract *engine*
-    binary must be installed separately by the user (it can't be shipped in a
-    PyInstaller --onefile build).
-  - Every entry point is import-guarded and degrades to a no-op with a log
-    message when pytesseract or the Tesseract binary is unavailable.
+Backend priority (Windows):
+  1. Windows.Media.Ocr  — built into Windows 10 1607+, accessed via the
+     ``winsdk`` package (already a base dependency on win32).  Zero user
+     install required.
+  2. pytesseract + Tesseract binary  — optional fallback; requires the user
+     to install Tesseract separately AND ``pip install ".[ocr]"``.
+
+On non-Windows platforms only pytesseract is attempted.
+
+Every entry point degrades to a no-op with a log message when no backend is
+available.
 """
 
+from __future__ import annotations
+
+import asyncio
+import io
 import logging
 import re
+import sys
 
 logger = logging.getLogger("alert.ocr")
 
@@ -23,47 +33,125 @@ logger = logging.getLogger("alert.ocr")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .'\-]{2,36}$")
 _HAS_LETTER = re.compile(r"[A-Za-z]")
 
-# Cached availability result (None = not yet checked).
-_available: bool | None = None
+# --------------------------------------------------------------------------- #
+# Availability caches
+# --------------------------------------------------------------------------- #
+_winrt_available: bool | None = None
+_tesseract_available: bool | None = None
+
+
+def is_winrt_ocr_available() -> bool:
+    """Return True if Windows.Media.Ocr (winsdk) can be used."""
+    global _winrt_available
+    if _winrt_available is not None:
+        return _winrt_available
+    if sys.platform != "win32":
+        _winrt_available = False
+        return False
+    try:
+        import winsdk.windows.media.ocr as _ocr  # noqa: F401
+
+        engine = _ocr.OcrEngine.try_create_from_user_profile_languages()
+        _winrt_available = engine is not None
+    except Exception as exc:
+        logger.debug("Windows.Media.Ocr unavailable: %s", exc)
+        _winrt_available = False
+    return _winrt_available
+
+
+def is_tesseract_available() -> bool:
+    """Return True if pytesseract AND a working Tesseract binary are present."""
+    global _tesseract_available
+    if _tesseract_available is not None:
+        return _tesseract_available
+    try:
+        import pytesseract  # noqa: F401
+
+        pytesseract.get_tesseract_version()
+        _tesseract_available = True
+    except Exception as exc:
+        logger.debug("pytesseract/Tesseract unavailable: %s", exc)
+        _tesseract_available = False
+    return _tesseract_available
 
 
 def is_ocr_available() -> bool:
-    """Return True if pytesseract AND a working Tesseract binary are present.
+    """Return True if *any* OCR backend is available.
 
-    Result is cached; never raises.
+    Checks Windows.Media.Ocr first, then pytesseract.  Result is cached;
+    never raises.
     """
-    global _available
-    if _available is not None:
-        return _available
-    try:
-        import pytesseract  # pylint: disable=import-outside-toplevel
-
-        pytesseract.get_tesseract_version()
-        _available = True
-    except Exception as exc:  # ImportError, TesseractNotFoundError, etc.
-        logger.debug("OCR unavailable: %s", exc)
-        _available = False
-    return _available
+    return is_winrt_ocr_available() or is_tesseract_available()
 
 
 def reset_availability_cache() -> None:
-    """Clear the cached availability check (used by tests)."""
-    global _available
-    _available = None
+    """Clear all cached availability checks (used by tests)."""
+    global _winrt_available, _tesseract_available
+    _winrt_available = None
+    _tesseract_available = None
 
+
+# --------------------------------------------------------------------------- #
+# OCR helpers
+# --------------------------------------------------------------------------- #
+
+async def _winrt_recognize_async(pil_img) -> str:
+    """Run Windows.Media.Ocr recognition on a PIL image (async, internal)."""
+    import winsdk.windows.graphics.imaging as wgi
+    import winsdk.windows.media.ocr as wmo
+    import winsdk.windows.storage.streams as wss
+
+    # Encode image to BMP in-memory so BitmapDecoder can load it.
+    buf = io.BytesIO()
+    pil_img.save(buf, "BMP")
+    raw = buf.getvalue()
+
+    mem_stream = wss.InMemoryRandomAccessStream()
+    writer = wss.DataWriter(mem_stream)
+    writer.write_bytes(raw)
+    await writer.store_async()
+    writer.detach_stream()
+    mem_stream.seek(0)
+
+    decoder = await wgi.BitmapDecoder.create_async(mem_stream)
+    soft_bmp = await decoder.get_software_bitmap_async()
+
+    engine = wmo.OcrEngine.try_create_from_user_profile_languages()
+    result = await engine.recognize_async(soft_bmp)
+    return result.text
+
+
+def _ocr_with_winrt(pil_img) -> str:
+    """Synchronous wrapper around _winrt_recognize_async."""
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_winrt_recognize_async(pil_img))
+    finally:
+        loop.close()
+
+
+def _ocr_with_tesseract(pil_img) -> str:
+    """Run pytesseract on *pil_img* and return raw text."""
+    import pytesseract  # noqa: PLC0415
+
+    return pytesseract.image_to_string(pil_img)
+
+
+# --------------------------------------------------------------------------- #
+# Public helpers
+# --------------------------------------------------------------------------- #
 
 def parse_eve_names(text: str) -> list[str]:
     """Extract plausible EVE pilot names from raw OCR text.
 
     Splits on line boundaries, trims OCR noise, and keeps tokens that look
     like EVE names (letters/digits/space/.'- , 3–37 chars, at least one
-    letter). De-duplicates while preserving order.
+    letter).  De-duplicates while preserving order.
     """
     names: list[str] = []
     seen: set[str] = set()
     for raw_line in (text or "").splitlines():
         candidate = raw_line.strip()
-        # Collapse internal whitespace runs left by OCR.
         candidate = re.sub(r"\s{2,}", " ", candidate)
         if not candidate or candidate.lower() in seen:
             continue
@@ -82,9 +170,9 @@ def resolve_region(
 ) -> tuple[int, int, int, int] | None:
     """Pick the OCR capture region.
 
-    Uses *override* (x1, y1, x2, y2) when it is non-zero, otherwise falls back
-    to the alert region. Returns a normalized (left, top, right, bottom) tuple
-    with left<right and top<bottom, or None if neither region is usable.
+    Uses *override* (x1, y1, x2, y2) when it is non-zero, otherwise falls
+    back to the alert region.  Returns a normalised (left, top, right, bottom)
+    tuple with left<right and top<bottom, or None if neither region is usable.
     """
     x1, y1, x2, y2 = override
     if not any((x1, y1, x2, y2)):
@@ -99,14 +187,15 @@ def resolve_region(
 def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
     """Capture *region* (left, top, right, bottom) and OCR pilot names from it.
 
-    Returns [] on any failure or when OCR is unavailable — never raises.
+    Backend priority: Windows.Media.Ocr → pytesseract.
+    Returns [] on any failure or when no OCR backend is available — never raises.
     """
     if not is_ocr_available():
         return []
+
     try:
-        import mss  # pylint: disable=import-outside-toplevel
-        import pytesseract  # pylint: disable=import-outside-toplevel
-        from PIL import Image  # pylint: disable=import-outside-toplevel
+        import mss  # noqa: PLC0415
+        from PIL import Image  # noqa: PLC0415
     except Exception as exc:
         logger.debug("OCR imports failed: %s", exc)
         return []
@@ -122,8 +211,21 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
         with mss.mss() as sct:
             shot = sct.grab(grab)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
-        text = pytesseract.image_to_string(img)
     except Exception as exc:
-        logger.debug("OCR capture/recognition failed: %s", exc)
+        logger.debug("OCR screen capture failed: %s", exc)
         return []
+
+    text = ""
+    if is_winrt_ocr_available():
+        try:
+            text = _ocr_with_winrt(img)
+        except Exception as exc:
+            logger.debug("Windows.Media.Ocr recognition failed: %s", exc)
+
+    if not text and is_tesseract_available():
+        try:
+            text = _ocr_with_tesseract(img)
+        except Exception as exc:
+            logger.debug("pytesseract recognition failed: %s", exc)
+
     return parse_eve_names(text)

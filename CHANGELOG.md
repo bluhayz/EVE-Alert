@@ -1,5 +1,32 @@
 # Changelog
 
+## [6.3.6] 2026-07-14
+
+### Changed — Bundled OCR (Windows.Media.Ocr)
+
+- **OCR no longer requires an external Tesseract installation.** On Windows 10
+  1607+ (all modern Windows), the OCR engine is already part of the OS.
+  `winsdk` (a small ~2 MB Microsoft-maintained package) is now a base
+  dependency on Windows (`sys_platform == "win32"`) that provides Python
+  bindings to `Windows.Media.Ocr`.
+
+- `evealert/tools/ocr_local.py` rearchitected with two independent backends:
+  1. **Windows.Media.Ocr** (priority) — `is_winrt_ocr_available()`,
+     `_ocr_with_winrt(pil_img)`.  Runs recognition via an asyncio event loop
+     isolated from the alert daemon loop to avoid conflicts.
+  2. **pytesseract + Tesseract** (fallback) — `is_tesseract_available()`.
+     Unchanged behaviour; requires `pip install ".[ocr]"` plus the Tesseract
+     binary for users on non-Windows platforms or older Windows builds.
+
+- Settings dialog **"Check Tesseract"** button renamed to **"Check OCR"**.
+  Status messages now distinguish the active backend:
+  - `✓ OCR ready (Windows.Media.Ocr — built-in)` — no install needed
+  - `✓ OCR ready (Tesseract 5.x.y)` — Tesseract fallback active
+  - `✗ OCR unavailable` — neither backend found
+
+- `build-windows` extra no longer includes `pytesseract` (not needed in the
+  bundled .exe).
+
 ## [6.3.0] 2026-07-13
 
 ### Added — UX & Onboarding (Epic v6.3)

@@ -38,6 +38,7 @@ dependencies = [
     "PySide6>=6.7,<7",
     "sounddevice==0.5.1",
     "soundfile==0.12.1",
+    "winsdk>=1.0.0b10; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -57,15 +58,16 @@ tts = [
 windows = [
     "pygetwindow>=0.0.9",
 ]
-# OCR name detection (#98). NOTE: also requires the Tesseract engine binary
-# installed separately (e.g. `brew install tesseract` / the Windows installer).
+# OCR name detection (#98).  Windows builds use Windows.Media.Ocr (built-in,
+# no extra install) via the winsdk package already in base dependencies.
+# pytesseract is kept as an optional fallback for non-Windows environments.
 ocr = [
     "pytesseract>=0.3.10",
 ]
 # Install Windows build tools: pip install ".[build-windows]"
+# winsdk is already in base deps (win32 marker); pytesseract kept as fallback.
 build-windows = [
     "pyinstaller==6.11.0",
-    "pytesseract>=0.3.10",
 ]
 # Install macOS build tools: pip install ".[build-macos]"
 build-macos = [
