@@ -91,6 +91,9 @@ class SettingsDialog(QDialog):
     values always reflect the latest saved state.
     """
 
+    # Emitted from OCR test thread → received on Qt main thread
+    _ocr_diag_ready = _Signal(object)  # dict from run_ocr_diagnostic()
+
     def __init__(self, parent, store: SettingsStore):
         super().__init__(parent, Qt.WindowType.Window)
         self.setWindowTitle("EVE Alert — Settings")
@@ -404,12 +407,13 @@ class SettingsDialog(QDialog):
             self._controls[spec.path] = w
 
     def _build_ocr_check_button(self) -> None:
-        """Append an OCR health-check row to the OCR Name Detection section."""
+        """Append OCR health-check and live-test rows to the OCR Name Detection section."""
         key = "Intel & ESI/OCR Name Detection"
         if key not in self._sections:
             return  # section not created yet (no OCR fields in FIELDS)
         form = self._sections[key][1]
 
+        # Row 1: backend availability check
         self._tesseract_status = QLabel("Not checked")
         self._tesseract_status.setProperty("class", "muted")
 
@@ -420,6 +424,23 @@ class SettingsDialog(QDialog):
         row.addWidget(btn)
         row.addWidget(self._tesseract_status, 1)
         form.addRow("Status:", row)
+
+        # Row 2: live capture test (runs full pipeline on the configured region)
+        self._ocr_test_status = QLabel("Not tested")
+        self._ocr_test_status.setProperty("class", "muted")
+        self._ocr_test_status.setWordWrap(True)
+
+        self._btn_ocr_test = QPushButton("Test OCR on Region")
+        self._btn_ocr_test.setToolTip(
+            "Captures the configured OCR region, runs the full pipeline, "
+            "and shows what names were found."
+        )
+        self._btn_ocr_test.clicked.connect(self._run_ocr_test)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(self._btn_ocr_test)
+        row2.addWidget(self._ocr_test_status, 1)
+        form.addRow("Live test:", row2)
 
     # ------------------------------------------------------------------
     # Load / Save
@@ -875,9 +896,133 @@ class SettingsDialog(QDialog):
             )
         self._tesseract_status.setStyleSheet("color: #F85149;")
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _run_ocr_test(self) -> None:
+        """Run the full OCR pipeline on the configured region and show results.
+
+        If no names are found, opens the bug reporter pre-filled with
+        diagnostic information to make issue filing easy.
+        """
+        import sys  # noqa: PLC0415
+        from evealert.tools.ocr_local import (  # noqa: PLC0415
+            resolve_region,
+            run_ocr_diagnostic,
+        )
+
+        # Read the configured OCR region from current settings
+        settings = self._store.load()
+        ocr_cfg = settings.get("ocr", {})
+        ocr_reg = ocr_cfg.get("region", {})
+        override = (
+            int(ocr_reg.get("x1", 0)), int(ocr_reg.get("y1", 0)),
+            int(ocr_reg.get("x2", 0)), int(ocr_reg.get("y2", 0)),
+        )
+        alert_r1 = settings.get("alert_region_1", {})
+        alert_r2 = settings.get("alert_region_2", {})
+        alert_region = (
+            int(alert_r1.get("x", 0)), int(alert_r1.get("y", 0)),
+            int(alert_r2.get("x", 0)), int(alert_r2.get("y", 0)),
+        )
+        region = resolve_region(override, alert_region)
+
+        if region is None:
+            self._ocr_test_status.setText(
+                "✗ No valid region configured — set an Alert Region or OCR Region first."
+            )
+            self._ocr_test_status.setStyleSheet("color: #F85149;")
+            return
+
+        self._btn_ocr_test.setEnabled(False)
+        self._btn_ocr_test.setText("Testing…")
+        self._ocr_test_status.setText(f"Capturing region {region}…")
+        self._ocr_test_status.setStyleSheet("")
+
+        import threading  # noqa: PLC0415
+        def _run() -> None:
+            diag = run_ocr_diagnostic(region)
+            self._ocr_diag_ready.emit(diag)
+
+        self._ocr_diag_ready.connect(self._on_ocr_test_done)
+        threading.Thread(target=_run, daemon=True, name="eve-ocr-test").start()
+
+    def _on_ocr_test_done(self, diag: dict) -> None:
+        """Receive OCR diagnostic result on the Qt main thread."""
+        self._btn_ocr_test.setEnabled(True)
+        self._btn_ocr_test.setText("Test OCR on Region")
+
+        if diag.get("ok"):
+            names = diag["names"]
+            self._ocr_test_status.setText(
+                f"✓ OCR test passed — found {len(names)} name(s): "
+                f"{', '.join(names[:5])}{'…' if len(names) > 5 else ''}"
+            )
+            self._ocr_test_status.setStyleSheet("color: #3FB950;")
+        else:
+            # Build a diagnostics summary to pre-fill the bug reporter
+            import platform, sys  # noqa: E401,PLC0415
+            from evealert import __version__  # noqa: PLC0415
+            lines = [
+                "## OCR Live Test Failure",
+                "",
+                "### Environment",
+                f"EVE Alert   : {__version__}",
+                f"Platform    : {platform.platform()}",
+                f"Python      : {sys.version.split()[0]}",
+                "",
+                "### Pipeline diagnostics",
+                f"Backend used    : {diag.get('backend', 'none')}",
+                f"Raw capture     : mode={diag.get('input_mode')} size={diag.get('input_size')}",
+                f"After preproc   : mode={diag.get('proc_mode')} size={diag.get('proc_size')}",
+                f"Raw OCR text    : {repr(diag.get('raw_text', '')[:300])}",
+                f"Names extracted : {diag.get('names')}",
+                f"Error           : {diag.get('error') or '(none)'}",
+                f"Debug screenshot: {diag.get('debug_path')}",
+            ]
+            diag_text = "\n".join(lines)
+
+            self._ocr_test_status.setText(
+                f"✗ OCR test failed — no names extracted. "
+                f"Backend: {diag.get('backend', 'none')}. "
+                f"Click 'Report Bug' and attach the debug screenshot."
+            )
+            self._ocr_test_status.setStyleSheet("color: #F85149;")
+
+            # Offer to open bug reporter with pre-filled diagnostics
+            from PySide6.QtWidgets import QMessageBox  # noqa: PLC0415
+            mb = QMessageBox(self)
+            mb.setWindowTitle("OCR Test Failed")
+            mb.setText(
+                "OCR captured the region but found no pilot names.\n\n"
+                "Would you like to open the Bug Reporter with full diagnostic "
+                "information pre-filled so you can submit a GitHub issue?"
+            )
+            mb.setDetailedText(diag_text)
+            mb.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            mb.button(QMessageBox.StandardButton.Yes).setText("Open Bug Reporter")
+            if mb.exec() == QMessageBox.StandardButton.Yes:
+                self._open_bug_reporter_with_diag(diag_text)
+
+    def _open_bug_reporter_with_diag(self, prefill_text: str) -> None:
+        """Open the bug reporter dialog with OCR diagnostics pre-filled."""
+        from evealert.ui.bug_reporter import BugReporterDialog  # noqa: PLC0415
+        from PySide6.QtGui import QDesktopServices  # noqa: PLC0415
+        from PySide6.QtCore import QUrl  # noqa: PLC0415
+
+        # Get the main window parent (walk up the parent chain)
+        parent = self.parent()
+        log_pane = None
+        while parent is not None:
+            if hasattr(parent, "_log_pane"):
+                log_pane = parent._log_pane
+                break
+            parent = parent.parent() if hasattr(parent, "parent") else None
+
+        dlg = BugReporterDialog(self, log_pane, extra_body=prefill_text)
+        dlg._title_edit.setPlainText("Bug: OCR live test failed — no names extracted")
+        if dlg.exec():
+            url = dlg.github_url()
+            QDesktopServices.openUrl(QUrl(url))
 
     def show_dialog(self) -> None:
         self.load()

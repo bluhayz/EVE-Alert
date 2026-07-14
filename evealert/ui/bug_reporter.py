@@ -36,12 +36,13 @@ _MAX_LOG_CHARS = 3_000  # GitHub URL length limit is ~8 KB; keep body manageable
 class BugReporterDialog(QDialog):
     """Collect diagnostics and preview the GitHub issue before opening."""
 
-    def __init__(self, parent, log_pane) -> None:
+    def __init__(self, parent, log_pane, extra_body: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("EVE Alert — Report a Bug")
         self.setMinimumWidth(600)
         self.setMinimumHeight(480)
         self._log_pane = log_pane
+        self._extra_body = extra_body
         self._body: str = ""
         self._build_ui()
         self._populate()
@@ -152,6 +153,8 @@ class BugReporterDialog(QDialog):
             </details>
             {debug_screenshot_note}
         """)
+        if self._extra_body:
+            body = body.rstrip() + "\n\n" + self._extra_body + "\n"
         self._body_edit.setPlainText(body)
         self._body = body
 

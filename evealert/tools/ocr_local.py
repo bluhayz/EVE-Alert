@@ -302,3 +302,94 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
         # whether the configured region is pointing at the right area.
         _save_ocr_debug_screenshot(raw_img, region)
     return names
+
+
+# --------------------------------------------------------------------------- #
+# Diagnostic runner
+# --------------------------------------------------------------------------- #
+
+def run_ocr_diagnostic(region: tuple[int, int, int, int]) -> dict:
+    """Run the full OCR pipeline on *region* and return a diagnostic dict.
+
+    Always returns a dict with keys:
+      ok            bool   — True if at least one name was extracted
+      names         list   — names found (may be empty)
+      raw_text      str    — text returned by OCR engine before filtering
+      backend       str    — "winrt" | "tesseract" | "none"
+      input_mode    str    — PIL image mode of the raw capture
+      input_size    tuple  — (width, height) of the raw capture
+      proc_mode     str    — PIL image mode after preprocessing
+      proc_size     tuple  — (width, height) after preprocessing
+      debug_path    str    — path of saved debug screenshot (may be "")
+      error         str    — exception message if something crashed (may be "")
+    """
+    import sys as _sys  # noqa: PLC0415
+
+    result: dict = {
+        "ok": False,
+        "names": [],
+        "raw_text": "",
+        "backend": "none",
+        "input_mode": "",
+        "input_size": (0, 0),
+        "proc_mode": "",
+        "proc_size": (0, 0),
+        "debug_path": "",
+        "error": "",
+    }
+
+    try:
+        import mss  # noqa: PLC0415
+        from PIL import Image  # noqa: PLC0415
+    except Exception as exc:
+        result["error"] = f"import failed: {exc}"
+        return result
+
+    left, top, right, bottom = region
+    grab = {"left": left, "top": top,
+            "width": max(1, right - left), "height": max(1, bottom - top)}
+    try:
+        with mss.mss() as sct:
+            shot = sct.grab(grab)
+        raw_img = Image.frombytes("RGB", shot.size, shot.rgb)
+    except Exception as exc:
+        result["error"] = f"screen capture failed: {exc}"
+        return result
+
+    result["input_mode"] = raw_img.mode
+    result["input_size"] = raw_img.size
+
+    try:
+        proc_img = _preprocess_for_ocr(raw_img)
+        result["proc_mode"] = proc_img.mode
+        result["proc_size"] = proc_img.size
+    except Exception as exc:
+        result["error"] = f"preprocessing failed: {exc}"
+        return result
+
+    raw_text = ""
+    if is_winrt_ocr_available():
+        try:
+            raw_text = _ocr_with_winrt(proc_img)
+            result["backend"] = "winrt"
+        except Exception as exc:
+            result["error"] += f"winrt error: {exc}; "
+
+    if not raw_text and is_tesseract_available():
+        try:
+            raw_text = _ocr_with_tesseract(proc_img)
+            result["backend"] = "tesseract"
+        except Exception as exc:
+            result["error"] += f"tesseract error: {exc}; "
+
+    result["raw_text"] = raw_text
+    names = parse_eve_names(raw_text)
+    result["names"] = names
+    result["ok"] = bool(names)
+
+    # Always save debug screenshot so it can be attached to a bug report
+    debug_path = get_ocr_debug_path()
+    _save_ocr_debug_screenshot(raw_img, region)
+    result["debug_path"] = str(debug_path)
+
+    return result
