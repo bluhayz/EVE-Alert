@@ -57,7 +57,7 @@ REDIRECT_URI: str = _REDIRECT_URI
 # EVE Alert registered client ID.
 # Blank means unconfigured — users must register a free app at
 # https://developers.eveonline.com and provide their own Client ID.
-_DEFAULT_CLIENT_ID = ""
+_DEFAULT_CLIENT_ID = "9a22f2b5ae5c423cb5359ac48fc565a5"
 
 _SCOPES = " ".join(
     [
