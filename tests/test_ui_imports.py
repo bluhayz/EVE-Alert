@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 # All importable (non-dunder) modules under evealert/ui/
 _UI_MODULES = [
     "app",
+    "bug_reporter",
     "config_dialog",
     "hotkey_edit",
     "image_manager",

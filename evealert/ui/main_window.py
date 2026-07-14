@@ -6,8 +6,11 @@ signals, never via direct widget access from the engine thread.
 """
 
 import threading
+import urllib.parse
 
 from PySide6.QtCore import QTimer, Signal, Slot
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -189,7 +192,10 @@ class MainWindow(QMainWindow):
         self._btn_stats = QPushButton("Statistics")
         self._btn_stats.clicked.connect(self._open_statistics)
 
-        for btn in (self._btn_config, self._btn_settings, self._btn_stats):
+        self._btn_report = QPushButton("Report Bug")
+        self._btn_report.clicked.connect(self._open_bug_reporter)
+
+        for btn in (self._btn_config, self._btn_settings, self._btn_stats, self._btn_report):
             row2.addWidget(btn)
         row2.addStretch()
         root.addLayout(row2)
@@ -394,6 +400,14 @@ class MainWindow(QMainWindow):
             from evealert.ui.statistics_window import StatisticsWindow  # noqa: PLC0415
             self._stats_dlg = StatisticsWindow(self, self.alert.statistics)
         self._stats_dlg.show_window()
+
+    def _open_bug_reporter(self) -> None:
+        """Open the bug reporter dialog, then launch a pre-filled GitHub issue."""
+        from evealert.ui.bug_reporter import BugReporterDialog  # noqa: PLC0415
+        dlg = BugReporterDialog(self, self._log_pane)
+        if dlg.exec():
+            url = dlg.github_url()
+            QDesktopServices.openUrl(QUrl(url))
 
     def _maybe_show_onboarding(self) -> None:
         """Auto-show the onboarding wizard if this is the first run (#164)."""
