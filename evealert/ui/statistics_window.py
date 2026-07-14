@@ -209,36 +209,34 @@ class StatisticsWindow(QWidget):
     def _refresh_live(self) -> None:
         s = self._stats
 
-        # Session info
-        session_start = getattr(s, "_session_start", None)
-        if session_start:
-            elapsed = int(__import__("time").time() - session_start)
-            h, m = divmod(elapsed // 60, 60)
-            self._session_info.setText(f"Session started · {h:02d}:{m:02d} elapsed")
+        # Session info — AlarmStatistics uses session_start_time
+        elapsed = int(__import__("time").time() - s.session_start_time)
+        h, m = divmod(elapsed // 60, 60)
+        self._session_info.setText(f"Session started · {h:02d}:{m:02d} elapsed")
 
-        # Cards
+        # Cards — map to actual AlarmStatistics attribute names
         def _c(key: str, value: int) -> None:
             lbl = self._card_labels.get(key)
             if lbl:
                 lbl.setText(str(value))
 
-        _c("lifetime_total", s.lifetime_alarms)
-        _c("lifetime_enemy", getattr(s, "lifetime_enemy_alarms", 0))
-        _c("lifetime_faction", getattr(s, "lifetime_faction_alarms", 0))
-        _c("session_total", s.session_alarms)
-        _c("session_enemy", getattr(s, "session_enemy_alarms", 0))
-        _c("session_faction", getattr(s, "session_faction_alarms", 0))
+        _c("lifetime_total",   s.total_alarms)
+        _c("lifetime_enemy",   s.total_by_type.get("Enemy", 0))
+        _c("lifetime_faction", s.total_by_type.get("Faction", 0))
+        _c("session_total",    s.session_alarms)
+        _c("session_enemy",    s.session_by_type.get("Enemy", 0))
+        _c("session_faction",  s.session_by_type.get("Faction", 0))
 
-        # History — read from stats if available
-        events = getattr(s, "recent_events", [])
-        if events:
+        # History — build from alarm_history deque
+        history = list(s.alarm_history)
+        if history:
             self._history_table.setRowCount(0)
-            for ev in reversed(events):  # newest first
+            for ev in reversed(history):  # newest first
                 row = self._history_table.rowCount()
                 self._history_table.insertRow(row)
-                self._history_table.setItem(row, 0, QTableWidgetItem(ev.get("time", "")))
-                self._history_table.setItem(row, 1, QTableWidgetItem(ev.get("type", "")))
-                self._history_table.setItem(row, 2, QTableWidgetItem(ev.get("details", "")))
+                self._history_table.setItem(row, 0, QTableWidgetItem(ev.formatted_time()))
+                self._history_table.setItem(row, 1, QTableWidgetItem(ev.alarm_type))
+                self._history_table.setItem(row, 2, QTableWidgetItem(""))
 
     # ------------------------------------------------------------------
     # Sessions tab

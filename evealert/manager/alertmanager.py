@@ -286,23 +286,27 @@ class AlertAgent:
     # ------------------------------------------------------------------
 
     def _ui(self, fn: Callable, *args, **kwargs) -> None:
-        """Route GUI calls through UIBridge (bridge-aware shim for legacy call sites).
+        """Call a _MainProxy method from any thread — thread-safe.
 
-        Detects the known GUI functions and delegates to self._bridge so the
-        engine never calls Tk directly.  Unknown callables are dispatched via
-        self.main.after(0, ...) as a safe fallback.
+        In the Qt path, all _MainProxy methods emit signals on QtBridge.
+        Qt signals use queued connections across threads, so calling
+        _MainProxy methods directly from the alert daemon thread is safe:
+        the message is delivered to the Qt main thread by the signal system.
+
+        The previous implementation used `fn is self.main.write_message`
+        (an identity check on a bound method) which is *always False* in
+        Python 3 — bound methods are not cached, so each attribute access
+        creates a new object.  That caused all calls to fall through to the
+        QTimer.singleShot fallback, which may not fire reliably from a
+        non-Qt thread (#190-followup).
+
+        The fix: just call fn(*args) directly.  All callers pass _MainProxy
+        methods that route through thread-safe signals.
         """
-        if fn is self.main.write_message:
-            text = args[0] if args else kwargs.get("text", "")
-            color = args[1] if len(args) > 1 else kwargs.get("color", "normal")
-            self._bridge.log(text, color)
-        elif fn in (self.main.update_alert_button, self.main.update_faction_button):
-            self._bridge.refresh_region_toggles()
-        elif fn is self.main.open_error_window:
-            msg = args[0] if args else ""
-            self._bridge.show_error(msg)
-        else:
-            self.main.after(0, lambda: fn(*args, **kwargs))
+        try:
+            fn(*args, **kwargs)
+        except Exception as exc:
+            logger.debug("_ui dispatch error (%s): %s", getattr(fn, "__name__", fn), exc)
 
     # ------------------------------------------------------------------
     # Properties
