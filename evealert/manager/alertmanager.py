@@ -512,6 +512,8 @@ class AlertAgent:
         ):
             if task is not None and not task.done():
                 task.cancel()
+        # Close the mss capture backend on the thread that created it (#190)
+        self.wincap.close()
         self.loop.stop()
 
     def stop(self) -> None:
@@ -530,6 +532,8 @@ class AlertAgent:
             if monitor is not None:
                 monitor.stop()
         # Cancel raw asyncio tasks and stop the loop on the loop's own thread.
+        # wincap.close() is deferred to _shutdown_loop() so it executes on the
+        # alert thread that owns the mss OS handles (#190).
         if self.loop is not None and self.loop.is_running():
             self.loop.call_soon_threadsafe(self._shutdown_loop)
         try:
@@ -540,22 +544,30 @@ class AlertAgent:
             get_plugin_manager().call("on_stop")
         except Exception:
             pass
-        self._web_server = None
-        self._neighbor_monitor = None
-        self._dscan_watcher = None
-        self._killmail_monitor = None
-        self._intel_watcher = None
-        self.wincap.close()
-        self.currently_playing_sounds.clear()
-        self.alarm_trigger_counts.clear()
-        self.cooldown_timers.clear()
-        self.alert_vision.debug_mode = False
-        self.alert_vision_faction.debug_mode_faction = False
-        self._ui(self.main.update_alert_button)
-        self._ui(self.main.update_faction_button)
-        # Persist stats on every stop so totals survive crashes / forced exits
-        save_lifetime_stats(self.statistics)
-        save_session_report(self.statistics, time.time())
+        # Wrap the rest of cleanup so one failure doesn't abort stats persistence
+        try:
+            self._web_server = None
+            self._neighbor_monitor = None
+            self._dscan_watcher = None
+            self._killmail_monitor = None
+            self._intel_watcher = None
+            # NOTE: wincap.close() is intentionally NOT called here — it runs via
+            # _shutdown_loop() on the alert thread to respect mss thread affinity.
+            self.currently_playing_sounds.clear()
+            self.alarm_trigger_counts.clear()
+            self.cooldown_timers.clear()
+            self.alert_vision.debug_mode = False
+            self.alert_vision_faction.debug_mode_faction = False
+            self._ui(self.main.update_alert_button)
+            self._ui(self.main.update_faction_button)
+        except Exception:
+            logger.exception("Non-fatal error during stop() cleanup")
+        # Persist stats even if cleanup above partially failed
+        try:
+            save_lifetime_stats(self.statistics)
+            save_session_report(self.statistics, time.time())
+        except Exception:
+            logger.exception("Failed to save statistics on stop()")
 
     def clean_up(self) -> None:
         self.stop()
@@ -805,13 +817,20 @@ class AlertAgent:
     async def vision_check(self) -> None:
         """Validate that screenshot capture works for the configured alert region."""
         self.load_settings()
+        # Detect degenerate region before attempting capture
+        if self.x1 == self.x2 or self.y1 == self.y2:
+            self._ui(self.main.write_message,
+                     "Wrong Alert Settings — alert region has zero width or height.", "red")
+            self.check = False
+            return
         screenshot, _ = self.wincap.get_screenshot_value(
             self.y1, self.x1, self.x2, self.y2
         )
         if screenshot is not None:
             self.check = True
         else:
-            self._ui(self.main.write_message, "Wrong Alert Settings.", "red")
+            self._ui(self.main.write_message,
+                     "Screenshot capture failed — check capture permissions or region coords.", "red")
             self.check = False
 
     async def vision_thread(self) -> None:
@@ -831,7 +850,9 @@ class AlertAgent:
             else:
                 self._enemy_points = []
                 self.enemy = False
-                self._ui(self.main.write_message, "Wrong Alert Settings.", "red")
+                self._ui(self.main.write_message,
+                         "Screenshot capture failed — check capture permissions or region coords.",
+                         "red")
                 self.clean_up()
             await asyncio.sleep(VISION_SLEEP_INTERVAL)
 
