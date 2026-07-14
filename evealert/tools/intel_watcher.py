@@ -92,6 +92,7 @@ class IntelWatcher:
         self._running = False
         self._log_path: Path | None = None
         self._file_pos: int = 0
+        self._encoding: str | None = None  # detected once per file from the BOM
         self._on_intel: Callable[[IntelReport], None] | None = on_intel
         self._parse_all: bool = parse_all  # if False, skip clear-only reports
 
@@ -127,6 +128,7 @@ class IntelWatcher:
             if new_path != self._log_path:
                 # New file (or first time) — seek to end to avoid flooding old history
                 self._log_path = new_path
+                self._encoding = None
                 if new_path is not None:
                     try:
                         self._file_pos = new_path.stat().st_size
@@ -147,6 +149,29 @@ class IntelWatcher:
     # Internal
     # ------------------------------------------------------------------
 
+    def _detect_encoding(self) -> str:
+        """Detect the log encoding once from the BOM.
+
+        EVE Online chat logs are UTF-16 LE (with BOM \xff\xfe) on all modern
+        clients.  Some older EVE installs write UTF-8.  We sniff the first
+        4 bytes once per file and cache the result.
+        """
+        if self._encoding:
+            return self._encoding
+        bom = b""
+        try:
+            with open(self._log_path, "rb") as fh:
+                bom = fh.read(4)
+        except OSError:
+            pass
+        if bom.startswith(b"\xff\xfe"):
+            self._encoding = "utf-16-le"
+        elif bom.startswith(b"\xfe\xff"):
+            self._encoding = "utf-16-be"
+        else:
+            self._encoding = "utf-8"
+        return self._encoding
+
     def _tail_once(self) -> None:
         """Read any new bytes from the log file and call the callback per line."""
         assert self._log_path is not None
@@ -162,13 +187,24 @@ class IntelWatcher:
         if size == self._file_pos:
             return  # Nothing new
 
+        # Read raw bytes and decode manually.  Opening a UTF-16 file in text
+        # mode and seeking to an arbitrary byte offset is invalid — only
+        # values returned by tell() are legal seek targets — and causes
+        # misaligned reads that produce squares/replacement characters (#enc).
         try:
-            with open(self._log_path, encoding="utf-8", errors="replace") as fh:
+            with open(self._log_path, "rb") as fh:
                 fh.seek(self._file_pos)
-                chunk = fh.read(min(size - self._file_pos, _MAX_READ))
-                self._file_pos = fh.tell()
+                raw = fh.read(min(size - self._file_pos, _MAX_READ))
         except OSError:
             return
+
+        encoding = self._detect_encoding()
+        # UTF-16 stores each code unit as 2 bytes; keep the chunk length even
+        # so we never split a surrogate pair across poll cycles.
+        if encoding.startswith("utf-16") and len(raw) % 2:
+            raw = raw[:-1]
+        chunk = raw.decode(encoding, errors="replace")
+        self._file_pos += len(raw)
 
         for line in chunk.splitlines():
             line = line.strip()
