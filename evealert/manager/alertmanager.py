@@ -1923,12 +1923,20 @@ class AlertAgent:
             return
 
         system = self._settings_store.get("server.system", "")
-        msg = self._webhook_template.format(
-            alarm_type=alarm_type,
-            system=system,
-            time=time.strftime("%H:%M:%S"),
-            count=self.statistics.session_alarms,
-        )
+        try:
+            msg = self._webhook_template.format(
+                alarm_type=alarm_type,
+                system=system,
+                time=time.strftime("%H:%M:%S"),
+                count=self.statistics.session_alarms,
+            )
+        except (KeyError, ValueError, IndexError) as exc:
+            logger.warning(
+                "Webhook template format error (%s) — using fallback message. "
+                "Check your webhook template in Settings.",
+                exc,
+            )
+            msg = f"{alarm_type} alarm in {system}"
 
         # 1. "All events" webhook (server.webhook) — fires for every alarm type
         if self._webhook and not self.webhook_sent:
@@ -2065,12 +2073,20 @@ class AlertAgent:
                             self._build_enemy_alarm_text(), self._alarm_sound, "Enemy"
                         )
             except Exception as e:
+                # Log the full traceback so we can diagnose the root cause.
                 logger.error("Alert System Error: %s", e, exc_info=True)
-                self.stop()
+                # Show in UI log — include exception type so it's visible in
+                # the log pane without needing to open an external log file.
+                err_summary = f"{type(e).__name__}: {e}"
                 self._ui(
-                    self.main.write_message, "Alert system error — check logs.", "red"
+                    self.main.write_message,
+                    f"Alert error (engine still running): {err_summary} — check logs.",
+                    "red",
                 )
-                return
+                # Do NOT stop the engine for transient errors (webhook template
+                # KeyError, brief audio hiccup, etc.).  Back off for one cycle
+                # to avoid a tight error loop if the error is persistent.
+                await asyncio.sleep(1.0)
 
             if not self.faction:
                 await self.reset_alarm("Faction")
