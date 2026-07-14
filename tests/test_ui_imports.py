@@ -30,6 +30,7 @@ _UI_MODULES = [
     "theme",
     "threshold_editor",
     "tray",
+    "update_dialog",
 ]
 
 

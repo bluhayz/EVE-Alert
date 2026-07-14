@@ -1848,12 +1848,7 @@ class AlertAgent:
 
             tag = await check_for_update(__version__)
             if tag:
-                url = "https://github.com/bluhayz/EVE-Alert/releases/latest"
-                self._ui(
-                    self.main.write_message,
-                    f"Update available: {tag} — {url}",
-                    "yellow",
-                )
+                self._ui(self.main.notify_update, tag)
         except Exception as exc:
             logger.debug("Update check error: %s", exc)
 

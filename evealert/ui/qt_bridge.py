@@ -21,6 +21,8 @@ class QtBridge(QObject):
     error = Signal(str)
     # Emitted when a red (alarm) message is logged — tray icon can flash (#168)
     alarm_fired = Signal(str)
+    # Emitted when a newer GitHub release is detected — carries the tag string
+    update_available = Signal(str)
 
     def log(self, text: str, color: str = "normal") -> None:
         self.log_message.emit(text, color)
@@ -32,3 +34,6 @@ class QtBridge(QObject):
 
     def show_error(self, message: str) -> None:
         self.error.emit(message)
+
+    def notify_update(self, tag: str) -> None:
+        self.update_available.emit(tag)

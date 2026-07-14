@@ -64,6 +64,9 @@ class _MainProxy:
     def open_error_window(self, msg: str) -> None:
         self._bridge.show_error(msg)
 
+    def notify_update(self, tag: str) -> None:
+        self._bridge.notify_update(tag)
+
 
 # ---------------------------------------------------------------------------
 # MainWindow
@@ -100,6 +103,7 @@ class MainWindow(QMainWindow):
         self.bridge.log_message.connect(self.append_log)
         self.bridge.toggles_changed.connect(self.refresh_toggles)
         self.bridge.error.connect(self._on_engine_error)
+        self.bridge.update_available.connect(self._on_update_available)
         # Alarm flash signal — wired after tray is built (see _build_tray)
 
         self._build_ui()
@@ -160,6 +164,27 @@ class MainWindow(QMainWindow):
         self._context_label = QLabel("")
         self._context_label.setProperty("class", "muted")
         root.addWidget(self._context_label)
+
+        # Update notification bar — hidden until an update is detected
+        from PySide6.QtWidgets import QHBoxLayout as _HBox  # noqa: PLC0415
+        self._update_bar = QWidget()
+        self._update_bar.setProperty("class", "card")
+        self._update_bar.setStyleSheet("background:#2d3a2d;border-radius:4px;padding:2px;")
+        _update_row = _HBox(self._update_bar)
+        _update_row.setContentsMargins(8, 4, 8, 4)
+        self._update_label = QLabel("")
+        self._update_label.setStyleSheet("color:#4ade80;")
+        self._update_btn = QPushButton("↑ Update")
+        self._update_btn.setFixedWidth(90)
+        self._update_btn.setStyleSheet("color:#4ade80;")
+        self._update_dismiss = QPushButton("✕")
+        self._update_dismiss.setFixedWidth(28)
+        self._update_dismiss.clicked.connect(lambda: self._update_bar.hide())
+        _update_row.addWidget(self._update_label, 1)
+        _update_row.addWidget(self._update_btn)
+        _update_row.addWidget(self._update_dismiss)
+        self._update_bar.hide()
+        root.addWidget(self._update_bar)
 
         # Row 1 — Start | Stop | [stretch] | Exit
         row1 = QHBoxLayout()
@@ -408,6 +433,29 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             url = dlg.github_url()
             QDesktopServices.openUrl(QUrl(url))
+
+    @Slot(str)
+    def _on_update_available(self, tag: str) -> None:
+        """Show the update notification bar and wire the Update button."""
+        from evealert.tools.self_updater import is_updatable  # noqa: PLC0415
+
+        self._update_label.setText(f"EVE Alert {tag} is available.")
+        self.append_log(
+            f"Update available: {tag} — click '↑ Update' in the toolbar to install.",
+            "yellow",
+        )
+
+        def _open_update() -> None:
+            from evealert.ui.update_dialog import UpdateDialog  # noqa: PLC0415
+            dlg = UpdateDialog(self, tag)
+            if dlg.exec():
+                # Dialog called launch_swap_and_exit(); now we exit the app
+                self.exit_app()
+
+        self._update_btn.clicked.connect(_open_update)
+        # On non-updatable platforms show the bar as info-only (no button)
+        self._update_btn.setVisible(is_updatable())
+        self._update_bar.show()
 
     def _maybe_show_onboarding(self) -> None:
         """Auto-show the onboarding wizard if this is the first run (#164)."""
