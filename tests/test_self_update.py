@@ -165,6 +165,28 @@ class SelfUpdaterTests(unittest.TestCase):
         # Should not raise even when file doesn't exist
         cleanup_temp_download()
 
+    def test_get_current_exe_prefers_argv0_over_sys_executable(self):
+        """get_current_exe() should return the argv[0] path, not sys.executable
+        when argv[0] points to a real .exe (PyInstaller bundle scenario)."""
+        import tempfile, os  # noqa: E401,PLC0415
+        from evealert.tools import self_updater
+
+        # Create a temp .exe so Path.exists() returns True
+        fd, fake_exe = tempfile.mkstemp(suffix=".exe")
+        os.close(fd)
+        try:
+            with mock.patch.object(sys, "platform", "win32"), \
+                 mock.patch.object(sys, "frozen", True, create=True), \
+                 mock.patch.object(sys, "argv", [fake_exe]), \
+                 mock.patch.object(sys, "executable", "C:/Temp/_MEI123/python.exe"):
+                result = self_updater.get_current_exe()
+            self.assertIsNotNone(result)
+            # Should be the argv[0] path, NOT the _MEI temp python.exe
+            self.assertNotIn("_MEI", str(result))
+            self.assertTrue(str(result).endswith(".exe"))
+        finally:
+            os.unlink(fake_exe)
+
 
 # ---------------------------------------------------------------------------
 # QtBridge — update_available signal
