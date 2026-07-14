@@ -132,7 +132,8 @@ class UpdateDialog(QDialog):
         layout.addWidget(self._progress)
 
         self._note = QLabel(
-            "<small>The app will close and relaunch automatically after updating.</small>"
+            "<small>After the update downloads, EVE Alert will close. "
+            "Re-open it to run the new version.</small>"
         )
         self._note.setWordWrap(True)
         layout.addWidget(self._note)
@@ -220,8 +221,8 @@ class UpdateDialog(QDialog):
             )
             return
 
-        self._status.setText("Download complete — relaunching after close…")
-        swap = write_swap_script(current_exe, dest, os.getpid(), relaunch=True)
+        self._status.setText("Download complete — close EVE Alert and re-open it to run the new version.")
+        swap = write_swap_script(current_exe, dest, os.getpid(), relaunch=False)
         launch_swap_and_exit(swap)
         # accept() signals the main window to call exit_app()
         self.accept()
