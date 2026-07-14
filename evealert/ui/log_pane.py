@@ -85,6 +85,18 @@ class LogPane(QWidget):
         if self._matches(entry):
             self._insert_entry(entry)
 
+    def get_log_text(self, max_chars: int = 0) -> str:
+        """Return all buffered log lines as a single string.
+
+        *max_chars* — if > 0, truncate to the most-recent *max_chars*
+        characters with a leading truncation notice.
+        """
+        lines = [e.text for e in self._buffer]
+        text = "\n".join(lines)
+        if max_chars > 0 and len(text) > max_chars:
+            text = "...(truncated)\n" + text[-max_chars:]
+        return text
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------

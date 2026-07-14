@@ -116,13 +116,7 @@ class BugReporterDialog(QDialog):
     def _collect_log(self) -> str:
         """Return recent log lines from the LogPane ring buffer."""
         try:
-            # LogPane stores entries as (text, color) tuples in _entries deque.
-            entries = list(getattr(self._log_pane, "_entries", []))
-            lines = [text for text, _color in entries]
-            combined = "\n".join(lines)
-            if len(combined) > _MAX_LOG_CHARS:
-                combined = "...(truncated — oldest lines removed)...\n" + combined[-_MAX_LOG_CHARS:]
-            return combined or "(no log entries)"
+            return self._log_pane.get_log_text(max_chars=_MAX_LOG_CHARS) or "(no log entries)"
         except Exception:
             return "(log unavailable)"
 
