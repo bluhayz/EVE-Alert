@@ -153,6 +153,9 @@ def _preprocess_for_ocr(pil_img):
       3. Invert — both engines recognise dark-on-white more reliably than
          white-on-dark
       4. Contrast boost — sharpens the text edges after inversion
+      5. Convert to RGBA — Windows.Media.Ocr requires Bgra8 (32-bit) format;
+         an 8-bit grayscale BMP is decoded as Gray8 and OcrEngine silently
+         returns empty text for non-Bgra8 input.
     """
     try:
         from PIL import ImageEnhance, ImageOps  # noqa: PLC0415
@@ -162,6 +165,7 @@ def _preprocess_for_ocr(pil_img):
         img = img.resize((w * 2, h * 2), 1)              # 1 = LANCZOS (PIL constant)
         img = ImageOps.invert(img)                        # white-on-dark → dark-on-white
         img = ImageEnhance.Contrast(img).enhance(2.0)     # boost contrast
+        img = img.convert("RGBA")                         # 32-bit for WinRT Bgra8
         return img
     except Exception:
         return pil_img  # fallback: return original if preprocessing fails
@@ -278,14 +282,19 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
     if is_winrt_ocr_available():
         try:
             text = _ocr_with_winrt(img)
+            logger.debug("WinRT OCR raw output (%d chars): %r", len(text), text[:200])
         except Exception as exc:
             logger.debug("Windows.Media.Ocr recognition failed: %s", exc)
 
     if not text and is_tesseract_available():
         try:
             text = _ocr_with_tesseract(img)
+            logger.debug("Tesseract OCR raw output (%d chars): %r", len(text), text[:200])
         except Exception as exc:
             logger.debug("pytesseract recognition failed: %s", exc)
+
+    if not text:
+        logger.debug("OCR backend(s) returned empty text for region %s", region)
 
     names = parse_eve_names(text)
     if not names and raw_img is not None:
