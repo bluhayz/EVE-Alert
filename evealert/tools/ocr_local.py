@@ -138,20 +138,53 @@ def _ocr_with_tesseract(pil_img) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Image preprocessing
+# --------------------------------------------------------------------------- #
+
+def _preprocess_for_ocr(pil_img):
+    """Preprocess an EVE UI screenshot for better OCR accuracy.
+
+    EVE's Local member list has white/light text on a dark space background.
+    Both Windows.Media.Ocr and Tesseract perform better with:
+      1. Grayscale — removes colour noise from standing icons
+      2. 2× upscale — each name row is only ~20 px tall; upscaling dramatically
+         improves recognition of small text
+      3. Invert — both engines recognise dark-on-white more reliably than
+         white-on-dark
+      4. Contrast boost — sharpens the text edges after inversion
+    """
+    try:
+        from PIL import ImageEnhance, ImageOps  # noqa: PLC0415
+
+        img = pil_img.convert("L")                        # grayscale
+        w, h = img.size
+        img = img.resize((w * 2, h * 2), 1)              # 1 = LANCZOS (PIL constant)
+        img = ImageOps.invert(img)                        # white-on-dark → dark-on-white
+        img = ImageEnhance.Contrast(img).enhance(2.0)     # boost contrast
+        return img
+    except Exception:
+        return pil_img  # fallback: return original if preprocessing fails
+
+
+# --------------------------------------------------------------------------- #
 # Public helpers
 # --------------------------------------------------------------------------- #
 
 def parse_eve_names(text: str) -> list[str]:
     """Extract plausible EVE pilot names from raw OCR text.
 
-    Splits on line boundaries, trims OCR noise, and keeps tokens that look
-    like EVE names (letters/digits/space/.'- , 3–37 chars, at least one
-    letter).  De-duplicates while preserving order.
+    Splits on line boundaries, strips leading non-alphanumeric characters
+    (EVE's standing/corp icons OCR as ■, ★, etc. before each name), trims
+    whitespace noise, and keeps tokens that look like EVE names
+    (letters/digits/space/.'- , 3–37 chars, at least one letter).
+    De-duplicates while preserving order.
     """
     names: list[str] = []
     seen: set[str] = set()
     for raw_line in (text or "").splitlines():
-        candidate = raw_line.strip()
+        # Strip leading non-alphanumeric garbage (standing icons, symbols)
+        # that EVE's UI renders before each pilot name in the Local list.
+        candidate = re.sub(r"^[^A-Za-z0-9]+", "", raw_line.strip())
         candidate = re.sub(r"\s{2,}", " ", candidate)
         if not candidate or candidate.lower() in seen:
             continue
@@ -211,6 +244,7 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
         with mss.mss() as sct:
             shot = sct.grab(grab)
         img = Image.frombytes("RGB", shot.size, shot.rgb)
+        img = _preprocess_for_ocr(img)
     except Exception as exc:
         logger.debug("OCR screen capture failed: %s", exc)
         return []

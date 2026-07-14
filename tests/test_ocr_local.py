@@ -47,6 +47,28 @@ class ParseNamesTests(unittest.TestCase):
     def test_rejects_too_short(self):
         self.assertEqual(parse_eve_names("ab\nX\n"), [])
 
+    def test_strips_eve_standing_icons_before_name(self):
+        """EVE Local list prefixes names with standing icons (■ ★ etc.)
+        that OCR picks up as non-alphanumeric leading chars — they must be
+        stripped so the name is still detected."""
+        # ■ Anulos (hostile standing icon)
+        self.assertIn("Anulos", parse_eve_names("\u25a0 Anulos\n"))
+        # ★ AquaHades Mono (friendly / fleet standing icon)
+        self.assertIn("AquaHades Mono", parse_eve_names("\u2605 AquaHades Mono\n"))
+        # * bluhayz (corp member asterisk)
+        self.assertIn("bluhayz", parse_eve_names("* bluhayz\n"))
+
+    def test_strips_icon_but_keeps_full_name(self):
+        """Multi-word name after icon strip is preserved intact."""
+        text = "\u25a0 Ilex Calix Invicta\n\u2605 Lycan Hunter Wolf\n"
+        names = parse_eve_names(text)
+        self.assertIn("Ilex Calix Invicta", names)
+        self.assertIn("Lycan Hunter Wolf", names)
+
+    def test_pure_icon_line_is_dropped(self):
+        """A line that is nothing but icon characters after stripping is dropped."""
+        self.assertEqual(parse_eve_names("\u25a0\u2605\u2b50\n"), [])
+
 
 # ---------------------------------------------------------------------------
 # resolve_region
