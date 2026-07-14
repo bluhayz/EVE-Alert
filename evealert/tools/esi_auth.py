@@ -358,6 +358,48 @@ async def get_personal_standings(auth: EsiAuth) -> list[dict]:
         return []
 
 
+async def get_character_location(auth: EsiAuth) -> str | None:
+    """Return the solar system name the authenticated character is currently in.
+
+    Makes two ESI calls:
+      1. GET /characters/{id}/location/  (authenticated) → solar_system_id
+      2. GET /universe/systems/{id}/     (public)        → system name
+
+    Returns None on any error or when not authenticated.
+    """
+    if not _HTTPX_AVAILABLE:
+        return None
+    token = await auth.get_token()
+    if not token:
+        return None
+    char_id = auth.character_id
+    if not char_id:
+        return None
+    try:
+        async with httpx.AsyncClient(
+            timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS
+        ) as client:
+            # Step 1: authenticated location endpoint
+            loc_resp = await client.get(
+                f"https://esi.evetech.net/v1/characters/{char_id}/location/",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            loc_resp.raise_for_status()
+            solar_system_id = loc_resp.json().get("solar_system_id")
+            if not solar_system_id:
+                return None
+
+            # Step 2: public system-name lookup
+            sys_resp = await client.get(
+                f"https://esi.evetech.net/v4/universe/systems/{solar_system_id}/",
+            )
+            sys_resp.raise_for_status()
+            return sys_resp.json().get("name")
+    except Exception as exc:
+        logger.debug("ESI location fetch failed: %s", exc)
+        return None
+
+
 async def get_fleet_membership(auth: EsiAuth) -> dict | None:
     """Return current fleet info or None if not in fleet."""
     if not _HTTPX_AVAILABLE:

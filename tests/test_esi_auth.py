@@ -203,3 +203,69 @@ class ClientIdValidationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GetCharacterLocationTests(unittest.IsolatedAsyncioTestCase):
+    """Tests for get_character_location()."""
+
+    async def test_returns_system_name_on_success(self):
+        from evealert.tools.esi_auth import EsiAuth, get_character_location
+
+        auth = mock.MagicMock(spec=EsiAuth)
+        auth.character_id = 12345
+        auth.get_token = mock.AsyncMock(return_value="tok")
+
+        loc_resp = mock.MagicMock()
+        loc_resp.raise_for_status = mock.Mock()
+        loc_resp.json.return_value = {"solar_system_id": 30000142}
+
+        sys_resp = mock.MagicMock()
+        sys_resp.raise_for_status = mock.Mock()
+        sys_resp.json.return_value = {"name": "Jita"}
+
+        client = mock.AsyncMock()
+        client.get = mock.AsyncMock(side_effect=[loc_resp, sys_resp])
+        client.__aenter__ = mock.AsyncMock(return_value=client)
+        client.__aexit__ = mock.AsyncMock(return_value=False)
+
+        with mock.patch("httpx.AsyncClient", return_value=client):
+            result = await get_character_location(auth)
+
+        self.assertEqual(result, "Jita")
+
+    async def test_returns_none_when_no_token(self):
+        from evealert.tools.esi_auth import EsiAuth, get_character_location
+
+        auth = mock.MagicMock(spec=EsiAuth)
+        auth.character_id = 12345
+        auth.get_token = mock.AsyncMock(return_value=None)
+
+        result = await get_character_location(auth)
+        self.assertIsNone(result)
+
+    async def test_returns_none_on_network_error(self):
+        from evealert.tools.esi_auth import EsiAuth, get_character_location
+
+        auth = mock.MagicMock(spec=EsiAuth)
+        auth.character_id = 12345
+        auth.get_token = mock.AsyncMock(return_value="tok")
+
+        client = mock.AsyncMock()
+        client.get = mock.AsyncMock(side_effect=OSError("network down"))
+        client.__aenter__ = mock.AsyncMock(return_value=client)
+        client.__aexit__ = mock.AsyncMock(return_value=False)
+
+        with mock.patch("httpx.AsyncClient", return_value=client):
+            result = await get_character_location(auth)
+
+        self.assertIsNone(result)
+
+    async def test_returns_none_when_character_id_zero(self):
+        from evealert.tools.esi_auth import EsiAuth, get_character_location
+
+        auth = mock.MagicMock(spec=EsiAuth)
+        auth.character_id = 0
+        auth.get_token = mock.AsyncMock(return_value="tok")
+
+        result = await get_character_location(auth)
+        self.assertIsNone(result)

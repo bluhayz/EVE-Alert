@@ -1715,6 +1715,10 @@ class AlertAgent:
                 self._esi_standings_task = self.loop.create_task(
                     self._esi_standings_monitor()
                 )
+
+            # Location auto-detection — always start when ESI is authenticated
+            # so server.system stays current without manual configuration.
+            self.loop.create_task(self._location_monitor())
         except Exception as exc:
             logger.debug("ESI deep integration error: %s", exc)
 
@@ -1750,6 +1754,58 @@ class AlertAgent:
                 await asyncio.sleep(300)  # 5-minute refresh
         except Exception as exc:
             logger.debug("ESI standings monitor error: %s", exc)
+
+    async def _location_monitor(self) -> None:
+        """Poll ESI for the authenticated character's current solar system.
+
+        Runs every 30 s (EVE's minimum location cache TTL).  When the system
+        changes it:
+          - Updates server.system in the settings store
+          - Refreshes the UI context line
+          - Logs the detection and triggers the one-shot system-info display
+
+        Only runs when ESI authentication is active.
+        """
+        _POLL = 30  # seconds
+        _last_system: str | None = None
+        _first_detection = True
+
+        try:
+            from evealert.tools.esi_auth import (  # noqa: PLC0415
+                get_character_location,
+                get_esi_auth,
+            )
+
+            while self.running:
+                auth = get_esi_auth()
+                if not auth.is_authenticated:
+                    await asyncio.sleep(_POLL)
+                    continue
+
+                system_name = await get_character_location(auth)
+
+                if system_name and system_name != _last_system:
+                    _last_system = system_name
+                    # Persist to settings so all consumers pick it up
+                    self._settings_store.set("server.system", system_name)
+                    self._settings_store.save()
+                    # Refresh the UI header
+                    self._ui(self.main.refresh_context_line)
+                    self._ui(
+                        self.main.write_message,
+                        f"System: auto-detected \u2192 {system_name}",
+                        "cyan",
+                    )
+                    # Re-run one-shot system info on system change
+                    if _first_detection:
+                        _first_detection = False
+                        self.loop.create_task(self._display_system_info())
+                    else:
+                        self.loop.create_task(self._display_system_info())
+
+                await asyncio.sleep(_POLL)
+        except Exception as exc:
+            logger.debug("ESI location monitor error: %s", exc)
 
     async def _peak_hours_monitor(self) -> None:
         """Warn the pilot 15 min before a historically dangerous hour (#151).

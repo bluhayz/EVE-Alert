@@ -67,6 +67,9 @@ class _MainProxy:
     def notify_update(self, tag: str) -> None:
         self._bridge.notify_update(tag)
 
+    def refresh_context_line(self) -> None:
+        self._bridge.refresh_context_line()
+
 
 # ---------------------------------------------------------------------------
 # MainWindow
@@ -104,6 +107,7 @@ class MainWindow(QMainWindow):
         self.bridge.toggles_changed.connect(self.refresh_toggles)
         self.bridge.error.connect(self._on_engine_error)
         self.bridge.update_available.connect(self._on_update_available)
+        self.bridge.context_changed.connect(self.refresh_context_line)
         # Alarm flash signal — wired after tray is built (see _build_tray)
 
         self._build_ui()
