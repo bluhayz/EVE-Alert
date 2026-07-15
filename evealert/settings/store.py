@@ -49,6 +49,8 @@ DEFAULT_SETTINGS: dict = {
         "intel_log_channel": "",
         "peak_hours_warning": True,
         "peak_threshold_multiplier": 1.5,
+        "intel_threat_check_enabled": False,
+        "intel_threat_radius": 5,
     },
     "cooldown_timer_enemy": {"value": DEFAULT_COOLDOWN_TIMER},
     "cooldown_timer_faction": {"value": DEFAULT_COOLDOWN_TIMER},

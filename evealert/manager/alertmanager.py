@@ -184,6 +184,8 @@ class AlertAgent:
         self._intel_log_enabled = False
         self._intel_log_channel = ""
         self._intel_watcher = None  # IntelWatcher instance
+        self._intel_threat_check_enabled = False  # #198
+        self._intel_threat_radius = 5             # #198
 
         # ESI augmentation
         self._esi_enabled = False
@@ -633,6 +635,9 @@ class AlertAgent:
             # Peak hours warning (#151)
             self._peak_hours_warning = bool(intel.get("peak_hours_warning", True))
             self._peak_threshold_multiplier = float(intel.get("peak_threshold_multiplier", 1.5))
+            # Intel threat-radius gating (#198)
+            self._intel_threat_check_enabled = bool(intel.get("intel_threat_check_enabled", False))
+            self._intel_threat_radius = int(intel.get("intel_threat_radius", 5))
 
             # ESI augmentation settings
             esi = settings.get("esi", {})
@@ -1132,17 +1137,35 @@ class AlertAgent:
                     f"Intel: {count_str} hostile(s) in {system_str}{ship_str}{dotlan}{pilot_zkb}",
                     "red",
                 )
+                # Log zkillboard links for each mentioned hostile pilot (#197)
+                for hostile in report.mentioned_pilots:
+                    hostile_enc = hostile.replace(" ", "+")
+                    self._ui(
+                        self.main.write_message,
+                        f"  hostile: {hostile} — zkillboard.com/search/#{hostile_enc}",
+                        "orange",
+                    )
                 # Queue a jump-distance lookup if we have a home system
                 home = self._settings_store.get("server.system", "").strip()
                 if home and home != "Enter a System Name" and report.system:
                     self.loop.create_task(
-                        self._lookup_jump_distance(home, report.system)
+                        self._lookup_jump_distance(home, report.system, report.mentioned_pilots)
                     )
         except Exception as exc:
             logger.debug("_on_intel_report failed: %s", exc)
 
-    async def _lookup_jump_distance(self, origin: str, destination: str) -> None:
-        """Compute jump distance between two systems via ESI route and log it."""
+    async def _lookup_jump_distance(
+        self,
+        origin: str,
+        destination: str,
+        mentioned_pilots: list[str] | None = None,
+    ) -> None:
+        """Compute jump distance between two systems via ESI route and log it.
+
+        If intel threat-radius check is enabled (#198) and the destination is
+        within *intel_threat_radius* jumps, trigger _augment_with_esi on the
+        mentioned hostile pilot names.
+        """
         try:
             from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
 
@@ -1159,6 +1182,17 @@ class AlertAgent:
                         f"Intel: {destination} is {label} from {origin}",
                         "cyan",
                     )
+                    # Gate ESI/KOS check by threat radius (#198)
+                    if (
+                        self._intel_threat_check_enabled
+                        and mentioned_pilots
+                        and jumps <= self._intel_threat_radius
+                    ):
+                        logger.debug(
+                            "Intel threat radius: %s is %d jump(s) away, running ESI check on %s",
+                            destination, jumps, mentioned_pilots,
+                        )
+                        self.loop.create_task(self._augment_with_esi(mentioned_pilots))
         except Exception as exc:
             logger.debug("Jump distance lookup failed: %s", exc)
 

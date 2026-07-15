@@ -343,16 +343,16 @@ class SettingsDialog(QDialog):
         box, form = _group("EVE SSO / ESI OAuth")
         self._esi_client_id = QLineEdit()
         self._esi_client_id.setPlaceholderText(
-            "Required \u2014 register a free app at developers.eveonline.com"
+            "Leave blank to use the built-in shared client, or enter your own app ID"
         )
         try:
             from evealert.tools.esi_auth import REDIRECT_URI as _redirect_uri  # noqa: PLC0415
         except Exception:
             _redirect_uri = "http://localhost:8888/callback"
         esi_help = QLabel(
-            "App type: <b>Authentication Only</b> \u2014 "
-            f"Callback: <code>{_redirect_uri}</code> \u2014 "
-            "Client ID must be a 32-character hex string"
+            "A shared client ID is used automatically when the field is left blank. "
+            "Enter your own 32-character hex client ID to use personal rate limits or a custom app. "
+            f"App type: <b>Authentication Only</b> \u2014 Callback: <code>{_redirect_uri}</code>"
         )
         esi_help.setWordWrap(True)
         esi_help.setProperty("class", "muted")
@@ -721,12 +721,7 @@ class SettingsDialog(QDialog):
             self._esi_status_label.setText("ESI unavailable")
 
     def _esi_login(self) -> None:
-        client_id = self._esi_client_id.text().strip()
-        if not client_id:
-            self._esi_status_label.setText(
-                "Enter Client ID first (developers.eveonline.com)"
-            )
-            return
+        client_id = self._esi_client_id.text().strip()  # empty → get_esi_auth uses embedded default
         from evealert.tools.esi_auth import get_esi_auth  # noqa: PLC0415
         self._login_thread = _LoginThread(get_esi_auth(client_id))
         self._login_thread.finished.connect(self._on_login_done)

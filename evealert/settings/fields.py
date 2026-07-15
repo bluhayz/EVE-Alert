@@ -56,6 +56,11 @@ FIELDS: list = [
               "Warn before historically dangerous hour (constellation heatmap)", "peak_hours_var", True),
     FieldSpec("intelligence.peak_threshold_multiplier", "float", "Intel & ESI", "Intelligence",
               "Peak threshold multiplier (default 1.5 = 150% of daily avg)", "peak_mult_entry", 1.5),
+    # Intel threat-radius gating (#198)
+    FieldSpec("intelligence.intel_threat_check_enabled", "bool", "Intel & ESI", "Intelligence",
+              "Run ESI/KOS check on intel hostile names within threat radius", "intel_threat_check_var", False),
+    FieldSpec("intelligence.intel_threat_radius", "int", "Intel & ESI", "Intelligence",
+              "Intel threat radius (jumps, 0-20)", "intel_threat_radius_entry", 5),
     FieldSpec("esi.enabled", "bool", "Intel & ESI", "ESI Augmentation",
               "Show corp/alliance on Enemy alarm", "esi_enabled_var", False),
     FieldSpec("esi.show_corp", "bool", "Intel & ESI", "ESI Augmentation",

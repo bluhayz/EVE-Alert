@@ -277,6 +277,80 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
         # so the background thread gets its own clean event loop.
         self.assertIsNone(self.agent.loop)
 
+    async def test_lookup_jump_distance_triggers_esi_within_radius(self):
+        """When jumps <= threat radius and check enabled, _augment_with_esi is scheduled."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        self.agent._intel_threat_check_enabled = True
+        self.agent._intel_threat_radius = 5
+
+        # Mock loop.create_task so we can capture what coroutines are scheduled
+        scheduled = []
+        mock_loop = MagicMock()
+        mock_loop.create_task = lambda coro: scheduled.append(coro)
+        self.agent.loop = mock_loop
+
+        # Mock universe cache: 3-system route = 2 jumps (within radius of 5)
+        mock_cache = AsyncMock()
+        mock_cache.get_system_id = AsyncMock(side_effect=lambda name: 1001 if name == "Jita" else 1002)
+        mock_cache.get_route = AsyncMock(return_value=[1001, 1003, 1002])  # 2 jumps
+
+        with patch("evealert.tools.universe.get_universe_cache", return_value=mock_cache):
+            await self.agent._lookup_jump_distance("Jita", "Perimeter", ["Roger Booth"])
+
+        # At least one task should have been scheduled (the _augment_with_esi call)
+        self.assertTrue(
+            len(scheduled) >= 1,
+            "Expected _augment_with_esi to be scheduled when within threat radius",
+        )
+        # Close the unawaited coroutines to avoid RuntimeWarning in test output
+        for coro in scheduled:
+            coro.close()
+
+    async def test_lookup_jump_distance_skips_esi_beyond_radius(self):
+        """When jumps > threat radius, _augment_with_esi must NOT be scheduled."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        self.agent._intel_threat_check_enabled = True
+        self.agent._intel_threat_radius = 2
+
+        scheduled = []
+        mock_loop = MagicMock()
+        mock_loop.create_task = lambda coro: scheduled.append(coro)
+        self.agent.loop = mock_loop
+
+        # 5-system route = 4 jumps (beyond radius of 2)
+        mock_cache = AsyncMock()
+        mock_cache.get_system_id = AsyncMock(side_effect=lambda name: 1001 if name == "Jita" else 1002)
+        mock_cache.get_route = AsyncMock(return_value=[1001, 1003, 1004, 1005, 1002])  # 4 jumps
+
+        with patch("evealert.tools.universe.get_universe_cache", return_value=mock_cache):
+            await self.agent._lookup_jump_distance("Jita", "Perimeter", ["Roger Booth"])
+
+        self.assertEqual(scheduled, [], "Expected no ESI task beyond threat radius")
+
+    async def test_lookup_jump_distance_skips_esi_when_disabled(self):
+        """When intel_threat_check_enabled is False, _augment_with_esi is never scheduled."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        self.agent._intel_threat_check_enabled = False
+        self.agent._intel_threat_radius = 10  # large radius, still disabled
+
+        scheduled = []
+        mock_loop = MagicMock()
+        mock_loop.create_task = lambda coro: scheduled.append(coro)
+        self.agent.loop = mock_loop
+
+        mock_cache = AsyncMock()
+        mock_cache.get_system_id = AsyncMock(side_effect=lambda name: 1001 if name == "Jita" else 1002)
+        mock_cache.get_route = AsyncMock(return_value=[1001, 1002])  # 1 jump
+
+        with patch("evealert.tools.universe.get_universe_cache", return_value=mock_cache):
+            await self.agent._lookup_jump_distance("Jita", "Perimeter", ["Roger Booth"])
+
+        self.assertEqual(scheduled, [], "Expected no ESI task when threat check disabled")
+
 
 if __name__ == "__main__":
     unittest.main()
