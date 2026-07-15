@@ -1099,20 +1099,37 @@ class AlertAgent:
     def _on_intel_report(self, report) -> None:
         """Called from IntelWatcher with a parsed IntelReport (#142).
 
-        Logs a structured summary line and schedules an async jump-distance
-        lookup if the user's home system is configured.
+        Logs a structured summary line with dotlan and zkillboard links, and
+        schedules an async jump-distance lookup if the user's home system is
+        configured.
         """
         try:
             if report.is_clear:
                 system_str = f"{report.system} " if report.system else ""
-                self._ui(self.main.write_message, f"Intel: {system_str}CLEAR", "green")
+                dotlan = (
+                    f" — dotlan.net/system/{report.system.replace(' ', '_')}"
+                    if report.system else ""
+                )
+                self._ui(self.main.write_message, f"Intel: {system_str}CLEAR{dotlan}", "green")
             else:
                 count_str = f"{report.hostile_count}" if report.hostile_count else "?"
                 ship_str = f" [{', '.join(report.ships[:3])}]" if report.ships else ""
                 system_str = report.system or "unknown system"
+
+                # Dotlan link for the reported system
+                dotlan = (
+                    f" — dotlan.net/system/{report.system.replace(' ', '_')}"
+                    if report.system else ""
+                )
+                # zkillboard search link for the reporting pilot
+                pilot_zkb = ""
+                if report.pilot:
+                    pilot_enc = report.pilot.replace(" ", "+")
+                    pilot_zkb = f" | reporter: zkillboard.com/search/#{pilot_enc}"
+
                 self._ui(
                     self.main.write_message,
-                    f"Intel: {count_str} hostile(s) in {system_str}{ship_str}",
+                    f"Intel: {count_str} hostile(s) in {system_str}{ship_str}{dotlan}{pilot_zkb}",
                     "red",
                 )
                 # Queue a jump-distance lookup if we have a home system
