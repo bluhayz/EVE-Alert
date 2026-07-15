@@ -1,5 +1,34 @@
 # Changelog
 
+## [6.3.24] 2026-07-15
+
+### Fixed — OCR name detection root cause (#199)
+
+- **WinRT OCR line structure.** `OcrResult.text` flattens the entire
+  recognition result into ONE space-joined string with no newlines, so
+  `parse_eve_names` (which splits on newlines) saw a single 120+-char token,
+  failed the 3–37-char name regex, and returned zero names on every capture —
+  while the OCR engine was reading every pilot perfectly. This was the actual
+  cause behind the v6.3.6–v6.3.22 miss reports; the pixel-format fixes were
+  necessary but not sufficient. `_winrt_recognize_async` now builds its output
+  from `result.lines` (one pilot per line). Verified end-to-end on a real
+  Windows machine against two live Local captures: 10/10 lines extracted,
+  9 pilots resolved through ESI, full intel/threat analysis produced.
+- **Icon glyphs misread as letter tokens.** EVE's standing icons frequently
+  OCR as short letter tokens (`"S Naveia"`, `"(S DamonR"`), which the
+  non-alphanumeric strip can't remove. `parse_eve_names` now also emits the
+  remainder after a leading 1–2-char token; ESI exact-match resolution picks
+  the right candidate and drops the wrong one silently.
+- **Preprocessing retuned with measured data.** Accuracy matrix on a real
+  capture: 3× upscale with no contrast boost scores 8/10 exact names vs 6/10
+  for the previous 2×+invert+contrast pipeline — the contrast×2.0 step was
+  actively harmful (5/10 at 3–4×), and inversion is a no-op for WinRT. New
+  pipeline: grayscale → 3× LANCZOS → RGBA.
+- **Python 3.13+ support.** `winsdk` stopped publishing wheels after
+  Python 3.12 (source build fails without a C compiler). `ocr_local` now
+  falls back to the maintained `winrt-*` namespace packages (same OS engine),
+  declared in `pyproject.toml` for `python_version >= '3.13'`.
+
 ## [6.3.6] 2026-07-14
 
 ### Changed — Bundled OCR (Windows.Media.Ocr)

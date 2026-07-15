@@ -41,8 +41,33 @@ _winrt_available: bool | None = None
 _tesseract_available: bool | None = None
 
 
+def _import_winrt_modules():
+    """Import the WinRT bridge modules, trying both package families.
+
+    ``winsdk`` stopped publishing wheels after Python 3.12; its maintained
+    successor is the ``winrt-*`` namespace packages (same underlying
+    Windows.Media.Ocr engine, same API surface for our usage).  Try winsdk
+    first (frozen builds ship it), then fall back to winrt.
+
+    Returns (graphics_imaging, media_ocr, storage_streams) module triple.
+    Raises ImportError when neither family is installed.
+    """
+    try:
+        import winsdk.windows.graphics.imaging as wgi
+        import winsdk.windows.media.ocr as wmo
+        import winsdk.windows.storage.streams as wss
+
+        return wgi, wmo, wss
+    except ImportError:
+        import winrt.windows.graphics.imaging as wgi
+        import winrt.windows.media.ocr as wmo
+        import winrt.windows.storage.streams as wss
+
+        return wgi, wmo, wss
+
+
 def is_winrt_ocr_available() -> bool:
-    """Return True if Windows.Media.Ocr (winsdk) can be used."""
+    """Return True if Windows.Media.Ocr (via winsdk or winrt) can be used."""
     global _winrt_available
     if _winrt_available is not None:
         return _winrt_available
@@ -50,9 +75,9 @@ def is_winrt_ocr_available() -> bool:
         _winrt_available = False
         return False
     try:
-        import winsdk.windows.media.ocr as _ocr  # noqa: F401
+        _wgi, wmo, _wss = _import_winrt_modules()
 
-        engine = _ocr.OcrEngine.try_create_from_user_profile_languages()
+        engine = wmo.OcrEngine.try_create_from_user_profile_languages()
         _winrt_available = engine is not None
     except Exception as exc:
         logger.debug("Windows.Media.Ocr unavailable: %s", exc)
@@ -97,10 +122,16 @@ def reset_availability_cache() -> None:
 # --------------------------------------------------------------------------- #
 
 async def _winrt_recognize_async(pil_img) -> str:
-    """Run Windows.Media.Ocr recognition on a PIL image (async, internal)."""
-    import winsdk.windows.graphics.imaging as wgi
-    import winsdk.windows.media.ocr as wmo
-    import winsdk.windows.storage.streams as wss
+    """Run Windows.Media.Ocr recognition on a PIL image (async, internal).
+
+    Returns the recognized text with ONE LINE PER OcrLine (#199 root cause):
+    ``OcrResult.text`` flattens the entire result into a single space-joined
+    string with no newlines, which made every multi-name capture fail the
+    per-line name regex downstream (names were read perfectly, then thrown
+    away by the parser).  ``result.lines`` preserves the visual line
+    structure of EVE's Local member list — one pilot per line.
+    """
+    wgi, wmo, wss = _import_winrt_modules()
 
     # Encode image to BMP in-memory so BitmapDecoder can load it.
     buf = io.BytesIO()
@@ -119,7 +150,8 @@ async def _winrt_recognize_async(pil_img) -> str:
 
     engine = wmo.OcrEngine.try_create_from_user_profile_languages()
     result = await engine.recognize_async(soft_bmp)
-    return result.text
+    # NEVER use result.text here — it strips line structure (see docstring).
+    return "\n".join(line.text for line in result.lines)
 
 
 def _ocr_with_winrt(pil_img) -> str:
@@ -146,25 +178,24 @@ def _preprocess_for_ocr(pil_img):
     """Preprocess an EVE UI screenshot for better OCR accuracy.
 
     EVE's Local member list has white/light text on a dark space background.
-    Both Windows.Media.Ocr and Tesseract perform better with:
+    Pipeline (empirically tuned against a real Local capture — see #199):
       1. Grayscale — removes colour noise from standing icons
-      2. 2× upscale — each name row is only ~20 px tall; upscaling dramatically
-         improves recognition of small text
-      3. Invert — both engines recognise dark-on-white more reliably than
-         white-on-dark
-      4. Contrast boost — sharpens the text edges after inversion
-      5. Convert to RGBA — Windows.Media.Ocr requires Bgra8 (32-bit) format;
+      2. 3× upscale (LANCZOS) — each name row is only ~20 px tall; a 3×
+         upscale scored 8/10 exact names vs 6/10 at 2× on the reference
+         capture
+      3. Convert to RGBA — Windows.Media.Ocr requires Bgra8 (32-bit) format;
          an 8-bit grayscale BMP is decoded as Gray8 and OcrEngine silently
          returns empty text for non-Bgra8 input.
+
+    Deliberately NOT done (measured to be neutral or harmful on WinRT):
+      - Invert: WinRT scores identically on white-on-dark and dark-on-white.
+      - Contrast boost: enhance(2.0) DROPPED accuracy from 8/10 to 5/10 at
+        3×–4× scale (it destroys anti-aliasing the engine relies on).
     """
     try:
-        from PIL import ImageEnhance, ImageOps  # noqa: PLC0415
-
         img = pil_img.convert("L")                        # grayscale
         w, h = img.size
-        img = img.resize((w * 2, h * 2), 1)              # 1 = LANCZOS (PIL constant)
-        img = ImageOps.invert(img)                        # white-on-dark → dark-on-white
-        img = ImageEnhance.Contrast(img).enhance(2.0)     # boost contrast
+        img = img.resize((w * 3, h * 3), 1)               # 1 = LANCZOS (PIL constant)
         img = img.convert("RGBA")                         # 32-bit for WinRT Bgra8
         return img
     except Exception:
@@ -206,22 +237,41 @@ def parse_eve_names(text: str) -> list[str]:
     whitespace noise, and keeps tokens that look like EVE names
     (letters/digits/space/.'- , 3–37 chars, at least one letter).
     De-duplicates while preserving order.
+
+    Icon-glyph handling (#199): the standing icon frequently OCRs as a short
+    LETTER token instead of a symbol ("S Naveia", "CS Bronwen Morgan"), which
+    the non-alphanumeric strip cannot remove.  When a line's first token is
+    1–2 chars and something name-like follows, BOTH the stripped remainder
+    and the full line are emitted (stripped first).  Downstream ESI name
+    resolution is exact-match, so the wrong candidate fails silently while
+    the right one resolves — at worst this costs one extra lookup per line.
     """
     names: list[str] = []
     seen: set[str] = set()
+
+    def _emit(candidate: str) -> None:
+        if not candidate or candidate.lower() in seen:
+            return
+        if not _NAME_RE.match(candidate):
+            return
+        if not _HAS_LETTER.search(candidate):
+            return
+        seen.add(candidate.lower())
+        names.append(candidate)
+
     for raw_line in (text or "").splitlines():
         # Strip leading non-alphanumeric garbage (standing icons, symbols)
         # that EVE's UI renders before each pilot name in the Local list.
-        candidate = re.sub(r"^[^A-Za-z0-9]+", "", raw_line.strip())
-        candidate = re.sub(r"\s{2,}", " ", candidate)
-        if not candidate or candidate.lower() in seen:
+        base = re.sub(r"^[^A-Za-z0-9]+", "", raw_line.strip())
+        base = re.sub(r"\s{2,}", " ", base).strip()
+        if not base:
             continue
-        if not _NAME_RE.match(candidate):
-            continue
-        if not _HAS_LETTER.search(candidate):
-            continue
-        seen.add(candidate.lower())
-        names.append(candidate)
+        parts = base.split(" ", 1)
+        if len(parts) == 2 and len(parts[0]) <= 2 and len(parts[1]) >= 3:
+            # Likely icon glyph misread as a short letter token — try the
+            # remainder first, but keep the full line as a fallback candidate.
+            _emit(parts[1].strip())
+        _emit(base)
     return names
 
 

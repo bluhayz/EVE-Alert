@@ -38,7 +38,18 @@ dependencies = [
     "PySide6>=6.7,<7",
     "sounddevice==0.5.1",
     "soundfile==0.12.1",
-    "winsdk>=1.0.0b10; sys_platform == 'win32'",
+    # WinRT bridge for Windows.Media.Ocr. winsdk stopped publishing wheels
+    # after Python 3.12; the maintained successor is the winrt-* namespace
+    # packages (same engine, same API for our usage). ocr_local.py tries
+    # winsdk first, then falls back to winrt (#199).
+    "winsdk>=1.0.0b10; sys_platform == 'win32' and python_version < '3.13'",
+    "winrt-runtime>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
+    "winrt-Windows.Media.Ocr>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
+    "winrt-Windows.Graphics.Imaging>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
+    "winrt-Windows.Storage.Streams>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
+    "winrt-Windows.Foundation>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
+    "winrt-Windows.Foundation.Collections>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
+    "winrt-Windows.Globalization>=2.0; sys_platform == 'win32' and python_version >= '3.13'",
 ]
 
 [project.optional-dependencies]
