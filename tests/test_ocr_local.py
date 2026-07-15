@@ -134,15 +134,21 @@ class WinRTAvailabilityTests(unittest.TestCase):
         fake_ocr_mod.OcrEngine = mock.MagicMock(
             try_create_from_user_profile_languages=mock.MagicMock(return_value=fake_engine)
         )
-        # Python's import machinery requires parent packages to be in sys.modules.
-        fake_winsdk = types.ModuleType("winsdk")
-        fake_winsdk_windows = types.ModuleType("winsdk.windows")
-        fake_winsdk_windows_media = types.ModuleType("winsdk.windows.media")
+        # _import_winrt_modules imports all three winsdk sub-modules; supply
+        # every parent package so the import machinery can resolve them.
         mod_patch = {
-            "winsdk": fake_winsdk,
-            "winsdk.windows": fake_winsdk_windows,
-            "winsdk.windows.media": fake_winsdk_windows_media,
+            "winsdk": types.ModuleType("winsdk"),
+            "winsdk.windows": types.ModuleType("winsdk.windows"),
+            "winsdk.windows.media": types.ModuleType("winsdk.windows.media"),
             "winsdk.windows.media.ocr": fake_ocr_mod,
+            "winsdk.windows.graphics": types.ModuleType("winsdk.windows.graphics"),
+            "winsdk.windows.graphics.imaging": types.ModuleType(
+                "winsdk.windows.graphics.imaging"
+            ),
+            "winsdk.windows.storage": types.ModuleType("winsdk.windows.storage"),
+            "winsdk.windows.storage.streams": types.ModuleType(
+                "winsdk.windows.storage.streams"
+            ),
         }
         with mock.patch.object(sys, "platform", "win32"):
             with mock.patch.dict(sys.modules, mod_patch):
