@@ -1,5 +1,46 @@
 # Changelog
 
+## [6.3.26] 2026-07-15
+
+### Fixed — OCR/ESI/KOS intel pipeline completion (#201, #202, #203, #204)
+
+- **#203 — KOS check no longer gated behind ESI success.** `_augment_with_esi`
+  previously returned immediately when `client.lookup_many()` resolved zero
+  characters (network issue, ESI 5xx, a misread/nonexistent name), skipping
+  the KOS check entirely for every pilot in that alarm — including any that
+  genuinely were on a KOS list. KOS checks (CVA/custom APIs) only need a bare
+  name, not ESI data. The per-pilot loop now iterates over the OCR/log name
+  list directly (not the ESI results list), enriching each with ESI data when
+  available and falling back to a name-only KOS check (empty corp/alliance)
+  when it isn't. Verified against real OCR capture data with an injected
+  unresolvable name: it correctly gets an "ESI lookup unavailable" line and a
+  KOS check attempt, while resolvable names in the same batch keep their full
+  corp/alliance/age/zKillboard enrichment.
+- **#201 — "Test OCR on Region" now runs the real intel pipeline.** The
+  Settings dialog's OCR test found pilot names and displayed them, but never
+  fed them into ESI/KOS/zKillboard — confirming OCR worked told you nothing
+  about whether your intel setup (KOS lists, threat tiers) would catch
+  anything. Added `AlertAgent.run_intel_check()`, a public wrapper around
+  `_augment_with_esi`, and wired the Settings dialog to call it automatically
+  whenever the test finds ≥1 name — results stream into the main window log,
+  identical to a real alarm.
+- **#204 — OCR test success now warns when the feature isn't actually
+  enabled.** Confirming OCR works in the test didn't mean OCR would run
+  during real alarms — that also requires checking "Read pilot names from
+  Local on alarm" and saving. The test result now shows an inline warning
+  when that checkbox is currently unchecked.
+- **#202 — removed a redundant, blocking second OCR capture; honest fallback
+  messaging.** When alarm-time OCR found nothing, `_augment_with_esi` retried
+  the *exact same* screen region synchronously inside itself moments later —
+  never had a real chance of succeeding where the first attempt just failed,
+  and blocked the engine's event loop for a full OCR pass while it tried.
+  Removed. The Local-log "joined the channel" fallback is kept (it correctly
+  catches a hostile who just jumped/warped in — the common alarm-trigger
+  case) but the "no names found" message now explains *why*, distinguishing
+  OCR-enabled-but-empty ("hostile may already have been in-system — check
+  your OCR region") from ESI-only/no-OCR mode ("enable OCR for coverage of
+  already-present pilots") instead of one generic dead-end message.
+
 ## [6.3.24] 2026-07-15
 
 ### Fixed — OCR name detection root cause (#199)

@@ -1196,6 +1196,17 @@ class AlertAgent:
         except Exception as exc:
             logger.debug("Jump distance lookup failed: %s", exc)
 
+    async def run_intel_check(self, names: list[str]) -> None:
+        """Public entry point to run the ESI/KOS/zKillboard intel pipeline
+        on an explicit pilot-name list, outside the normal alarm flow (#201).
+
+        Used by the Settings dialog's "Test OCR on Region" button so
+        confirming OCR works also gives the user a real intel check —
+        the exact same pipeline a live Enemy alarm uses. Safe to call
+        whether or not the detection engine is currently running.
+        """
+        await self._augment_with_esi(hint_names=names)
+
     async def _augment_with_esi(self, hint_names: list[str] | None = None) -> None:
         """Background task: enriched ESI + Zkillboard pilot intel on Enemy alarm.
 
@@ -1254,6 +1265,15 @@ class AlertAgent:
                         enc = "utf-16-le" if raw.startswith(b"\xff\xfe") else "utf-8"
                         text = raw[2:].decode(enc, errors="replace") if enc == "utf-16-le" else raw.decode(enc, errors="replace")
                         lines = text.splitlines()[-50:]
+                        # NOTE (#202): this only catches pilots who JOINED Local
+                        # within the last 50 lines — it correctly covers the
+                        # common "hostile just jumped/warped in and triggered
+                        # this alarm" case, but it structurally cannot find a
+                        # hostile who was already present before the alarm
+                        # fired (no "joined" line exists for them). There is
+                        # no ESI endpoint that lists a system's current
+                        # population, so OCR is the only way to cover that
+                        # case — see the message below when this comes up empty.
                         names = extract_joining_characters(lines)
                         self._ui(
                             self.main.write_message,
@@ -1268,58 +1288,33 @@ class AlertAgent:
                             "yellow",
                         )
                         names = []
-
-                # v4.1: OCR the configured region and merge detected names (#98).
-                if self._ocr_enabled:
-                    try:
-                        from evealert.tools.ocr_local import (  # pylint: disable=import-outside-toplevel
-                            is_ocr_available,
-                            read_local_names,
-                            resolve_region,
-                        )
-
-                        if not is_ocr_available():
-                            self._ui(
-                                self.main.write_message,
-                                "Intel [ESI/OCR]: OCR backend unavailable — skipping capture",
-                                "yellow",
-                            )
-                        else:
-                            region = resolve_region(
-                                self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
-                            )
-                            self._ui(
-                                self.main.write_message,
-                                f"Intel [ESI/OCR]: resolved region = {region or 'INVALID — check OCR region config'}",
-                                "cyan",
-                            )
-                            ocr_names = read_local_names(region) if region else []
-                            self._ui(
-                                self.main.write_message,
-                                f"Intel [ESI/OCR]: raw OCR names = {ocr_names or 'none detected'}",
-                                "cyan",
-                            )
-                            if ocr_names:
-                                for name in ocr_names:
-                                    if name not in names:
-                                        names.append(name)
-                    except Exception as exc:
-                        self._ui(
-                            self.main.write_message,
-                            f"Intel [ESI/OCR]: exception — {exc}",
-                            "yellow",
-                        )
-                        logger.debug("OCR name detection failed: %s", exc, exc_info=True)
-                else:
-                    logger.debug("Intel [ESI]: OCR disabled, skipping capture")
+                # NOTE (#202): a second OCR capture used to run here when
+                # _ocr_enabled was True. It always targeted the exact same
+                # region _build_enemy_alarm_text had just captured moments
+                # earlier at alarm time (or, when this function is invoked
+                # from the intel-channel jump-radius check, an unrelated
+                # remote system that OCR — reading only the player's own
+                # screen — could never usefully capture). Retrying it here
+                # was redundant, blocked this async task for the duration of
+                # a full OCR pass, and never had a real chance of succeeding
+                # where the first attempt just failed. Removed.
             # end else (no hint_names)
 
             if not names:
-                self._ui(
-                    self.main.write_message,
-                    "Intel [ESI]: no pilot names found via Local log or OCR — ESI lookup skipped",
-                    "yellow",
-                )
+                if self._ocr_enabled:
+                    msg = (
+                        "Intel [ESI]: OCR found no names at alarm time and no recent "
+                        "Local joins — the hostile may already have been in-system "
+                        "before this alarm fired. Check the OCR region in Settings."
+                    )
+                else:
+                    msg = (
+                        "Intel [ESI]: no recent Local joins found. ESI Augmentation "
+                        "without OCR can only detect pilots who just joined Local — "
+                        "enable 'Read pilot names from Local on alarm' in Settings for "
+                        "coverage of pilots already present in system."
+                    )
+                self._ui(self.main.write_message, msg, "yellow")
                 return
 
             # v3.6: WH drop heuristic — count each NEW pilot once (names that
@@ -1346,15 +1341,22 @@ class AlertAgent:
                 "cyan",
             )
             results = await client.lookup_many(names[:5])
+            # #203: KOS checks (CVA / custom APIs) accept a bare pilot name and
+            # do not need ESI data — they must still run even when ESI fails
+            # (network issue, 5xx, a name ESI's search can't resolve). Do NOT
+            # return early here; build a name→CharacterInfo lookup instead so
+            # the per-pilot loop below can enrich with ESI data WHEN available
+            # and fall back to KOS-only (name-only) checks when it isn't.
+            results_by_name = {r.name.lower(): r for r in results}
             if not results:
                 self._ui(
                     self.main.write_message,
-                    "Intel [ESI]: ESI lookup returned no results (network issue or unknown names)",
+                    "Intel [ESI]: ESI lookup returned no results (network issue or "
+                    "unknown names) — running KOS check on name(s) directly",
                     "yellow",
                 )
-                return
 
-            # v3.7: fleet composition analysis (3+ hostiles)
+            # v3.7: fleet composition analysis (3+ hostiles; needs resolved IDs)
             if self._fleet_composition_enabled and len(results) >= 3:
                 try:
                     from evealert.tools.fleet_context import (  # pylint: disable=import-outside-toplevel
@@ -1378,36 +1380,44 @@ class AlertAgent:
             _kos_tier_label = ""
             _max_danger_ratio = 0.0
 
-            for info in results:
-                # ── Threat tier check ────────────────────────────────────────
+            for name in names[:5]:
+                info = results_by_name.get(name.lower())
+                display_name = info.name if info is not None else name
+                corp_name = (info.corporation_name or "") if info is not None else ""
+                alliance_name = (info.alliance_name or "") if info is not None else ""
+
+                # ── Threat tier check ────────────────────────────────
                 tier = None
                 for substr, t in self._threat_tiers.items():
                     if (
-                        substr.lower() in info.name.lower()
-                        or substr.lower() in (info.corporation_name or "").lower()
-                        or substr.lower() in (info.alliance_name or "").lower()
+                        substr.lower() in display_name.lower()
+                        or substr.lower() in corp_name.lower()
+                        or substr.lower() in alliance_name.lower()
                     ):
                         tier = t
                         break
 
-                # ── Build header line ─────────────────────────────────────────
+                # ── Build header line ────────────────────────────────
                 tier_prefix = {
                     "red": "⚠ [KOS-RED]",
                     "orange": "⚠ [HOSTILE]",
                     "yellow": "[CAUTION]",
                 }.get(tier or "", "")
 
-                parts = [f"  {tier_prefix} {info.name}".strip()]
-                if self._esi_show_corp and info.corporation_name:
-                    parts.append(f"[{info.corporation_name}]")
-                if self._esi_show_alliance and info.alliance_name:
-                    parts.append(f"<{info.alliance_name}>")
-
-                # age and corp history
-                if info.age_days >= 0:
-                    age_str = f"{info.age_days}d old"
-                    corps_str = f"{info.corp_history_count} corp(s)"
-                    parts.append(f"— {age_str}, {corps_str}")
+                parts = [f"  {tier_prefix} {display_name}".strip()]
+                if info is not None:
+                    if self._esi_show_corp and corp_name:
+                        parts.append(f"[{corp_name}]")
+                    if self._esi_show_alliance and alliance_name:
+                        parts.append(f"<{alliance_name}>")
+                    # age and corp history
+                    if info.age_days >= 0:
+                        age_str = f"{info.age_days}d old"
+                        corps_str = f"{info.corp_history_count} corp(s)"
+                        parts.append(f"— {age_str}, {corps_str}")
+                else:
+                    # #203: ESI didn't resolve this name — KOS still checked below.
+                    parts.append("— ESI lookup unavailable")
 
                 line_colour = (
                     "red"
@@ -1416,50 +1426,51 @@ class AlertAgent:
                 )
                 self._ui(self.main.write_message, " ".join(parts), line_colour)
 
-                # ── Flashy security status ────────────────────────────────────
-                if self._esi_alert_flashy and info.security_status <= -5.0:
-                    self._ui(
-                        self.main.write_message,
-                        f"    ⚠ FLASHY: {info.name} (sec: {info.security_status:.1f}) — attackable in low-sec",
-                        "red",
-                    )
-
-                # ── Cyno-alt heuristic ────────────────────────────────────────
-                if info.age_days < 30:
-                    self._ui(
-                        self.main.write_message,
-                        f"    ⚠ YOUNG PILOT: {info.name} ({info.age_days}d old) — possible cyno/scout alt",
-                        "yellow",
-                    )
-
-                # ── Zkillboard kill profile ───────────────────────────────────
-                try:
-                    zkb = await client.get_zkillboard_profile(info.character_id)
-                    if zkb and (zkb.kills_total > 0 or zkb.losses_total > 0):
-                        if zkb.danger_ratio > _max_danger_ratio:
-                            _max_danger_ratio = zkb.danger_ratio
-                        danger_pct = int(zkb.danger_ratio * 100)
-                        ship_str = f" | flies {zkb.top_ship}" if zkb.top_ship else ""
+                if info is not None:
+                    # ── Flashy security status ──────────────────────────
+                    if self._esi_alert_flashy and info.security_status <= -5.0:
                         self._ui(
                             self.main.write_message,
-                            f"    ZKB: {zkb.kills_total}K/{zkb.losses_total}L (all-time) "
-                            f"[{danger_pct}% danger]{ship_str}",
-                            "cyan",
+                            f"    ⚠ FLASHY: {display_name} (sec: {info.security_status:.1f}) — attackable in low-sec",
+                            "red",
                         )
-                        # Ship cross-reference (#150): match top_ship against D-scan types
-                        if zkb.top_ship and self._dscan_watcher:
-                            visible = self._dscan_watcher.current_visible_types
-                            if any(zkb.top_ship.lower() in v.lower() for v in visible):
-                                self._ui(
-                                    self.main.write_message,
-                                    f"    \u26a0 MATCH: {info.name} typically flies {zkb.top_ship}"
-                                    " \u2014 that type is on D-scan NOW",
-                                    "red",
-                                )
-                except Exception as exc:
-                    logger.debug("Zkillboard profile augmentation failed: %s", exc)
 
-                # ── KOS check (v3.4) ──────────────────────────────────────────
+                    # ── Cyno-alt heuristic ───────────────────────────
+                    if info.age_days < 30:
+                        self._ui(
+                            self.main.write_message,
+                            f"    ⚠ YOUNG PILOT: {display_name} ({info.age_days}d old) — possible cyno/scout alt",
+                            "yellow",
+                        )
+
+                    # ── Zkillboard kill profile (needs a resolved character ID) ─
+                    try:
+                        zkb = await client.get_zkillboard_profile(info.character_id)
+                        if zkb and (zkb.kills_total > 0 or zkb.losses_total > 0):
+                            if zkb.danger_ratio > _max_danger_ratio:
+                                _max_danger_ratio = zkb.danger_ratio
+                            danger_pct = int(zkb.danger_ratio * 100)
+                            ship_str = f" | flies {zkb.top_ship}" if zkb.top_ship else ""
+                            self._ui(
+                                self.main.write_message,
+                                f"    ZKB: {zkb.kills_total}K/{zkb.losses_total}L (all-time) "
+                                f"[{danger_pct}% danger]{ship_str}",
+                                "cyan",
+                            )
+                            # Ship cross-reference (#150): match top_ship against D-scan types
+                            if zkb.top_ship and self._dscan_watcher:
+                                visible = self._dscan_watcher.current_visible_types
+                                if any(zkb.top_ship.lower() in v.lower() for v in visible):
+                                    self._ui(
+                                        self.main.write_message,
+                                        f"    ⚠ MATCH: {display_name} typically flies {zkb.top_ship}"
+                                        " — that type is on D-scan NOW",
+                                        "red",
+                                    )
+                    except Exception as exc:
+                        logger.debug("Zkillboard profile augmentation failed: %s", exc)
+
+                # ── KOS check (v3.4) — runs regardless of ESI resolution (#203) ─
                 try:
                     from evealert.tools.kos_checker import (  # pylint: disable=import-outside-toplevel
                         get_kos_checker,
@@ -1470,23 +1481,21 @@ class AlertAgent:
                         api_urls=self._kos_custom_urls,
                     )
                     kos_result = await kos_checker.check(
-                        info.name,
-                        info.corporation_name or "",
-                        info.alliance_name or "",
+                        display_name, corp_name, alliance_name
                     )
                     if kos_result:
                         _any_kos = True
                         _kos_tier_label = kos_result.label
                         self._ui(
                             self.main.write_message,
-                            f"    ⚠ KOS ({kos_result.source}): {info.name} — {kos_result.label}",
+                            f"    ⚠ KOS ({kos_result.source}): {display_name} — {kos_result.label}",
                             "red",
                         )
                 except Exception as exc:
                     logger.debug("KOS check failed: %s", exc)
 
-                # ── ESI standings auto-classify (v4.0) ───────────────────────
-                if self._esi_standings_classify and self._esi_standings_cache:
+                # ── ESI standings auto-classify (v4.0; needs resolved IDs) ────
+                if info is not None and self._esi_standings_classify and self._esi_standings_cache:
                     # Standings can be set at character, corp, OR alliance level
                     # (#106) — collect all that apply and use the most hostile.
                     candidates = [

@@ -946,11 +946,32 @@ class SettingsDialog(QDialog):
 
         if diag.get("ok"):
             names = diag["names"]
-            self._ocr_test_status.setText(
+            status = (
                 f"✓ OCR test passed — found {len(names)} name(s): "
                 f"{', '.join(names[:5])}{'…' if len(names) > 5 else ''}"
             )
+            # #204: OCR test success doesn't mean OCR will run during real
+            # alarms — that also requires the "Enable OCR Name Detection"
+            # checkbox to be checked AND saved. Warn when it currently isn't,
+            # so a user who only ran the test doesn't think the pipeline is
+            # live. Read the checkbox's live (possibly-unsaved) state, since
+            # that's what the user is looking at right now.
+            ocr_checkbox = self._controls.get("ocr.enabled")
+            if ocr_checkbox is not None and not ocr_checkbox.isChecked():
+                status += (
+                    "\n⚠ 'Read pilot names from Local on alarm' is not checked — "
+                    "OCR will NOT run during real alarms until you check it and Save."
+                )
+            self._ocr_test_status.setText(status)
             self._ocr_test_status.setStyleSheet("color: #3FB950;")
+
+            # #201: names found by the test were previously discarded. Run
+            # the SAME intel pipeline alarms use (_augment_with_esi) on them,
+            # so confirming OCR works also gives you a real intel check.
+            # Results stream into the main window's log pane (the normal
+            # place alarm-time intel appears), not this dialog.
+            if names:
+                self._run_intel_check_on_names(names)
         else:
             # Build a diagnostics summary to pre-fill the bug reporter
             import platform, sys  # noqa: E401,PLC0415
@@ -997,6 +1018,51 @@ class SettingsDialog(QDialog):
             mb.button(QMessageBox.StandardButton.Yes).setText("Open Bug Reporter")
             if mb.exec() == QMessageBox.StandardButton.Yes:
                 self._open_bug_reporter_with_diag(diag_text)
+
+    def _run_intel_check_on_names(self, names: list[str]) -> None:
+        """Run the real alarm-time intel pipeline on OCR-test-found names (#201).
+
+        Reuses AlertAgent._augment_with_esi — the exact function a live Enemy
+        alarm calls — via the app's single AlertAgent instance (self.main.alert),
+        so results (corp/alliance, KOS, zKillboard, threat score) stream into
+        the main window's log pane exactly like a real alarm would produce.
+
+        Runs on a dedicated worker thread with its own throwaway asyncio loop:
+        _augment_with_esi does not depend on AlertAgent's own long-running
+        loop (self.alert.loop) for anything it does, so this never touches —
+        and cannot race with — the engine's loop if it happens to be running.
+        """
+        parent = self.parent()
+        alert = getattr(parent, "alert", None)
+        if alert is None:
+            return  # no engine instance available (shouldn't happen in practice)
+
+        self._ocr_test_status.setText(
+            self._ocr_test_status.text()
+            + "\n▶ Running intel check on found name(s) — see main window log…"
+        )
+
+        import asyncio  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+
+        def _run() -> None:
+            try:
+                # Sync AlertAgent's config attributes (threat tiers, KOS
+                # settings, ESI toggles, etc.) from the last SAVED settings —
+                # same source of truth a real alarm would use. Does not touch
+                # alert.loop, so it's safe even if the engine is running.
+                alert.load_settings()
+                asyncio.run(alert.run_intel_check(list(names)))
+            except Exception as exc:
+                alert._ui(
+                    alert.main.write_message,
+                    f"Intel [OCR test]: intel check failed — {exc}",
+                    "yellow",
+                )
+
+        threading.Thread(
+            target=_run, daemon=True, name="eve-ocr-test-intel"
+        ).start()
 
     def _open_bug_reporter_with_diag(self, prefill_text: str) -> None:
         """Open the bug reporter dialog with OCR diagnostics pre-filled."""

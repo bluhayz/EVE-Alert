@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from evealert.manager.alertmanager import AlertAgent
 from evealert.settings.store import reset_settings_store
@@ -350,6 +350,144 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
             await self.agent._lookup_jump_distance("Jita", "Perimeter", ["Roger Booth"])
 
         self.assertEqual(scheduled, [], "Expected no ESI task when threat check disabled")
+
+
+class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for #201-#204: the OCR -> ESI -> KOS intel pipeline."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        # Avoid real network/log-file access in these tests.
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._esi_show_corp = True
+        self.agent._esi_show_alliance = True
+        self.agent._esi_alert_flashy = False
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def test_kos_runs_when_esi_lookup_returns_no_results(self):
+        """#203: KOS must still run even when ESI resolves nothing."""
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[])  # ESI found nothing
+            mock_get_client.return_value = mock_client
+
+            kos_result = MagicMock(source="Custom", label="KOS-RED")
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=kos_result)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check(["Bad Guy"])
+
+            mock_kos.check.assert_awaited_once_with("Bad Guy", "", "")
+            messages = self._logged_messages()
+            self.assertTrue(
+                any("KOS" in m and "Bad Guy" in m for m in messages),
+                f"Expected a KOS log line even with no ESI results, got: {messages}",
+            )
+            self.assertTrue(
+                any("ESI lookup unavailable" in m for m in messages),
+                f"Expected the header line to note ESI was unavailable, got: {messages}",
+            )
+
+    async def test_esi_and_kos_both_run_when_esi_resolves(self):
+        """Sanity check: the happy path (ESI resolves + KOS hits) still works
+        after restructuring the loop to iterate over names instead of results."""
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=123, corporation_id=456, alliance_id=None,
+        )
+        # MagicMock(name=...) sets the mock's own repr, not an attribute —
+        # .name must be assigned separately.
+        info.name = "Bad Guy"
+
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(return_value=None)
+            mock_get_client.return_value = mock_client
+
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)  # not KOS
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check(["Bad Guy"])
+
+            mock_kos.check.assert_awaited_once_with("Bad Guy", "Evil Corp", "")
+            messages = self._logged_messages()
+            self.assertTrue(any("Evil Corp" in m for m in messages))
+            self.assertTrue(any("100d old" in m for m in messages))
+            self.assertFalse(any("ESI lookup unavailable" in m for m in messages))
+
+    async def test_no_names_message_mentions_ocr_when_ocr_enabled(self):
+        """#202: the 'nothing found' message must be honest about why —
+        distinguishing OCR-enabled-but-empty from ESI-only mode."""
+        self.agent._ocr_enabled = True
+        with patch(
+            "evealert.tools.intel_watcher.get_eve_chatlog_dir", return_value=None
+        ):
+            await self.agent._augment_with_esi(hint_names=None)
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("already have been in-system" in m for m in messages),
+            f"Expected the OCR-aware message, got: {messages}",
+        )
+
+    async def test_no_names_message_mentions_esi_only_when_ocr_disabled(self):
+        """#202: ESI-only (no OCR) users get a message telling them OCR would help."""
+        self.agent._ocr_enabled = False
+        with patch(
+            "evealert.tools.intel_watcher.get_eve_chatlog_dir", return_value=None
+        ):
+            await self.agent._augment_with_esi(hint_names=None)
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("enable 'Read pilot names from Local on alarm'" in m for m in messages),
+            f"Expected the ESI-only message pointing at OCR, got: {messages}",
+        )
+
+    async def test_run_intel_check_forwards_to_augment_with_esi(self):
+        """#201: the public wrapper used by the Settings OCR test forwards
+        its names as hint_names, using the OCR-provided-names code path."""
+        with patch.object(
+            self.agent, "_augment_with_esi", new=AsyncMock()
+        ) as mock_augment:
+            await self.agent.run_intel_check(["Alice", "Bob"])
+        mock_augment.assert_awaited_once_with(hint_names=["Alice", "Bob"])
 
 
 if __name__ == "__main__":
