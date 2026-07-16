@@ -480,15 +480,54 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
             f"Expected the ESI-only message pointing at OCR, got: {messages}",
         )
 
-    async def test_pilot_line_includes_zkillboard_character_link(self):
-        """#205: resolved pilots get a zkillboard.com/character/<id>/ link
-        in their intel header line."""
+    async def test_pilot_line_includes_zkillboard_character_link_when_zkb_has_data(self):
+        """#205/#208: resolved pilots get a zkillboard.com/character/<id>/
+        link ONLY when zkillboard actually has a profile for them — i.e.
+        get_zkillboard_profile() returned a real (non-None) result."""
         info = MagicMock(
             corporation_name="Evil Corp", alliance_name="",
             age_days=100, corp_history_count=2, security_status=0.0,
             character_id=987654, corporation_id=456, alliance_id=None,
         )
         info.name = "Bad Guy"
+        from evealert.tools.esi_standings import KillProfile
+
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(
+                return_value=KillProfile(
+                    kills_total=5, losses_total=1, top_ship=None, danger_ratio=0.8
+                )
+            )
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check(["Bad Guy"])
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("zkillboard.com/character/987654/" in m for m in messages),
+            f"Expected a zkillboard character link in pilot line, got: {messages}",
+        )
+
+    async def test_no_zkillboard_link_when_zkb_has_never_seen_the_character(self):
+        """#208: zkillboard returns HTTP 200 + {"error": ...} (parsed as None
+        by _fetch_zkb_profile) for a pilot it has never indexed in any
+        killmail — that pilot's character page 404s, so no link should be
+        shown at all. Regression for a real 404 reported in production."""
+        info = MagicMock(
+            corporation_name="Republic University", alliance_name="",
+            age_days=35, corp_history_count=1, security_status=0.0,
+            character_id=2124449072, corporation_id=456, alliance_id=None,
+        )
+        info.name = "Oveim Hrild Beldrulf"
 
         with patch(
             "evealert.tools.esi_standings.get_esi_client"
@@ -503,13 +542,16 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
             mock_kos.check = AsyncMock(return_value=None)
             mock_get_kos.return_value = mock_kos
 
-            await self.agent.run_intel_check(["Bad Guy"])
+            await self.agent.run_intel_check(["Oveim Hrild Beldrulf"])
 
         messages = self._logged_messages()
-        self.assertTrue(
-            any("zkillboard.com/character/987654/" in m for m in messages),
-            f"Expected a zkillboard character link in pilot line, got: {messages}",
+        self.assertFalse(
+            any("zkillboard.com/character/2124449072/" in m for m in messages),
+            f"A never-indexed character must not get a (404-ing) zkillboard link, got: {messages}",
         )
+        # The rest of the pilot intel (corp, age) must still be shown.
+        self.assertTrue(any("Republic University" in m for m in messages))
+        self.assertTrue(any("35d old" in m for m in messages))
 
     async def test_run_intel_check_forwards_to_augment_with_esi(self):
         """#201: the public wrapper used by the Settings OCR test forwards

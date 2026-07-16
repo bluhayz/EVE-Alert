@@ -220,6 +220,17 @@ class EsiLookup:
         if not isinstance(data, dict):
             return None
 
+        # zKillboard returns HTTP 200 with {"error": "Invalid type or id"}
+        # for a character it has never seen in ANY killmail (raise_for_status
+        # never fires since the status code is 200). This is NOT the same as
+        # a real character with zero kills/losses — it also means the
+        # character's zkillboard.com/character/<id>/ WEB PAGE 404s, since
+        # zkillboard only creates a page once it's indexed a killmail for
+        # that ID. Callers use "profile is None" to decide whether it's safe
+        # to link to that page (#208), so this must not be parsed as zeros.
+        if "error" in data:
+            return None
+
         kills = int(data.get("shipsDestroyed", 0) or 0)
         losses = int(data.get("shipsLost", 0) or 0)
         total = kills + losses

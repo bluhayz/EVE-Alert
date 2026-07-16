@@ -1386,6 +1386,20 @@ class AlertAgent:
                 corp_name = (info.corporation_name or "") if info is not None else ""
                 alliance_name = (info.alliance_name or "") if info is not None else ""
 
+                # Fetch the zKillboard profile FIRST (#208) so its result can
+                # gate whether the character link is even shown: a pilot
+                # zkillboard has never indexed (no killmail history) has no
+                # character page and the link 404s. _fetch_zkb_profile
+                # returns None for that case (not a zero-stat profile) — see
+                # its docstring. Fetched once, reused below for the stats
+                # line so this doesn't cost a second network round-trip.
+                zkb = None
+                if info is not None:
+                    try:
+                        zkb = await client.get_zkillboard_profile(info.character_id)
+                    except Exception as exc:
+                        logger.debug("Zkillboard profile augmentation failed: %s", exc)
+
                 # ── Threat tier check ────────────────────────────────
                 tier = None
                 for substr, t in self._threat_tiers.items():
@@ -1415,9 +1429,11 @@ class AlertAgent:
                         age_str = f"{info.age_days}d old"
                         corps_str = f"{info.corp_history_count} corp(s)"
                         parts.append(f"— {age_str}, {corps_str}")
-                    # zkillboard character link (#205) — same convention as the
-                    # intel-channel reporter links added in v6.3.25
-                    parts.append(f"| zkillboard.com/character/{info.character_id}/")
+                    # zkillboard character link (#205) — only when zkillboard
+                    # actually has this pilot on record (#208); otherwise the
+                    # page 404s (common for very young / PvE-only pilots).
+                    if zkb is not None:
+                        parts.append(f"| zkillboard.com/character/{info.character_id}/")
                 else:
                     # #203: ESI didn't resolve this name — KOS still checked below.
                     parts.append("— ESI lookup unavailable")
@@ -1446,9 +1462,8 @@ class AlertAgent:
                             "yellow",
                         )
 
-                    # ── Zkillboard kill profile (needs a resolved character ID) ─
+                    # ── Zkillboard kill profile line (already fetched above) ─
                     try:
-                        zkb = await client.get_zkillboard_profile(info.character_id)
                         if zkb and (zkb.kills_total > 0 or zkb.losses_total > 0):
                             if zkb.danger_ratio > _max_danger_ratio:
                                 _max_danger_ratio = zkb.danger_ratio
@@ -1471,7 +1486,7 @@ class AlertAgent:
                                         "red",
                                     )
                     except Exception as exc:
-                        logger.debug("Zkillboard profile augmentation failed: %s", exc)
+                        logger.debug("Zkillboard stats line rendering failed: %s", exc)
 
                 # ── KOS check (v3.4) — runs regardless of ESI resolution (#203) ─
                 try:

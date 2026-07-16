@@ -73,5 +73,43 @@ class TopShipParsingTests(unittest.TestCase):
         self.assertAlmostEqual(result.danger_ratio, 0.81)
 
 
+class NeverIndexedCharacterTests(unittest.TestCase):
+    """#208: zKillboard returns HTTP 200 with {"error": "Invalid type or
+    id"} for a character it has never seen in any killmail — NOT the same
+    as a real character with zero kills/losses. Regression for a live 404:
+    a 35-day-old pilot's zkillboard.com/character/<id>/ link 404'd because
+    the app was linking to a page zkillboard has never created."""
+
+    def _parse(self, data, status=200):
+        import asyncio, respx
+        from httpx import Response
+        from evealert.tools.esi_standings import EsiLookup
+
+        lookup = EsiLookup()
+        with respx.mock:
+            respx.get("https://zkillboard.com/api/stats/characterID/2124449072/").mock(
+                return_value=Response(status, json=data)
+            )
+            return asyncio.run(lookup._fetch_zkb_profile(2124449072))
+
+    def test_error_body_returns_none_not_zero_profile(self):
+        result = self._parse({"error": "Invalid type or id"})
+        self.assertIsNone(
+            result,
+            "An {'error': ...} response must be treated as 'no data', not "
+            "parsed as a zero-kills/zero-losses KillProfile.",
+        )
+
+    def test_real_zero_stats_character_still_returns_a_profile(self):
+        """A genuine character with a valid zkillboard page but literally
+        zero recorded activity (no 'error' key) must still parse normally —
+        this fix must not overreact and treat all-zero stats as an error."""
+        data = {"shipsDestroyed": 0, "shipsLost": 0, "dangerRatio": 0, "topLists": []}
+        result = self._parse(data)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.kills_total, 0)
+        self.assertEqual(result.losses_total, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

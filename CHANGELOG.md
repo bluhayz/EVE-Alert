@@ -1,5 +1,38 @@
 # Changelog
 
+## [6.3.30] 2026-07-16
+
+### Fixed — zkillboard character links 404 for pilots zkillboard has never indexed (#208)
+
+- **Root cause**: zkillboard's stats API (`/api/stats/characterID/<id>/`)
+  returns **HTTP 200** with `{"error": "Invalid type or id"}` — not a 4xx —
+  for any character it has never seen in a killmail (e.g. a brand-new pilot
+  who has never been killed or scored a kill). Because the status code is
+  200, `raise_for_status()` never fires, and the error body was being parsed
+  as if it were real data: `shipsDestroyed`/`shipsLost` default to 0, so the
+  character was treated as "a real profile with zero kills/losses" instead
+  of "no profile at all." The same condition — zero killmail history — is
+  exactly what makes that character's `zkillboard.com/character/<id>/` web
+  page 404, so the link shown in pilot intel lines pointed at a page that
+  doesn't exist.
+- `_fetch_zkb_profile` now detects the `{"error": ...}` response shape and
+  returns `None` (not a zero-stat profile). The pilot intel line's
+  zkillboard character link is now shown **only when zkillboard actually
+  has a record for that pilot** — the zkb profile is fetched once per pilot
+  and reused for both the link decision and the existing kill/loss stats
+  line (no extra network round-trip).
+- Verified against the exact character from the reported 404
+  (`2124449072`, "Oveim Hrild Beldrulf"): confirmed live that zkillboard's
+  API returns the error body for this ID, and that the fixed code now
+  correctly omits the link while still showing corp/age/KOS/threat-tier
+  intel for the pilot. A known-active character continues to get its link
+  as before.
+- 3 new regression tests (`NeverIndexedCharacterTests` in
+  `test_esi_standings.py`, plus updated/added `test_alertmanager.py` cases)
+  covering both the error-body-as-None parsing and the link-suppression
+  behavior, including a check that a *genuine* zero-stats character (no
+  `"error"` key) still parses normally.
+
 ## [6.3.29] 2026-07-16
 
 ### Added — clickable zkillboard/dotlan links in the log pane (#207)
