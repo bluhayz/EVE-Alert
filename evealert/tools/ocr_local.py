@@ -155,12 +155,51 @@ async def _winrt_recognize_async(pil_img) -> str:
 
 
 def _ocr_with_winrt(pil_img) -> str:
-    """Synchronous wrapper around _winrt_recognize_async."""
-    loop = asyncio.new_event_loop()
+    """Synchronous wrapper around _winrt_recognize_async.
+
+    Loop-aware (#205): the alarm path calls this from
+    ``_build_enemy_alarm_text()``, which executes ON the engine's asyncio
+    loop thread while that loop is RUNNING.  ``run_until_complete`` on any
+    loop raises ``RuntimeError: Cannot run the event loop while another
+    loop is running`` in that context — the error was swallowed at DEBUG
+    level upstream, so alarm-time OCR silently returned no names on every
+    single alarm while the Settings "Test OCR on Region" button (which runs
+    on a plain worker thread) worked perfectly.  When a running loop is
+    detected, recognition is executed on a short-lived worker thread with
+    its own event loop instead.
+    """
     try:
-        return loop.run_until_complete(_winrt_recognize_async(pil_img))
-    finally:
-        loop.close()
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop running on this thread (Settings test path, plain threads)
+        # — safe to spin up a private loop right here.
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_winrt_recognize_async(pil_img))
+        finally:
+            loop.close()
+
+    # A loop IS running on this thread (engine alarm path) — offload to a
+    # worker thread.  This still blocks the caller for the OCR duration
+    # (as the sync contract requires), but does not touch the caller's loop.
+    import threading  # noqa: PLC0415
+
+    result: dict = {}
+
+    def _worker() -> None:
+        try:
+            result["text"] = asyncio.run(_winrt_recognize_async(pil_img))
+        except Exception as exc:
+            result["error"] = exc
+
+    t = threading.Thread(target=_worker, daemon=True, name="eve-alert-ocr")
+    t.start()
+    t.join(timeout=15.0)
+    if "error" in result:
+        raise result["error"]
+    if t.is_alive():
+        raise TimeoutError("WinRT OCR recognition timed out after 15 s")
+    return result.get("text", "")
 
 
 def _ocr_with_tesseract(pil_img) -> str:

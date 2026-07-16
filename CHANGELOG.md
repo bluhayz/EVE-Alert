@@ -1,5 +1,31 @@
 # Changelog
 
+## [6.3.27] 2026-07-16
+
+### Fixed — alarm-time OCR finally feeds the intel pipeline (#205)
+
+- **Alarm-time OCR returned zero names on every alarm** while the Settings
+  "Test OCR on Region" button worked perfectly — because
+  `_build_enemy_alarm_text()` executes on the engine's asyncio loop thread
+  while that loop is running, and `_ocr_with_winrt`'s
+  `loop.run_until_complete(...)` raises `RuntimeError: Cannot run the event
+  loop while another loop is running` in that context (the test button runs
+  on a plain worker thread, where the same call is legal). The error was
+  swallowed at DEBUG level, leaving only the misleading "check your OCR
+  region" message. `_ocr_with_winrt` is now loop-aware: with a running loop
+  present it executes recognition on a short-lived worker thread with its
+  own event loop (15 s timeout); the plain-thread path is unchanged. This
+  was the last blocker in the OCR chain (#193/#194/#199 fixed real bugs
+  that sat in front of it). Verified live: simulated alarm context against
+  the real screen captured 6 pilots and produced the full ESI/KOS/zKB/threat
+  intel block.
+- **zkillboard character links on pilot intel lines** — every ESI-resolved
+  pilot in the alarm intel output now ends with
+  `| zkillboard.com/character/<id>/` (the v6.3.25 links only covered
+  intel-channel messages, not the alarm output).
+- **dotlan system links on kill reports** — "Recent kills in X" / "No recent
+  kills found for X" lines now append `— dotlan.net/system/X`.
+
 ## [6.3.26] 2026-07-15
 
 ### Fixed — OCR/ESI/KOS intel pipeline completion (#201, #202, #203, #204)

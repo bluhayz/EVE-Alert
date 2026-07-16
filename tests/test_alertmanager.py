@@ -480,6 +480,37 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
             f"Expected the ESI-only message pointing at OCR, got: {messages}",
         )
 
+    async def test_pilot_line_includes_zkillboard_character_link(self):
+        """#205: resolved pilots get a zkillboard.com/character/<id>/ link
+        in their intel header line."""
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=None,
+        )
+        info.name = "Bad Guy"
+
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(return_value=None)
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check(["Bad Guy"])
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("zkillboard.com/character/987654/" in m for m in messages),
+            f"Expected a zkillboard character link in pilot line, got: {messages}",
+        )
+
     async def test_run_intel_check_forwards_to_augment_with_esi(self):
         """#201: the public wrapper used by the Settings OCR test forwards
         its names as hint_names, using the OCR-provided-names code path."""

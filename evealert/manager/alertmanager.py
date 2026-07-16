@@ -1415,6 +1415,9 @@ class AlertAgent:
                         age_str = f"{info.age_days}d old"
                         corps_str = f"{info.corp_history_count} corp(s)"
                         parts.append(f"— {age_str}, {corps_str}")
+                    # zkillboard character link (#205) — same convention as the
+                    # intel-channel reporter links added in v6.3.25
+                    parts.append(f"| zkillboard.com/character/{info.character_id}/")
                 else:
                     # #203: ESI didn't resolve this name — KOS still checked below.
                     parts.append("— ESI lookup unavailable")
@@ -2061,17 +2064,18 @@ class AlertAgent:
             logger.debug("Zkillboard lookup failed: %s", exc)
             return
 
+        dotlan = f"dotlan.net/system/{system_name.replace(' ', '_')}"
         if not kills:
             self._ui(
                 self.main.write_message,
-                f"Intel: No recent kills found for {system_name}.",
+                f"Intel: No recent kills found for {system_name} — {dotlan}",
                 "yellow",
             )
             return
 
         self._ui(
             self.main.write_message,
-            f"Intel: Recent kills in {system_name} ({len(kills)}):",
+            f"Intel: Recent kills in {system_name} ({len(kills)}) — {dotlan}:",
             "yellow",
         )
         for k in kills:

@@ -356,6 +356,46 @@ class WinrtLineStructureTests(unittest.TestCase):
         )
 
 
+class WinrtLoopContextTests(unittest.IsolatedAsyncioTestCase):
+    """Regression for #205: _ocr_with_winrt is called from
+    _build_enemy_alarm_text, which executes ON the engine's asyncio loop
+    thread while the loop is RUNNING. run_until_complete raises
+    'Cannot run the event loop while another loop is running' there, and the
+    error was swallowed upstream — so alarm-time OCR silently returned no
+    names on every alarm, while the Settings test button (plain worker
+    thread, no running loop) worked. _ocr_with_winrt must succeed in BOTH
+    contexts."""
+
+    async def test_ocr_with_winrt_inside_running_loop(self):
+        async def fake_recognize(_img):
+            return "Pilot One\nPilot Two"
+
+        with mock.patch.object(ocr_local, "_winrt_recognize_async", fake_recognize):
+            # We ARE inside a running event loop right now (async test).
+            text = ocr_local._ocr_with_winrt(object())
+        self.assertEqual(text, "Pilot One\nPilot Two")
+
+    async def test_worker_thread_exception_propagates(self):
+        async def fake_recognize(_img):
+            raise ValueError("winrt exploded")
+
+        with mock.patch.object(ocr_local, "_winrt_recognize_async", fake_recognize):
+            with self.assertRaises(ValueError):
+                ocr_local._ocr_with_winrt(object())
+
+
+class WinrtLoopContextSyncTests(unittest.TestCase):
+    def test_ocr_with_winrt_without_running_loop(self):
+        """The plain-thread path (Settings test button) must keep working."""
+
+        async def fake_recognize(_img):
+            return "Pilot One"
+
+        with mock.patch.object(ocr_local, "_winrt_recognize_async", fake_recognize):
+            text = ocr_local._ocr_with_winrt(object())
+        self.assertEqual(text, "Pilot One")
+
+
 class IconGlyphTokenTests(unittest.TestCase):
     """Standing icons frequently OCR as short LETTER tokens ('S Naveia'),
     which the non-alphanumeric strip cannot remove (#199)."""
