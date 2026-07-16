@@ -1,0 +1,149 @@
+"""Tests for LogPane's clickable zkillboard/dotlan hyperlinks (#207).
+
+Uses the offscreen Qt platform so no display is needed in CI.
+"""
+
+import os
+import re
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def _make_pane():
+    from PySide6.QtWidgets import QApplication  # noqa: PLC0415
+
+    QApplication.instance() or QApplication([])  # ensure app exists
+
+    from evealert.ui.log_pane import LogPane  # noqa: PLC0415
+
+    return LogPane()
+
+
+class LinkifyRegexTests(unittest.TestCase):
+    """_LINK_RE must match only known link hosts, never plain pilot/corp
+    names that happen to contain a period (EVE allows '.' in names)."""
+
+    def test_matches_zkillboard_character_link(self):
+        from evealert.ui.log_pane import _LINK_RE  # noqa: PLC0415
+
+        m = _LINK_RE.search("zkillboard.com/character/12345/")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("url"), "zkillboard.com/character/12345/")
+
+    def test_matches_dotlan_system_link(self):
+        from evealert.ui.log_pane import _LINK_RE  # noqa: PLC0415
+
+        m = _LINK_RE.search("dotlan.net/system/Jita")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("url"), "dotlan.net/system/Jita")
+
+    def test_matches_zkillboard_search_link_with_hash(self):
+        from evealert.ui.log_pane import _LINK_RE  # noqa: PLC0415
+
+        m = _LINK_RE.search("zkillboard.com/search/#Roger+Booth")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("url"), "zkillboard.com/search/#Roger+Booth")
+
+    def test_does_not_match_name_with_period(self):
+        from evealert.ui.log_pane import _LINK_RE  # noqa: PLC0415
+
+        self.assertIsNone(_LINK_RE.search("Dr. Evil"))
+        self.assertIsNone(_LINK_RE.search("Some.Guy"))
+
+    def test_does_not_match_unrelated_domain(self):
+        """Only the two hosts this app actually generates should linkify."""
+        from evealert.ui.log_pane import _LINK_RE  # noqa: PLC0415
+
+        self.assertIsNone(_LINK_RE.search("example.com/whatever"))
+
+
+class EntryToHtmlTests(unittest.TestCase):
+    def test_link_gets_https_scheme_and_distinct_color(self):
+        from evealert.ui.log_pane import _entry_to_html  # noqa: PLC0415
+        from evealert.ui import theme  # noqa: PLC0415
+
+        html_out = _entry_to_html(
+            "Bad Guy | zkillboard.com/character/999/", theme.LOG_COLORS["red"]
+        )
+        self.assertIn('href="https://zkillboard.com/character/999/"', html_out)
+        self.assertIn(theme.LOG_LINK_COLOR, html_out)
+        self.assertIn(theme.LOG_COLORS["red"], html_out)  # base line color preserved
+
+    def test_existing_scheme_not_doubled(self):
+        from evealert.ui.log_pane import _entry_to_html  # noqa: PLC0415
+        from evealert.ui import theme  # noqa: PLC0415
+
+        html_out = _entry_to_html(
+            "see https://zkillboard.com/character/1/", theme.LOG_COLORS["cyan"]
+        )
+        self.assertIn('href="https://zkillboard.com/character/1/"', html_out)
+        self.assertNotIn("https://https://", html_out)
+
+    def test_html_special_chars_escaped(self):
+        from evealert.ui.log_pane import _entry_to_html  # noqa: PLC0415
+        from evealert.ui import theme  # noqa: PLC0415
+
+        html_out = _entry_to_html("<script>alert(1)</script> & co", theme.LOG_COLORS["normal"])
+        self.assertNotIn("<script>", html_out)
+        self.assertIn("&lt;script&gt;", html_out)
+
+    def test_no_link_present_no_anchor_tag(self):
+        from evealert.ui.log_pane import _entry_to_html  # noqa: PLC0415
+        from evealert.ui import theme  # noqa: PLC0415
+
+        html_out = _entry_to_html("Enemy Appears! — bluhayz", theme.LOG_COLORS["red"])
+        self.assertNotIn("<a href", html_out)
+
+
+class LogPaneRenderTests(unittest.TestCase):
+    """Integration-level: append() -> real QTextBrowser document."""
+
+    def test_appended_link_is_clickable_anchor_in_widget(self):
+        pane = _make_pane()
+        pane.append(
+            "  ⚠ [KOS-RED] Bad Guy — 5d old | zkillboard.com/character/42/", "red"
+        )
+        html_out = pane._log.toHtml()
+        self.assertIn('href="https://zkillboard.com/character/42/"', html_out)
+
+    def test_plain_text_extraction_keeps_url_readable(self):
+        """Copy/paste (toPlainText, used by the context menu + bug reporter)
+        must still yield clean text with the full URL, not markup."""
+        pane = _make_pane()
+        pane.append("Intel: Recent kills in Jita (2) — dotlan.net/system/Jita", "yellow")
+        plain = pane._log.toPlainText()
+        self.assertIn("dotlan.net/system/Jita", plain)
+        self.assertNotIn("<a ", plain)
+        self.assertNotIn("href=", plain)
+
+    def test_multiple_entries_render_as_separate_lines(self):
+        pane = _make_pane()
+        pane.append("First line — zkillboard.com/character/1/", "red")
+        pane.append("Second line — zkillboard.com/character/2/", "red")
+        plain = pane._log.toPlainText()
+        lines = [l for l in plain.splitlines() if l.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("zkillboard.com/character/1/", lines[0])
+        self.assertIn("zkillboard.com/character/2/", lines[1])
+
+    def test_name_with_period_not_linkified_in_widget(self):
+        pane = _make_pane()
+        pane.append("Intel: 2 hostile(s) in Jita [Dr. Evil, Some.Guy]", "red")
+        html_out = pane._log.toHtml()
+        self.assertNotIn("<a href", html_out)
+
+    def test_filter_and_search_still_work_with_html_content(self):
+        """LogPane's existing filter/search machinery operates on the plain
+        buffered text, not the rendered HTML -- must be unaffected."""
+        pane = _make_pane()
+        pane.append("Intel: kills near Jita — dotlan.net/system/Jita", "cyan")
+        pane.append("System: EVE Alert started.", "green")
+        pane._set_tag_filter("intel")
+        plain = pane._log.toPlainText()
+        self.assertIn("dotlan.net", plain)
+        self.assertNotIn("EVE Alert started", plain)
+
+
+if __name__ == "__main__":
+    unittest.main()

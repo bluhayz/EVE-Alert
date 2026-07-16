@@ -2075,7 +2075,7 @@ class AlertAgent:
 
         self._ui(
             self.main.write_message,
-            f"Intel: Recent kills in {system_name} ({len(kills)}) — {dotlan}:",
+            f"Intel: Recent kills in {system_name} ({len(kills)}) — {dotlan}",
             "yellow",
         )
         for k in kills:

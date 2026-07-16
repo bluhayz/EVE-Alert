@@ -27,6 +27,11 @@ LOG_COLORS: dict[str, str] = {
     "gray": TEXT_MUTED,
 }
 
+# Clickable link color in the log pane (zkillboard/dotlan links, #207) — kept
+# distinct from every LOG_COLORS value so a link is recognizable regardless
+# of which severity color the surrounding line uses.
+LOG_LINK_COLOR = "#58A6FF"
+
 
 def load_qss() -> str:
     """Load theme.qss from the bundled ui/ resource directory."""

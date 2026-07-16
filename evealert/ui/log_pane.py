@@ -15,19 +15,21 @@ Usage::
 
 from __future__ import annotations
 
+import html
+import re
 from collections import deque
 from datetime import datetime
 from typing import NamedTuple
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QAction, QTextCursor
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
-    QPlainTextEdit,
     QPushButton,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -38,6 +40,15 @@ from evealert.ui import theme
 _BUFFER_MAX = 2000
 # Maximum blocks shown in the widget at one time
 _WIDGET_BLOCK_MAX = 500
+
+# Recognizes the zkillboard/dotlan links this app generates (#207) so they
+# render as clickable, distinctly-colored hyperlinks instead of plain text.
+# Scoped to known hosts rather than a generic URL pattern: EVE pilot/corp
+# names are allowed to contain periods (e.g. "Dr. Evil"), so a loose
+# "anything.tld/path"-style regex would risk linkifying part of a name.
+_LINK_RE = re.compile(
+    r"(?P<url>(?:https?://)?(?:zkillboard\.com|dotlan\.net)/[^\s<>\"]+)"
+)
 
 
 class _Entry(NamedTuple):
@@ -55,6 +66,24 @@ def _color_to_tag(color: str) -> str:
     if color == "green":
         return "system"
     return "normal"
+
+
+def _entry_to_html(raw_text: str, base_hex_color: str) -> str:
+    """Render one log line as HTML (#207): base severity color throughout,
+    with any zkillboard/dotlan URL rendered as a distinctly-colored,
+    clickable hyperlink that opens in the system's default browser."""
+    escaped = html.escape(raw_text)
+
+    def _linkify(m: re.Match) -> str:
+        url = m.group("url")
+        href = url if url.startswith(("http://", "https://")) else f"https://{url}"
+        return (
+            f'<a href="{href}" style="color:{theme.LOG_LINK_COLOR}; '
+            f'text-decoration:underline;">{url}</a>'
+        )
+
+    linked = _LINK_RE.sub(_linkify, escaped)
+    return f'<span style="color:{base_hex_color}; white-space:pre-wrap;">{linked}</span>'
 
 
 class LogPane(QWidget):
@@ -137,9 +166,14 @@ class LogPane(QWidget):
         toolbar.addWidget(self._pause_btn)
         root.addLayout(toolbar)
 
-        # Log widget
-        self._log = QPlainTextEdit()
+        # Log widget — QTextBrowser (not QPlainTextEdit) so zkillboard/dotlan
+        # links render as real, clickable hyperlinks that open in the
+        # system's default browser (#207). setOpenExternalLinks is only
+        # available on QTextBrowser, not the plainer QTextEdit.
+        self._log = QTextBrowser()
         self._log.setReadOnly(True)
+        self._log.setOpenExternalLinks(True)
+        self._log.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
         self._log.document().setMaximumBlockCount(_WIDGET_BLOCK_MAX)
         self._log.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._log.customContextMenuRequested.connect(self._show_context_menu)
@@ -202,12 +236,12 @@ class LogPane(QWidget):
 
     def _insert_entry(self, entry: _Entry) -> None:
         """Append one entry to the display widget."""
-        fmt = QTextCharFormat()
         hex_color = theme.LOG_COLORS.get(entry.color, theme.TEXT)
-        fmt.setForeground(QColor(hex_color))
         cursor = self._log.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.insertText(entry.text + "\n", fmt)
+        if cursor.position() > 0:
+            cursor.insertBlock()  # new paragraph, keeps prior line's formatting isolated
+        cursor.insertHtml(_entry_to_html(entry.text, hex_color))
         scrollbar = self._log.verticalScrollBar()
         if scrollbar.value() >= scrollbar.maximum() - 4:
             self._log.ensureCursorVisible()

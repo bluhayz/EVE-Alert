@@ -1,5 +1,30 @@
 # Changelog
 
+## [6.3.29] 2026-07-16
+
+### Added — clickable zkillboard/dotlan links in the log pane (#207)
+
+- zkillboard and dotlan links in the log (pilot intel lines, kill reports,
+  intel-channel summaries) were plain text — you had to select and paste the
+  URL yourself. They're now real hyperlinks: **click to open in your default
+  browser**, rendered in a distinct blue (`#58A6FF`) with an underline so
+  they stand out from the surrounding severity color (red/yellow/cyan/etc.)
+  on the same line.
+- `LogPane`'s display widget changed from `QPlainTextEdit` to `QTextBrowser`
+  (the Qt class built for exactly this: read-only rich text with automatic
+  external-link opening). Copy/paste and the right-click "Copy line"/"Copy
+  all visible" actions are unaffected — they still yield clean plain text
+  with the full URL, not markup.
+- Link detection is scoped to the two hosts this app actually generates
+  (`zkillboard.com`, `dotlan.net`) rather than a generic URL pattern, so a
+  pilot or corp name containing a period (EVE allows them, e.g. "Dr. Evil")
+  is never mistakenly linkified.
+- Fixed a stray trailing colon after the dotlan link in the "Recent kills"
+  log line (cosmetic, left over from #205).
+- 14 new tests (`tests/test_log_pane.py`) covering the link regex, HTML
+  escaping, href scheme normalization, and that filtering/search still work
+  against the underlying plain-text buffer.
+
 ## [6.3.28] 2026-07-16
 
 ### Fixed — alarm intel now targets only the alerting pilot, not the whole Local roster (#206)
