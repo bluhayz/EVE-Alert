@@ -257,7 +257,10 @@ class ReadLocalNamesTests(unittest.TestCase):
              mock.patch.object(ocr_local, "is_tesseract_available", return_value=False), \
              mock.patch("mss.mss") as mock_mss, \
              mock.patch("PIL.Image.frombytes", return_value=fake_img), \
-             mock.patch.object(ocr_local, "_ocr_with_winrt", return_value="Bob McTest\n") as mock_winrt:
+             mock.patch.object(
+                 ocr_local, "_ocr_with_winrt_lines",
+                 return_value=[("Bob McTest", 0.0, 20.0)],
+             ) as mock_winrt:
             mock_mss.return_value.__enter__.return_value.grab.return_value = fake_shot
             result = read_local_names((0, 0, 100, 100))
         mock_winrt.assert_called_once_with(fake_img)
@@ -273,8 +276,11 @@ class ReadLocalNamesTests(unittest.TestCase):
              mock.patch.object(ocr_local, "is_tesseract_available", return_value=True), \
              mock.patch("mss.mss") as mock_mss, \
              mock.patch("PIL.Image.frombytes", return_value=fake_img), \
-             mock.patch.object(ocr_local, "_ocr_with_winrt", side_effect=RuntimeError("fail")), \
-             mock.patch.object(ocr_local, "_ocr_with_tesseract", return_value="Jane Smith\n") as mock_tess:
+             mock.patch.object(ocr_local, "_ocr_with_winrt_lines", side_effect=RuntimeError("fail")), \
+             mock.patch.object(
+                 ocr_local, "_ocr_with_tesseract_lines",
+                 return_value=[("Jane Smith", 0.0, 20.0)],
+             ) as mock_tess:
             mock_mss.return_value.__enter__.return_value.grab.return_value = fake_shot
             result = read_local_names((0, 0, 100, 100))
         mock_tess.assert_called_once_with(fake_img)
@@ -290,7 +296,10 @@ class ReadLocalNamesTests(unittest.TestCase):
              mock.patch.object(ocr_local, "is_tesseract_available", return_value=True), \
              mock.patch("mss.mss") as mock_mss, \
              mock.patch("PIL.Image.frombytes", return_value=fake_img), \
-             mock.patch.object(ocr_local, "_ocr_with_tesseract", return_value="Capsuleer One\n") as mock_tess:
+             mock.patch.object(
+                 ocr_local, "_ocr_with_tesseract_lines",
+                 return_value=[("Capsuleer One", 0.0, 20.0)],
+             ) as mock_tess:
             mock_mss.return_value.__enter__.return_value.grab.return_value = fake_shot
             result = read_local_names((0, 0, 100, 100))
         mock_tess.assert_called_once_with(fake_img)
@@ -306,6 +315,80 @@ class ReadLocalNamesTests(unittest.TestCase):
 # #199 regression tests — WinRT line structure, icon glyphs, preprocessing
 # ---------------------------------------------------------------------------
 
+class ReadLocalNamesNearRowsTests(unittest.TestCase):
+    """#206: only the pilot(s) whose OCR row lines up with a detected enemy
+    icon's row should reach the intel pipeline — not the whole Local roster."""
+
+    def setUp(self):
+        reset_availability_cache()
+
+    def tearDown(self):
+        reset_availability_cache()
+
+    def _patch_capture(self, lines):
+        """Patch _capture_and_recognize_lines to return canned (lines, raw_img)."""
+        return mock.patch.object(
+            ocr_local, "_capture_and_recognize_lines",
+            return_value=(lines, mock.MagicMock()),
+        )
+
+    def test_filters_to_row_near_target(self):
+        # 3x upscale: raw-capture rows at y=0,30,60 -> preprocessed y=0,90,180
+        lines = [
+            ("Friendly One", 0.0, 20.0),
+            ("Bad Guy", 90.0, 110.0),
+            ("Friendly Two", 180.0, 200.0),
+        ]
+        with self._patch_capture(lines):
+            # region top = 1000 (absolute screen). Bad Guy's raw-local center
+            # is (90+110)/2/3 = ~33.3 -> absolute y = 1033.3
+            result = ocr_local.read_local_names_near_rows(
+                (0, 1000, 200, 1300), target_abs_ys=[1033.0], row_tolerance=5.0
+            )
+        self.assertEqual(result, ["Bad Guy"])
+
+    def test_falls_back_to_all_names_when_nothing_matches(self):
+        """A misconfigured (row-misaligned) OCR region must not go silent —
+        it should fall back to the full unfiltered list."""
+        lines = [("Friendly One", 0.0, 20.0), ("Friendly Two", 90.0, 110.0)]
+        with self._patch_capture(lines):
+            result = ocr_local.read_local_names_near_rows(
+                (0, 1000, 200, 1300), target_abs_ys=[99999.0], row_tolerance=5.0
+            )
+        self.assertEqual(set(result), {"Friendly One", "Friendly Two"})
+
+    def test_empty_targets_falls_back_to_all_names(self):
+        """No enemy points at all (defensive case) behaves like read_local_names."""
+        lines = [("Solo Pilot", 0.0, 20.0)]
+        with self._patch_capture(lines):
+            result = ocr_local.read_local_names_near_rows(
+                (0, 1000, 200, 1300), target_abs_ys=[], row_tolerance=5.0
+            )
+        self.assertEqual(result, ["Solo Pilot"])
+
+    def test_multiple_targets_match_multiple_rows(self):
+        """Several simultaneous enemy icons -> several matched names."""
+        lines = [
+            ("Bad One", 0.0, 20.0),
+            ("Friendly", 90.0, 110.0),
+            ("Bad Two", 180.0, 200.0),
+        ]
+        with self._patch_capture(lines):
+            result = ocr_local.read_local_names_near_rows(
+                (0, 1000, 200, 1300),
+                target_abs_ys=[1003.3, 1063.3],  # rows 0 and 180 (preprocessed)
+                row_tolerance=5.0,
+            )
+        self.assertEqual(set(result), {"Bad One", "Bad Two"})
+
+    def test_no_lines_returns_empty(self):
+        with self._patch_capture([]):
+            result = ocr_local.read_local_names_near_rows(
+                (0, 1000, 200, 1300), target_abs_ys=[1000.0], row_tolerance=5.0
+            )
+        self.assertEqual(result, [])
+
+
 class WinrtLineStructureTests(unittest.TestCase):
     """Regression for the #199 root cause: OcrResult.text flattens all lines
     into one space-joined string, so parse_eve_names (which splits on
@@ -318,13 +401,17 @@ class WinrtLineStructureTests(unittest.TestCase):
 
         from PIL import Image
 
+        def _fake_line(text, y):
+            rect = SimpleNamespace(x=0.0, y=float(y), width=100.0, height=20.0)
+            return SimpleNamespace(text=text, words=[SimpleNamespace(text=text, bounding_rect=rect)])
+
         fake_result = SimpleNamespace(
             # The flattened text (what OcrResult.text returns) — one line.
             text="1DuMBasS1 AschRafie Bronwen Morgan",
             lines=[
-                SimpleNamespace(text="1DuMBasS1"),
-                SimpleNamespace(text="AschRafie"),
-                SimpleNamespace(text="Bronwen Morgan"),
+                _fake_line("1DuMBasS1", 0),
+                _fake_line("AschRafie", 30),
+                _fake_line("Bronwen Morgan", 60),
             ],
         )
         engine = mock.MagicMock()

@@ -2225,6 +2225,15 @@ class AlertAgent:
         so the alarm headline reads 'Enemy Appears! — Bad Pilot, Other Pilot'
         instead of firing a plain message and logging names separately.
         Falls back to 'Enemy Appears!' when OCR is disabled or unavailable.
+
+        #206: only the row(s) whose position matches a detected enemy
+        standing-icon (self._enemy_points, set moments earlier in this same
+        run() iteration by vision_thread) are sent to the intel pipeline —
+        not the entire Local roster OCR happens to see. Falls back to the
+        full unfiltered name list if no row lines up with an icon (e.g. an
+        OCR region that isn't row-aligned with the Alert Region), so a
+        misconfigured setup degrades to the old behavior instead of going
+        silent.
         """
         base = "Enemy Appears!"
         if not self._ocr_enabled:
@@ -2233,7 +2242,7 @@ class AlertAgent:
         try:
             from evealert.tools.ocr_local import (  # noqa: PLC0415
                 is_ocr_available,
-                read_local_names,
+                read_local_names_near_rows,
                 resolve_region,
             )
 
@@ -2257,8 +2266,18 @@ class AlertAgent:
                 )
                 return base
 
-            logger.debug("OCR [alarm]: capturing region %s", region)
-            names = read_local_names(region)
+            # Translate the detected enemy icon match points (region-local,
+            # set by vision_thread this same cycle) to absolute screen Y so
+            # they can be compared against OCR'd row positions (#206).
+            target_abs_ys = [self.y1 + y for (_x, y) in (self._enemy_points or [])]
+            heights = [h for (_w, h) in self.alert_vision.needle_dims if h > 0]
+            row_tolerance = (max(heights) if heights else 20) * 0.8
+
+            logger.debug(
+                "OCR [alarm]: capturing region %s, target rows(abs y)=%s tol=%.1f",
+                region, target_abs_ys, row_tolerance,
+            )
+            names = read_local_names_near_rows(region, target_abs_ys, row_tolerance)
             if names:
                 self._last_ocr_names = names          # cache for _augment_with_esi
                 self._ui(

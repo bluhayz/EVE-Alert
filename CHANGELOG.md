@@ -1,5 +1,37 @@
 # Changelog
 
+## [6.3.28] 2026-07-16
+
+### Fixed — alarm intel now targets only the alerting pilot, not the whole Local roster (#206)
+
+- **OCR fed every visible pilot name to the intel pipeline on every Enemy
+  alarm**, not just the hostile who actually triggered it — including the
+  player's own character and every neutral/blue in the room. Root cause:
+  vision-based detection only ever knew "an enemy icon matched somewhere in
+  the region," never which row; OCR then read every name currently visible
+  and sent the entire list downstream.
+- Correlated the two systems by screen position: `Vision.find()` already
+  returns the pixel center of each detected enemy icon
+  (`AlertAgent._enemy_points`); WinRT's `OcrWord.bounding_rect` (previously
+  discarded) gives the pixel position of each recognized name. Both are
+  translated to absolute screen coordinates and matched within a tolerance
+  derived from the icon template's own height — only the OCR row(s) that
+  line up with a detected enemy icon are now sent to ESI/KOS/zKillboard.
+  Implemented for both OCR backends (WinRT and the Tesseract fallback, via
+  `image_to_data`'s per-word line grouping) so the fix isn't Windows-only.
+- **Degrades safely, never silently**: if no OCR row lines up with any
+  detected icon (e.g. an OCR region that isn't row-aligned with the Alert
+  Region — a configuration issue, not a crash), the full unfiltered name
+  list is used instead of returning nothing, so a misconfigured setup falls
+  back to the old (noisier but working) behavior rather than going dark.
+- Verified end-to-end through the real `_build_enemy_alarm_text()` code
+  path against a live 12-pilot Local roster with a synthetic enemy-icon
+  position: correctly isolated the single targeted pilot instead of
+  reporting all twelve.
+- 5 new regression tests for the row-correlation logic
+  (`ReadLocalNamesNearRowsTests`), plus updated existing OCR tests for the
+  new position-preserving internals.
+
 ## [6.3.27] 2026-07-16
 
 ### Fixed — alarm-time OCR finally feeds the intel pipeline (#205)

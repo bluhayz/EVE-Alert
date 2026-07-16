@@ -34,6 +34,11 @@ logger = logging.getLogger("alert.ocr")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .'\-]{2,36}$")
 _HAS_LETTER = re.compile(r"[A-Za-z]")
 
+# Upscale factor applied by _preprocess_for_ocr — shared with the
+# position-correlation code (#206) so a line's pixel Y can be mapped back to
+# raw-capture coordinates without duplicating the magic number.
+_OCR_UPSCALE = 3
+
 # --------------------------------------------------------------------------- #
 # Availability caches
 # --------------------------------------------------------------------------- #
@@ -121,15 +126,19 @@ def reset_availability_cache() -> None:
 # OCR helpers
 # --------------------------------------------------------------------------- #
 
-async def _winrt_recognize_async(pil_img) -> str:
-    """Run Windows.Media.Ocr recognition on a PIL image (async, internal).
+async def _winrt_recognize_lines_async(pil_img) -> list[tuple[str, float, float]]:
+    """Run Windows.Media.Ocr and return each line WITH its vertical position.
 
-    Returns the recognized text with ONE LINE PER OcrLine (#199 root cause):
-    ``OcrResult.text`` flattens the entire result into a single space-joined
-    string with no newlines, which made every multi-name capture fail the
-    per-line name regex downstream (names were read perfectly, then thrown
-    away by the parser).  ``result.lines`` preserves the visual line
-    structure of EVE's Local member list — one pilot per line.
+    Returns a list of ``(text, y_top, y_bottom)`` tuples, in the pixel
+    coordinate space of *pil_img* (the preprocessed/upscaled image) — used
+    by ``read_local_names_near_rows`` (#206) to correlate each OCR'd line
+    with the row of a detected enemy standing-icon, so only the alerted
+    pilot's name (not the whole Local roster) is sent to the intel pipeline.
+
+    ``OcrLine`` itself carries no bounding rect — only its constituent
+    ``OcrWord`` objects do — so a line's vertical extent is the min/max of
+    its words' rects. Lines with no words (shouldn't happen, but the WinRT
+    API doesn't guarantee it) are skipped.
     """
     wgi, wmo, wss = _import_winrt_modules()
 
@@ -150,23 +159,45 @@ async def _winrt_recognize_async(pil_img) -> str:
 
     engine = wmo.OcrEngine.try_create_from_user_profile_languages()
     result = await engine.recognize_async(soft_bmp)
-    # NEVER use result.text here — it strips line structure (see docstring).
-    return "\n".join(line.text for line in result.lines)
+
+    lines_with_pos: list[tuple[str, float, float]] = []
+    for line in result.lines:
+        words = list(line.words)
+        if not words:
+            continue
+        tops = [w.bounding_rect.y for w in words]
+        bottoms = [w.bounding_rect.y + w.bounding_rect.height for w in words]
+        lines_with_pos.append((line.text, min(tops), max(bottoms)))
+    return lines_with_pos
 
 
-def _ocr_with_winrt(pil_img) -> str:
-    """Synchronous wrapper around _winrt_recognize_async.
+async def _winrt_recognize_async(pil_img) -> str:
+    """Run Windows.Media.Ocr recognition on a PIL image (async, internal).
 
-    Loop-aware (#205): the alarm path calls this from
-    ``_build_enemy_alarm_text()``, which executes ON the engine's asyncio
-    loop thread while that loop is RUNNING.  ``run_until_complete`` on any
-    loop raises ``RuntimeError: Cannot run the event loop while another
-    loop is running`` in that context — the error was swallowed at DEBUG
-    level upstream, so alarm-time OCR silently returned no names on every
-    single alarm while the Settings "Test OCR on Region" button (which runs
-    on a plain worker thread) worked perfectly.  When a running loop is
-    detected, recognition is executed on a short-lived worker thread with
-    its own event loop instead.
+    Returns the recognized text with ONE LINE PER OcrLine (#199 root cause):
+    ``OcrResult.text`` flattens the entire result into a single space-joined
+    string with no newlines, which made every multi-name capture fail the
+    per-line name regex downstream (names were read perfectly, then thrown
+    away by the parser).  ``result.lines`` preserves the visual line
+    structure of EVE's Local member list — one pilot per line.
+    """
+    lines = await _winrt_recognize_lines_async(pil_img)
+    # NEVER use OcrResult.text here — it strips line structure (see above).
+    return "\n".join(text for text, _top, _bottom in lines)
+
+
+def _run_winrt_coro(coro_fn, pil_img):
+    """Loop-aware sync runner shared by both WinRT entry points (#205, #206).
+
+    The alarm path calls into this from ``_build_enemy_alarm_text()``, which
+    executes ON the engine's asyncio loop thread while that loop is
+    RUNNING. ``run_until_complete`` on any loop raises ``RuntimeError:
+    Cannot run the event loop while another loop is running`` in that
+    context — previously swallowed at DEBUG level, so alarm-time OCR
+    silently returned no names on every alarm while the Settings "Test OCR
+    on Region" button (a plain worker thread, no running loop) worked
+    perfectly. When a running loop is detected, recognition runs on a
+    short-lived worker thread with its own event loop instead.
     """
     try:
         asyncio.get_running_loop()
@@ -175,20 +206,20 @@ def _ocr_with_winrt(pil_img) -> str:
         # — safe to spin up a private loop right here.
         loop = asyncio.new_event_loop()
         try:
-            return loop.run_until_complete(_winrt_recognize_async(pil_img))
+            return loop.run_until_complete(coro_fn(pil_img))
         finally:
             loop.close()
 
     # A loop IS running on this thread (engine alarm path) — offload to a
-    # worker thread.  This still blocks the caller for the OCR duration
-    # (as the sync contract requires), but does not touch the caller's loop.
+    # worker thread. This still blocks the caller for the OCR duration (as
+    # the sync contract requires), but does not touch the caller's loop.
     import threading  # noqa: PLC0415
 
     result: dict = {}
 
     def _worker() -> None:
         try:
-            result["text"] = asyncio.run(_winrt_recognize_async(pil_img))
+            result["value"] = asyncio.run(coro_fn(pil_img))
         except Exception as exc:
             result["error"] = exc
 
@@ -199,7 +230,17 @@ def _ocr_with_winrt(pil_img) -> str:
         raise result["error"]
     if t.is_alive():
         raise TimeoutError("WinRT OCR recognition timed out after 15 s")
-    return result.get("text", "")
+    return result.get("value")
+
+
+def _ocr_with_winrt(pil_img) -> str:
+    """Synchronous, loop-aware wrapper around _winrt_recognize_async."""
+    return _run_winrt_coro(_winrt_recognize_async, pil_img) or ""
+
+
+def _ocr_with_winrt_lines(pil_img) -> list[tuple[str, float, float]]:
+    """Synchronous, loop-aware wrapper around _winrt_recognize_lines_async."""
+    return _run_winrt_coro(_winrt_recognize_lines_async, pil_img) or []
 
 
 def _ocr_with_tesseract(pil_img) -> str:
@@ -207,6 +248,37 @@ def _ocr_with_tesseract(pil_img) -> str:
     import pytesseract  # noqa: PLC0415
 
     return pytesseract.image_to_string(pil_img)
+
+
+def _ocr_with_tesseract_lines(pil_img) -> list[tuple[str, float, float]]:
+    """Run pytesseract and return each line WITH its vertical position.
+
+    Mirrors _ocr_with_winrt_lines so position correlation (#206) works the
+    same way regardless of backend. pytesseract.image_to_data returns
+    per-word boxes tagged with (block_num, par_num, line_num); words sharing
+    all three belong to the same visual line — group and aggregate exactly
+    like the WinRT path.
+    """
+    import pytesseract  # noqa: PLC0415
+
+    data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT)
+    lines: dict[tuple[int, int, int], dict] = {}
+    n = len(data.get("text", []))
+    for i in range(n):
+        text = data["text"][i].strip()
+        if not text:
+            continue
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        top = data["top"][i]
+        bottom = top + data["height"][i]
+        entry = lines.setdefault(key, {"words": [], "top": top, "bottom": bottom})
+        entry["words"].append(text)
+        entry["top"] = min(entry["top"], top)
+        entry["bottom"] = max(entry["bottom"], bottom)
+    return [
+        (" ".join(entry["words"]), entry["top"], entry["bottom"])
+        for entry in lines.values()
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -234,7 +306,7 @@ def _preprocess_for_ocr(pil_img):
     try:
         img = pil_img.convert("L")                        # grayscale
         w, h = img.size
-        img = img.resize((w * 3, h * 3), 1)               # 1 = LANCZOS (PIL constant)
+        img = img.resize((w * _OCR_UPSCALE, h * _OCR_UPSCALE), 1)  # 1 = LANCZOS
         img = img.convert("RGBA")                         # 32-bit for WinRT Bgra8
         return img
     except Exception:
@@ -334,21 +406,27 @@ def resolve_region(
     return (left, top, right, bottom)
 
 
-def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
-    """Capture *region* (left, top, right, bottom) and OCR pilot names from it.
+def _capture_and_recognize_lines(
+    region: tuple[int, int, int, int],
+) -> tuple[list[tuple[str, float, float]], object]:
+    """Capture *region* and OCR it, preserving per-line vertical position.
 
-    Backend priority: Windows.Media.Ocr → pytesseract.
-    Returns [] on any failure or when no OCR backend is available — never raises.
+    Shared by read_local_names() and read_local_names_near_rows() (#206) so
+    both go through identical capture/backend-selection logic. Returns
+    ``(lines, raw_img)`` where *lines* is a list of ``(text, y_top, y_bottom)``
+    in the PREPROCESSED (upscaled) image's pixel space, and *raw_img* is the
+    unprocessed capture (or None if capture failed) for debug-screenshot use.
+    Never raises.
     """
     if not is_ocr_available():
-        return []
+        return [], None
 
     try:
         import mss  # noqa: PLC0415
         from PIL import Image  # noqa: PLC0415
     except Exception as exc:
         logger.debug("OCR imports failed: %s", exc)
-        return []
+        return [], None
 
     left, top, right, bottom = region
     grab = {
@@ -365,30 +443,104 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
         img = _preprocess_for_ocr(raw_img)
     except Exception as exc:
         logger.debug("OCR screen capture failed: %s", exc)
-        return []
+        return [], None
 
-    text = ""
+    lines: list[tuple[str, float, float]] = []
     if is_winrt_ocr_available():
         try:
-            text = _ocr_with_winrt(img)
-            logger.debug("WinRT OCR raw output (%d chars): %r", len(text), text[:200])
+            lines = _ocr_with_winrt_lines(img)
+            logger.debug("WinRT OCR: %d line(s)", len(lines))
         except Exception as exc:
             logger.debug("Windows.Media.Ocr recognition failed: %s", exc)
 
-    if not text and is_tesseract_available():
+    if not lines and is_tesseract_available():
         try:
-            text = _ocr_with_tesseract(img)
-            logger.debug("Tesseract OCR raw output (%d chars): %r", len(text), text[:200])
+            lines = _ocr_with_tesseract_lines(img)
+            logger.debug("Tesseract OCR: %d line(s)", len(lines))
         except Exception as exc:
             logger.debug("pytesseract recognition failed: %s", exc)
 
-    if not text:
-        logger.debug("OCR backend(s) returned empty text for region %s", region)
+    if not lines:
+        logger.debug("OCR backend(s) returned no lines for region %s", region)
+
+    return lines, raw_img
+
+
+def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
+    """Capture *region* (left, top, right, bottom) and OCR pilot names from it.
+
+    Backend priority: Windows.Media.Ocr → pytesseract.
+    Returns [] on any failure or when no OCR backend is available — never raises.
+    """
+    lines, raw_img = _capture_and_recognize_lines(region)
+    text = "\n".join(t for t, _top, _bottom in lines)
 
     names = parse_eve_names(text)
     if not names and raw_img is not None:
         # No names found — save a debug screenshot so the user can check
         # whether the configured region is pointing at the right area.
+        _save_ocr_debug_screenshot(raw_img, region)
+    return names
+
+
+def read_local_names_near_rows(
+    region: tuple[int, int, int, int],
+    target_abs_ys: list[float],
+    row_tolerance: float = 14.0,
+) -> list[str]:
+    """Like read_local_names(), but returns only the pilot name(s) whose text
+    row is within *row_tolerance* pixels of one of *target_abs_ys* (#206).
+
+    *target_abs_ys* are ABSOLUTE screen Y coordinates — typically the
+    vertical centers of standing-icon matches that triggered the current
+    Enemy alarm (AlertAgent._enemy_points, translated to screen space).
+    *region* is (left, top, right, bottom) in absolute screen coordinates —
+    *region[1]* (top) is used to translate each OCR'd line's position (which
+    is in the preprocessed/upscaled image's LOCAL pixel space) back to
+    absolute screen Y: ``abs_y = region_top + line_y / _OCR_UPSCALE``.
+
+    Degrades gracefully rather than ever making alarm intel WORSE than the
+    unfiltered behavior: if row-filtering matches nothing (e.g. the OCR
+    region isn't row-aligned with the alert region — a misconfiguration, not
+    a crash condition) but names WERE found in the capture, falls back to
+    returning the full unfiltered list instead of an empty one.
+    """
+    lines, raw_img = _capture_and_recognize_lines(region)
+    if not lines:
+        return []
+
+    region_top = region[1]
+    matched_texts = []
+    for text, y_top, y_bottom in lines:
+        line_center_abs = region_top + ((y_top + y_bottom) / 2.0) / _OCR_UPSCALE
+        if any(abs(line_center_abs - target) <= row_tolerance for target in target_abs_ys):
+            matched_texts.append(text)
+
+    if matched_texts:
+        names = parse_eve_names("\n".join(matched_texts))
+        if names:
+            return names
+        logger.debug(
+            "OCR row-match found %d line(s) near enemy icon rows, but none "
+            "parsed as a valid name — falling back to unfiltered names",
+            len(matched_texts),
+        )
+
+    # No row matched any target (or matched text didn't parse as a name) —
+    # fall back to the unfiltered list rather than silently returning
+    # nothing; this keeps alarms useful for setups where the OCR region and
+    # alert region aren't row-aligned.
+    all_text = "\n".join(t for t, _top, _bottom in lines)
+    names = parse_eve_names(all_text)
+    if names:
+        logger.debug(
+            "OCR row-filter matched no lines near enemy icon rows "
+            "(targets=%s, region_top=%s) — falling back to all %d name(s) found. "
+            "If this happens often, check that your OCR region covers the "
+            "same rows as your Alert Region.",
+            target_abs_ys, region_top, len(names),
+        )
+    elif raw_img is not None:
         _save_ocr_debug_screenshot(raw_img, region)
     return names
 
