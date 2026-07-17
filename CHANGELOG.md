@@ -1,5 +1,91 @@
 # Changelog
 
+## [6.3.31] 2026-07-17
+
+### Fixed — OCR emitting the same pilot name twice, with icon-glyph prefixes leaking through (#209)
+
+- `parse_eve_names()` tried the icon-glyph-stripped candidate (e.g. `"S Naveia"`
+  -> `"Naveia"`) **and** the untouched full line as a fallback, unconditionally
+  — so a name like `"g MickFun"` or `"IS Scarlet Police"` emitted both the
+  stripped name and the original glyph-prefixed line as two separate results.
+  The fallback now only fires when the stripped candidate fails validation,
+  eliminating the duplicate while still catching genuinely ambiguous lines
+  (e.g. `"AB 123"`, where the "stripped" remainder has no letters). Tradeoff:
+  a legitimate short first name like `"Al Capone"` now yields only `"Capone"`
+  — accepted, since icon-glyph noise is far more common in practice.
+- 5 new/updated regression tests in `test_ocr_local.py`, including the exact
+  `"g Mick Lun"` / `"IS Scarlet Police"` / `"g MickFun"` cases from the report.
+
+### Fixed — pilot/system names now the clickable link, not a separate visible URL (#210)
+
+- Pilot intel lines, intel-channel reporter/hostile links, and dotlan system
+  links previously showed the name **and** a full raw URL after it
+  (`Mick Lun ... | zkillboard.com/character/.../`). The name itself is now
+  the clickable link; the raw URL is never shown as separate text.
+- New `evealert/tools/link_markers.py`: a small, Qt-free `make_link()` /
+  `MARKER_RE` contract that lets `alertmanager.py` (deliberately Qt-free, for
+  headless testability) hand link text off to `LogPane` for rendering without
+  ever putting a raw URL in the log's plain-text buffer. `LogPane` renders
+  markers as real `<a>` tags in the widget and as readable `"name (url)"`
+  text in the bug-reporter's plain-text export; the existing bare-URL
+  linkify pass (#207) still runs as a fallback for any un-marked text.
+- 10 new tests across `test_log_pane.py` and existing suites confirm the
+  anchor renders on the name, copy/paste stays clean, and legacy bare-URL
+  linkifying still works alongside the new marker.
+
+### Fixed — current system not detected despite being authenticated with ESI (#211)
+
+- The ESI token used for auto-detecting the player's current system was
+  missing the `esi-location.read_location.v1` scope, so
+  `get_character_location()` silently 403'd and the app kept falling back to
+  the placeholder `"Enter a System Name"`. Scopes are fixed at token-issuance
+  time, so already-authenticated users' tokens couldn't gain the new scope
+  retroactively — the fix detects the live 403 and logs a one-time warning
+  telling the user to log out and back in via Settings -> Intel & ESI -> EVE
+  SSO to re-grant permissions, rather than failing silently.
+- 3 new tests in `test_esi_auth.py` cover the scope list, the one-warning
+  behavior across repeated 403s, and the warning flag resetting on a fresh
+  login.
+
+### Changed — per-icon pilot identity now drives Enemy alarm dedup, not screen position alone (#213)
+
+- A Local roster re-sort (which shifts every pilot's row/Y-position without
+  anyone actually leaving) could make a still-present hostile look like a
+  brand-new sighting and re-trigger the alarm mid-cooldown. Dedup identity is
+  now the OCR-resolved pilot name when available, falling back to the
+  quantized screen position when OCR can't identify a given icon (unchanged
+  from before this fix).
+- New `match_names_to_targets()` in `ocr_local.py` replaces
+  `read_local_names_near_rows()`: one OCR pass now serves both the alarm
+  headline (all names found) and per-icon identity (name matched to each
+  icon's row) instead of needing two separate capture passes.
+- OCR identity resolution is throttled (`_IDENTITY_RESOLVE_MIN_INTERVAL` =
+  1.5s) so it doesn't re-run on every 0.1-0.2s poll cycle, while still
+  resolving immediately whenever the *set* of detected icon positions
+  changes (a genuinely new arrival is never delayed).
+- 10 new tests across `test_ocr_local.py`, `test_alarm_dedup.py`, and
+  `test_alertmanager.py` cover the roster-resort-doesn't-realarm scenario,
+  a different pilot landing on an old position not inheriting its cooldown,
+  and the OCR throttling behavior.
+
+### Added — correlate Enemy alarms with recent intel-channel reports (#212)
+
+- When a pilot resolves for an Enemy alarm, EVE Alert now checks the last
+  10 minutes of intel-channel reports for a mention of that same pilot
+  (case-insensitive match against the report's mentioned-pilot list or the
+  reporting pilot themselves) and, if found, shows the report's
+  system/message inline — e.g. `Intel (2m ago, reported by bluhayz):
+  "maybe shuttle" in J5A-IX` — surfacing real-time ship/position
+  corroboration that the ESI/zKillboard pipeline alone can't provide (a
+  zKillboard "flies X" stat is historical, not current).
+- A capped rolling buffer (`deque`, 50 entries) of recent `IntelReport`s is
+  kept on `AlertAgent`, populated from the existing `_on_intel_report()`
+  callback — no re-reading of the chat log needed. New setting
+  `intelligence.correlate_intel_reports` (default on) disables the feature
+  entirely when off; no match means no extra line and no behavior change.
+- 10 new tests in `test_alertmanager.py` cover matching, no-match, a report
+  aging out of the recency window, and the settings toggle.
+
 ## [6.3.30] 2026-07-16
 
 ### Fixed — zkillboard character links 404 for pilots zkillboard has never indexed (#208)

@@ -87,5 +87,71 @@ class AlarmDedupTests(unittest.TestCase):
         self.assertEqual(len(self.agent._seen_enemies), 1)
 
 
+class NameBasedDedupTests(unittest.TestCase):
+    """#213: dedup identity is the OCR-resolved pilot name (when available),
+    not just the icon's screen position — a Local roster re-sort must not
+    make a still-present pilot look like a brand-new enemy, and a genuinely
+    different pilot landing on an old position must not be suppressed."""
+
+    def setUp(self):
+        self.agent = _DedupAgent(cooldown=30)
+
+    def test_roster_resort_same_name_does_not_realarm(self):
+        """The exact bug scenario: same pilot, position shifts (roster
+        re-sorted), name stays constant -> must NOT re-alarm mid-cooldown."""
+        pos1 = (100, 100)
+        pos2 = (100, 300)  # different row after a re-sort
+        key1 = AlertAgent._quantize_point(pos1)
+        key2 = AlertAgent._quantize_point(pos2)
+
+        self.agent._enemy_points = [pos1]
+        self.assertTrue(
+            self.agent._should_alarm_enemy({key1: "Bad Guy"})
+        )  # first sighting, identified by name
+
+        # Roster re-sorts: same pilot, new row/position, but OCR still
+        # resolves the SAME name.
+        self.agent._enemy_points = [pos2]
+        self.assertFalse(
+            self.agent._should_alarm_enemy({key2: "Bad Guy"}),
+            "Same pilot name at a new screen position must not re-alarm "
+            "within the cooldown window.",
+        )
+
+    def test_different_names_same_position_are_not_conflated(self):
+        """Pilot A leaves; pilot B lands on the exact position A used to
+        occupy. B must not inherit A's cooldown."""
+        pos = (100, 100)
+        key = AlertAgent._quantize_point(pos)
+
+        self.agent._enemy_points = [pos]
+        self.assertTrue(self.agent._should_alarm_enemy({key: "Pilot A"}))
+        self.assertFalse(self.agent._should_alarm_enemy({key: "Pilot A"}))
+
+        # Same screen position, but OCR now identifies a DIFFERENT pilot.
+        self.assertTrue(
+            self.agent._should_alarm_enemy({key: "Pilot B"}),
+            "A different pilot at the same screen position must alarm "
+            "even though that position was recently in cooldown.",
+        )
+
+    def test_unresolved_icon_falls_back_to_position_identity(self):
+        """When OCR can't identify a specific icon (missing from the
+        identities dict), dedup falls back to that icon's position -- same
+        behavior as before #213 for the OCR-failed case."""
+        pos = (100, 100)
+        self.agent._enemy_points = [pos]
+        self.assertTrue(self.agent._should_alarm_enemy({}))  # OCR resolved nothing
+        self.assertFalse(self.agent._should_alarm_enemy({}))  # still falls back, still cooling down
+
+    def test_no_identities_arg_behaves_like_pure_position_dedup(self):
+        """Backward-compatible default: calling with no argument at all
+        (e.g. from any caller not yet OCR-aware) is identical to the
+        pre-#213 position-only behavior."""
+        self.agent._enemy_points = [(100, 100)]
+        self.assertTrue(self.agent._should_alarm_enemy())
+        self.assertFalse(self.agent._should_alarm_enemy())
+
+
 if __name__ == "__main__":
     unittest.main()

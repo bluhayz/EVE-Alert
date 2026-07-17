@@ -269,3 +269,61 @@ class GetCharacterLocationTests(unittest.IsolatedAsyncioTestCase):
 
         result = await get_character_location(auth)
         self.assertIsNone(result)
+
+
+class LocationScopeWarningTests(unittest.IsolatedAsyncioTestCase):
+    """#211: a 403 on the location endpoint means the current token predates
+    esi-location.read_location.v1 being added to _SCOPES -- must be
+    surfaced as a one-time WARNING (previously silent at DEBUG), not
+    conflated with a generic/transient failure."""
+
+    def setUp(self):
+        import evealert.tools.esi_auth as esi_auth_mod
+
+        self._mod = esi_auth_mod
+        esi_auth_mod.reset_location_scope_warning()
+
+    def tearDown(self):
+        self._mod.reset_location_scope_warning()
+
+    def _make_403_client(self):
+        resp = mock.MagicMock()
+        resp.status_code = 403
+        client = mock.AsyncMock()
+        client.get = mock.AsyncMock(return_value=resp)
+        client.__aenter__ = mock.AsyncMock(return_value=client)
+        client.__aexit__ = mock.AsyncMock(return_value=False)
+        return client
+
+    async def test_location_scope_in_default_scopes(self):
+        self.assertIn("esi-location.read_location.v1", self._mod._SCOPES)
+
+    async def test_403_returns_none_and_logs_one_warning(self):
+        from evealert.tools.esi_auth import EsiAuth, get_character_location
+
+        auth = mock.MagicMock(spec=EsiAuth)
+        auth.character_id = 12345
+        auth.get_token = mock.AsyncMock(return_value="tok")
+
+        client = self._make_403_client()
+        with mock.patch("httpx.AsyncClient", return_value=client), \
+             mock.patch.object(self._mod.logger, "warning") as mock_warn:
+            result1 = await get_character_location(auth)
+            result2 = await get_character_location(auth)
+
+        self.assertIsNone(result1)
+        self.assertIsNone(result2)
+        # Only ONE warning across two failed polls -- not per-cycle spam.
+        mock_warn.assert_called_once()
+        warned_text = mock_warn.call_args[0][0]
+        self.assertIn("esi-location.read_location.v1", warned_text)
+
+    async def test_login_resets_warning_flag(self):
+        self._mod._location_scope_warning_shown = True
+        # Simulate what login() does on success without a real OAuth round trip.
+        self._mod.reset_location_scope_warning()
+        self.assertFalse(self._mod._location_scope_warning_shown)
+
+
+if __name__ == "__main__":
+    unittest.main()

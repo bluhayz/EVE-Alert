@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from evealert.tools.link_markers import MARKER_RE
 from evealert.ui import theme
 
 # Maximum entries to keep in the ring buffer
@@ -41,11 +42,12 @@ _BUFFER_MAX = 2000
 # Maximum blocks shown in the widget at one time
 _WIDGET_BLOCK_MAX = 500
 
-# Recognizes the zkillboard/dotlan links this app generates (#207) so they
-# render as clickable, distinctly-colored hyperlinks instead of plain text.
-# Scoped to known hosts rather than a generic URL pattern: EVE pilot/corp
-# names are allowed to contain periods (e.g. "Dr. Evil"), so a loose
-# "anything.tld/path"-style regex would risk linkifying part of a name.
+# Recognizes bare zkillboard/dotlan URLs (#207) as a fallback for any log
+# text that wasn't built with the #210 marker convention (make_link()) —
+# e.g. plugin-generated text. Scoped to known hosts rather than a generic
+# URL pattern: EVE pilot/corp names are allowed to contain periods (e.g.
+# "Dr. Evil"), so a loose "anything.tld/path"-style regex would risk
+# linkifying part of a name.
 _LINK_RE = re.compile(
     r"(?P<url>(?:https?://)?(?:zkillboard\.com|dotlan\.net)/[^\s<>\"]+)"
 )
@@ -68,22 +70,60 @@ def _color_to_tag(color: str) -> str:
     return "normal"
 
 
-def _entry_to_html(raw_text: str, base_hex_color: str) -> str:
-    """Render one log line as HTML (#207): base severity color throughout,
-    with any zkillboard/dotlan URL rendered as a distinctly-colored,
-    clickable hyperlink that opens in the system's default browser."""
-    escaped = html.escape(raw_text)
+def _href_for(url: str) -> str:
+    return url if url.startswith(("http://", "https://")) else f"https://{url}"
+
+
+def _linkify_bare_urls(text: str) -> str:
+    """Fallback linkify pass (#207) for bare zkillboard/dotlan URLs that
+    weren't wrapped with a #210 marker."""
 
     def _linkify(m: re.Match) -> str:
         url = m.group("url")
-        href = url if url.startswith(("http://", "https://")) else f"https://{url}"
         return (
-            f'<a href="{href}" style="color:{theme.LOG_LINK_COLOR}; '
+            f'<a href="{_href_for(url)}" style="color:{theme.LOG_LINK_COLOR}; '
             f'text-decoration:underline;">{url}</a>'
         )
 
-    linked = _LINK_RE.sub(_linkify, escaped)
+    return _LINK_RE.sub(_linkify, text)
+
+
+def _entry_to_html(raw_text: str, base_hex_color: str) -> str:
+    """Render one log line as HTML: base severity color throughout, with
+    #210 link markers rendered as a clickable hyperlink on their display
+    text (e.g. a pilot's name), and any leftover bare zkillboard/dotlan
+    URL (#207) linkified the same way as a fallback. Links open in the
+    system's default browser."""
+    escaped = html.escape(raw_text)
+
+    segments = []
+    pos = 0
+    for m in MARKER_RE.finditer(escaped):
+        # Bare-URL fallback only applies to text OUTSIDE markers — running
+        # it over the whole string would also match the URL sitting inside
+        # a marker's own payload and wrap it in a second, nested <a>.
+        segments.append(_linkify_bare_urls(escaped[pos:m.start()]))
+        text, url = m.group("text"), m.group("url")
+        segments.append(
+            f'<a href="{_href_for(url)}" style="color:{theme.LOG_LINK_COLOR}; '
+            f'text-decoration:underline;">{text}</a>'
+        )
+        pos = m.end()
+    segments.append(_linkify_bare_urls(escaped[pos:]))
+    linked = "".join(segments)
+
     return f'<span style="color:{base_hex_color}; white-space:pre-wrap;">{linked}</span>'
+
+
+def _strip_markers_plain(text: str) -> str:
+    """Render #210 link markers as readable plain text ("name (url)") for
+    contexts that read raw buffer text directly instead of the rendered
+    HTML widget (bug-report log export)."""
+
+    def _plain(m: re.Match) -> str:
+        return f"{m.group('text')} ({m.group('url')})"
+
+    return MARKER_RE.sub(_plain, text)
 
 
 class LogPane(QWidget):
@@ -120,7 +160,7 @@ class LogPane(QWidget):
         *max_chars* — if > 0, truncate to the most-recent *max_chars*
         characters with a leading truncation notice.
         """
-        lines = [e.text for e in self._buffer]
+        lines = [_strip_markers_plain(e.text) for e in self._buffer]
         text = "\n".join(lines)
         if max_chars > 0 and len(text) > max_chars:
             text = "...(truncated)\n" + text[-max_chars:]

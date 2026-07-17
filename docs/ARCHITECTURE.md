@@ -67,6 +67,7 @@ fleet composition, **composite threat score** #141).
 | `image_manager.py` | `ImageManagerDialog` | Template add/remove/preview; `cv2.imread` validation |
 | `threshold_editor.py` | `ThresholdEditorDialog` | Per-image confidence overrides |
 | `notification_wizard.py` | `NotificationWizardDialog` | Guided Telegram/Pushover/ntfy setup with live test (#149) |
+| `log_pane.py` | `LogPane` | Filterable/searchable/pauseable log widget (#167); renders `tools/link_markers.py` markers and bare zkillboard/dotlan URLs as clickable links (#207/#210) |
 | `theme.py` / `theme.qss` | — | Tokens + stylesheet; button variants via `class` dynamic property |
 
 ### Detection & data
@@ -81,6 +82,7 @@ fleet composition, **composite threat score** #141).
 | `tools/threat_score.py` | `compute_threat_score()` → 1–10 + CAUTION/HIGH/CRITICAL (#141) |
 | `tools/space_profiles.py` | F3 presets: nullsec / wormhole / highsec (#143) |
 | `tools/tts.py` | pyttsx3 speech, daemon-thread, lock-serialized (#139) |
+| `tools/link_markers.py` | `make_link()`/`MARKER_RE` — framework-free "render this text as a clickable link" contract that lets `manager/alertmanager.py` (no Qt dependency) hand link text off to `ui/log_pane.py` for rendering, without ever putting a raw URL in the visible log text (#210) |
 
 ### Intel & integrations — see [INTEGRATIONS.md](INTEGRATIONS.md) for endpoints
 

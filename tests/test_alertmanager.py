@@ -563,5 +563,288 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
         mock_augment.assert_awaited_once_with(hint_names=["Alice", "Bob"])
 
 
+class ResolveEnemyIdentitiesTests(unittest.TestCase):
+    """#213: OCR-based per-icon identity resolution, throttled so it
+    doesn't run on every 0.1-0.2s poll cycle."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._ocr_enabled = True
+        self.agent.x1, self.agent.y1, self.agent.x2, self.agent.y2 = 0, 1000, 200, 1300
+        self.agent._ocr_region = (0, 0, 0, 0)  # falls back to alert region
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _patch_ocr_available(self):
+        """OCR backend availability depends on what's installed on the
+        machine running the tests (winsdk/winrt/Tesseract) -- always mock
+        it explicitly so these tests are deterministic in CI."""
+        return patch("evealert.tools.ocr_local.is_ocr_available", return_value=True)
+
+    def test_resolves_and_caches_last_ocr_names(self):
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=({(2, 51): "Bad Guy"}, ["Bad Guy"]),
+        ) as mock_match:
+            identities = self.agent._resolve_enemy_identities()
+        mock_match.assert_called_once()
+        self.assertEqual(identities, {(2, 51): "Bad Guy"})
+        self.assertEqual(self.agent._last_ocr_names, ["Bad Guy"])
+
+    def test_throttled_when_position_set_unchanged(self):
+        """A second call within _IDENTITY_RESOLVE_MIN_INTERVAL, with the
+        SAME detected positions, must reuse the cached mapping instead of
+        running OCR again."""
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=({(2, 51): "Bad Guy"}, ["Bad Guy"]),
+        ) as mock_match:
+            self.agent._resolve_enemy_identities()
+            result2 = self.agent._resolve_enemy_identities()
+        mock_match.assert_called_once()  # NOT called twice
+        self.assertEqual(result2, {(2, 51): "Bad Guy"})
+
+    def test_not_throttled_when_position_set_changes(self):
+        """A new icon position must trigger an immediate re-resolve even
+        within the throttle window -- a genuinely new arrival must be
+        identified right away, not delayed up to _IDENTITY_RESOLVE_MIN_INTERVAL."""
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=({}, []),
+        ) as mock_match:
+            self.agent._resolve_enemy_identities()
+            self.agent._enemy_points = [(50, 33), (50, 333)]  # new icon appeared
+            self.agent._resolve_enemy_identities()
+        self.assertEqual(mock_match.call_count, 2)
+
+    def test_ocr_disabled_returns_empty_without_calling_ocr(self):
+        self.agent._ocr_enabled = False
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets"
+        ) as mock_match:
+            identities = self.agent._resolve_enemy_identities()
+        mock_match.assert_not_called()
+        self.assertEqual(identities, {})
+        self.assertEqual(self.agent._last_ocr_names, [])
+
+    def test_build_enemy_alarm_text_uses_resolved_names(self):
+        self.agent._last_ocr_names = ["Bad Guy", "Other Guy"]
+        text = self.agent._build_enemy_alarm_text()
+        self.assertEqual(text, "Enemy Appears! — Bad Guy, Other Guy")
+
+    def test_build_enemy_alarm_text_falls_back_when_no_names(self):
+        self.agent._last_ocr_names = []
+        self.assertEqual(self.agent._build_enemy_alarm_text(), "Enemy Appears!")
+
+
+def _make_intel_report(pilot="bluhayz", mentioned_pilots=None, system="J5A-IX",
+                        message="MickFun  J5A-IX nv but maybe shuttle"):
+    from evealert.tools.intel_parser import IntelReport  # noqa: PLC0415
+
+    return IntelReport(
+        pilot=pilot,
+        raw_line=f"[ 2026.07.17 11:29:27 ] {pilot} > {message}",
+        system=system,
+        hostile_count=1,
+        is_clear=False,
+        ships=[],
+        mentioned_pilots=mentioned_pilots or [],
+    )
+
+
+class FindRecentIntelReportTests(unittest.TestCase):
+    """#212: AlertAgent._find_recent_intel_report() -- the matching/recency
+    logic underneath the Enemy-alarm intel-correlation line."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_matches_mentioned_pilot_case_insensitively(self):
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        self.agent._intel_reports_recent.append((time.time(), report))
+        match = self.agent._find_recent_intel_report("mickfun")
+        self.assertIsNotNone(match)
+        matched_report, age = match
+        self.assertIs(matched_report, report)
+        self.assertLess(age, 1.0)
+
+    def test_matches_reporting_pilot_themselves(self):
+        report = _make_intel_report(pilot="bluhayz", mentioned_pilots=[])
+        self.agent._intel_reports_recent.append((time.time(), report))
+        match = self.agent._find_recent_intel_report("BluHayz")
+        self.assertIsNotNone(match)
+
+    def test_no_match_when_name_not_mentioned(self):
+        report = _make_intel_report(mentioned_pilots=["SomeoneElse"])
+        self.agent._intel_reports_recent.append((time.time(), report))
+        self.assertIsNone(self.agent._find_recent_intel_report("MickFun"))
+
+    def test_report_outside_recency_window_does_not_match(self):
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        stale_time = time.time() - (
+            self.agent._INTEL_CORRELATION_WINDOW_SECONDS + 30
+        )
+        self.agent._intel_reports_recent.append((stale_time, report))
+        self.assertIsNone(self.agent._find_recent_intel_report("MickFun"))
+
+    def test_report_just_inside_recency_window_matches(self):
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        recent_time = time.time() - (
+            self.agent._INTEL_CORRELATION_WINDOW_SECONDS - 30
+        )
+        self.agent._intel_reports_recent.append((recent_time, report))
+        self.assertIsNotNone(self.agent._find_recent_intel_report("MickFun"))
+
+    def test_most_recent_matching_report_wins(self):
+        old = _make_intel_report(mentioned_pilots=["MickFun"], message="old sighting")
+        new = _make_intel_report(mentioned_pilots=["MickFun"], message="new sighting")
+        now = time.time()
+        self.agent._intel_reports_recent.append((now - 100, old))
+        self.agent._intel_reports_recent.append((now - 5, new))
+        match = self.agent._find_recent_intel_report("MickFun")
+        self.assertIsNotNone(match)
+        matched_report, _ = match
+        self.assertIs(matched_report, new)
+
+
+class IntelCorrelationPipelineTests(unittest.IsolatedAsyncioTestCase):
+    """#212: end-to-end -- a buffered intel report surfaces as an extra log
+    line on a matching Enemy-alarm pilot, via run_intel_check() (the same
+    pipeline path a live alarm uses)."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def _run_intel_check_with_esi_stub(self, name="MickFun"):
+        info = MagicMock(
+            corporation_name="Fraternity.", alliance_name="",
+            age_days=1267, corp_history_count=2, security_status=0.0,
+            character_id=2120857559, corporation_id=456, alliance_id=None,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(return_value=None)
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+
+    async def test_matching_recent_report_shown_inline(self):
+        report = _make_intel_report(
+            pilot="bluhayz", mentioned_pilots=["MickFun"],
+            system="J5A-IX", message="MickFun  J5A-IX nv but maybe shuttle",
+        )
+        self.agent._intel_reports_recent.append((time.time(), report))
+
+        await self._run_intel_check_with_esi_stub("MickFun")
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("Intel (" in m and "reported by bluhayz" in m and "J5A-IX" in m for m in messages),
+            f"Expected an inline intel-correlation line, got: {messages}",
+        )
+
+    async def test_no_match_produces_no_extra_line(self):
+        report = _make_intel_report(pilot="bluhayz", mentioned_pilots=["SomeoneElse"])
+        self.agent._intel_reports_recent.append((time.time(), report))
+
+        await self._run_intel_check_with_esi_stub("MickFun")
+
+        messages = self._logged_messages()
+        self.assertFalse(any(m.strip().startswith("Intel (") for m in messages))
+
+    async def test_aged_out_report_produces_no_extra_line(self):
+        report = _make_intel_report(pilot="bluhayz", mentioned_pilots=["MickFun"])
+        stale_time = time.time() - (
+            self.agent._INTEL_CORRELATION_WINDOW_SECONDS + 60
+        )
+        self.agent._intel_reports_recent.append((stale_time, report))
+
+        await self._run_intel_check_with_esi_stub("MickFun")
+
+        messages = self._logged_messages()
+        self.assertFalse(any(m.strip().startswith("Intel (") for m in messages))
+
+    async def test_toggle_disabled_suppresses_correlation_even_with_a_match(self):
+        self.agent._correlate_intel_enabled = False
+        report = _make_intel_report(pilot="bluhayz", mentioned_pilots=["MickFun"])
+        self.agent._intel_reports_recent.append((time.time(), report))
+
+        await self._run_intel_check_with_esi_stub("MickFun")
+
+        messages = self._logged_messages()
+        self.assertFalse(any(m.strip().startswith("Intel (") for m in messages))
+
+
 if __name__ == "__main__":
     unittest.main()

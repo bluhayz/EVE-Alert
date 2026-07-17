@@ -315,9 +315,12 @@ class ReadLocalNamesTests(unittest.TestCase):
 # #199 regression tests — WinRT line structure, icon glyphs, preprocessing
 # ---------------------------------------------------------------------------
 
-class ReadLocalNamesNearRowsTests(unittest.TestCase):
-    """#206: only the pilot(s) whose OCR row lines up with a detected enemy
-    icon's row should reach the intel pipeline — not the whole Local roster."""
+class MatchNamesToTargetsTests(unittest.TestCase):
+    """#206/#213: match_names_to_targets() returns per-target identity
+    (matches) AND the flat name list (all_names) in one OCR pass -- matches
+    is used for per-icon dedup identity, all_names for the alarm headline /
+    ESI hint list (which must degrade gracefully even when no target
+    matches, e.g. a row-misaligned OCR region)."""
 
     def setUp(self):
         reset_availability_cache()
@@ -332,7 +335,7 @@ class ReadLocalNamesNearRowsTests(unittest.TestCase):
             return_value=(lines, mock.MagicMock()),
         )
 
-    def test_filters_to_row_near_target(self):
+    def test_matches_target_to_nearest_row(self):
         # 3x upscale: raw-capture rows at y=0,30,60 -> preprocessed y=0,90,180
         lines = [
             ("Friendly One", 0.0, 20.0),
@@ -342,51 +345,72 @@ class ReadLocalNamesNearRowsTests(unittest.TestCase):
         with self._patch_capture(lines):
             # region top = 1000 (absolute screen). Bad Guy's raw-local center
             # is (90+110)/2/3 = ~33.3 -> absolute y = 1033.3
-            result = ocr_local.read_local_names_near_rows(
-                (0, 1000, 200, 1300), target_abs_ys=[1033.0], row_tolerance=5.0
+            matches, all_names = ocr_local.match_names_to_targets(
+                (0, 1000, 200, 1300), targets={"icon1": 1033.0}, row_tolerance=5.0
             )
-        self.assertEqual(result, ["Bad Guy"])
+        self.assertEqual(matches, {"icon1": "Bad Guy"})
+        self.assertEqual(all_names, ["Friendly One", "Bad Guy", "Friendly Two"])
 
-    def test_falls_back_to_all_names_when_nothing_matches(self):
-        """A misconfigured (row-misaligned) OCR region must not go silent —
-        it should fall back to the full unfiltered list."""
+    def test_all_names_populated_even_when_no_target_matches(self):
+        """A misconfigured (row-misaligned) OCR region: matches is empty but
+        all_names (used for the alarm headline) still reflects everything
+        OCR found -- callers must not treat an empty matches dict as 'OCR
+        found nothing'."""
         lines = [("Friendly One", 0.0, 20.0), ("Friendly Two", 90.0, 110.0)]
         with self._patch_capture(lines):
-            result = ocr_local.read_local_names_near_rows(
-                (0, 1000, 200, 1300), target_abs_ys=[99999.0], row_tolerance=5.0
+            matches, all_names = ocr_local.match_names_to_targets(
+                (0, 1000, 200, 1300), targets={"icon1": 99999.0}, row_tolerance=5.0
             )
-        self.assertEqual(set(result), {"Friendly One", "Friendly Two"})
+        self.assertEqual(matches, {})
+        self.assertEqual(set(all_names), {"Friendly One", "Friendly Two"})
 
-    def test_empty_targets_falls_back_to_all_names(self):
-        """No enemy points at all (defensive case) behaves like read_local_names."""
+    def test_empty_targets_still_returns_all_names(self):
         lines = [("Solo Pilot", 0.0, 20.0)]
         with self._patch_capture(lines):
-            result = ocr_local.read_local_names_near_rows(
-                (0, 1000, 200, 1300), target_abs_ys=[], row_tolerance=5.0
+            matches, all_names = ocr_local.match_names_to_targets(
+                (0, 1000, 200, 1300), targets={}, row_tolerance=5.0
             )
-        self.assertEqual(result, ["Solo Pilot"])
+        self.assertEqual(matches, {})
+        self.assertEqual(all_names, ["Solo Pilot"])
 
     def test_multiple_targets_match_multiple_rows(self):
-        """Several simultaneous enemy icons -> several matched names."""
+        """Several simultaneous enemy icons -> each gets its own identity."""
         lines = [
             ("Bad One", 0.0, 20.0),
             ("Friendly", 90.0, 110.0),
             ("Bad Two", 180.0, 200.0),
         ]
         with self._patch_capture(lines):
-            result = ocr_local.read_local_names_near_rows(
+            matches, all_names = ocr_local.match_names_to_targets(
                 (0, 1000, 200, 1300),
-                target_abs_ys=[1003.3, 1063.3],  # rows 0 and 180 (preprocessed)
+                targets={"icon_a": 1003.3, "icon_b": 1063.3},  # rows 0 and 180 (preprocessed)
                 row_tolerance=5.0,
             )
-        self.assertEqual(set(result), {"Bad One", "Bad Two"})
+        self.assertEqual(matches, {"icon_a": "Bad One", "icon_b": "Bad Two"})
+        self.assertEqual(set(all_names), {"Bad One", "Friendly", "Bad Two"})
 
-    def test_no_lines_returns_empty(self):
+    def test_no_lines_returns_empty_both(self):
         with self._patch_capture([]):
-            result = ocr_local.read_local_names_near_rows(
-                (0, 1000, 200, 1300), target_abs_ys=[1000.0], row_tolerance=5.0
+            matches, all_names = ocr_local.match_names_to_targets(
+                (0, 1000, 200, 1300), targets={"icon1": 1000.0}, row_tolerance=5.0
             )
-        self.assertEqual(result, [])
+        self.assertEqual(matches, {})
+        self.assertEqual(all_names, [])
+
+    def test_unmatched_target_simply_absent_from_matches(self):
+        """A target with no nearby row is just missing from `matches` --
+        distinct from 'no names found at all' (#213 needs this distinction
+        to fall back to position-based identity only for THAT icon)."""
+        lines = [("Bad Guy", 90.0, 110.0)]
+        with self._patch_capture(lines):
+            matches, all_names = ocr_local.match_names_to_targets(
+                (0, 1000, 200, 1300),
+                targets={"matched": 1033.0, "unmatched": 5000.0},
+                row_tolerance=5.0,
+            )
+        self.assertEqual(matches, {"matched": "Bad Guy"})
+        self.assertNotIn("unmatched", matches)
+        self.assertEqual(all_names, ["Bad Guy"])
 
 
 class WinrtLineStructureTests(unittest.TestCase):
@@ -487,18 +511,39 @@ class IconGlyphTokenTests(unittest.TestCase):
     """Standing icons frequently OCR as short LETTER tokens ('S Naveia'),
     which the non-alphanumeric strip cannot remove (#199)."""
 
-    def test_short_letter_token_stripped_candidate_first(self):
+    def test_short_letter_token_stripped_candidate_only(self):
+        """#209: once the stripped remainder validates as a real name, the
+        noisy full-line form ('S Naveia') must NOT also be emitted — doing
+        both produced visible duplicate pilots in the alarm headline
+        ("Mick Lun, g Mick Lun") and wasted a slot in the 5-name query cap."""
         names = parse_eve_names("S Naveia\nCS Bronwen Morgan")
-        self.assertIn("Naveia", names)
-        self.assertIn("Bronwen Morgan", names)
-        # Stripped candidate ranks before the full-line fallback.
-        self.assertLess(names.index("Naveia"), names.index("S Naveia"))
+        self.assertEqual(names, ["Naveia", "Bronwen Morgan"])
+        self.assertNotIn("S Naveia", names)
+        self.assertNotIn("CS Bronwen Morgan", names)
 
-    def test_legitimate_short_first_name_keeps_both_candidates(self):
+    def test_real_world_duplicate_regression_g_and_is_prefixes(self):
+        """Exact prefixes observed in a live bug report (#209)."""
+        self.assertEqual(parse_eve_names("g Mick Lun"), ["Mick Lun"])
+        self.assertEqual(parse_eve_names("IS Scarlet Police"), ["Scarlet Police"])
+        self.assertEqual(parse_eve_names("g MickFun"), ["MickFun"])
+
+    def test_legitimate_short_first_name_yields_stripped_form(self):
+        """Known tradeoff (#209): a real EVE name with a short first token
+        (e.g. 'Al Capone') is indistinguishable from an icon-glyph misread
+        using this heuristic alone, so only the stripped remainder
+        ('Capone') is emitted. ESI exact-match will simply fail to resolve
+        it if the true full name was required — a graceful miss, not a
+        crash — traded off against eliminating the far more common
+        duplicate-pilot spam from icon glyphs."""
         names = parse_eve_names("Al Capone")
-        # Ambiguous — both candidates emitted; ESI exact-match resolves it.
-        self.assertIn("Capone", names)
-        self.assertIn("Al Capone", names)
+        self.assertEqual(names, ["Capone"])
+
+    def test_stripped_remainder_invalid_falls_back_to_full_line(self):
+        """When the short-prefix condition is met but the stripped remainder
+        does NOT validate (here: no letters, fails _HAS_LETTER), the full
+        line is tried as a fallback instead of emitting nothing."""
+        names = parse_eve_names("AB 123")  # remainder "123" has no letters
+        self.assertEqual(names, ["AB 123"])
 
     def test_long_first_token_untouched(self):
         self.assertEqual(parse_eve_names("Bronwen Morgan"), ["Bronwen Morgan"])

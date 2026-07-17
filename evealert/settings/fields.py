@@ -61,6 +61,10 @@ FIELDS: list = [
               "Run ESI/KOS check on intel hostile names within threat radius", "intel_threat_check_var", False),
     FieldSpec("intelligence.intel_threat_radius", "int", "Intel & ESI", "Intelligence",
               "Intel threat radius (jumps, 0-20)", "intel_threat_radius_entry", 5),
+    # Correlate Enemy alarms with recent intel-channel reports (#212)
+    FieldSpec("intelligence.correlate_intel_reports", "bool", "Intel & ESI", "Intelligence",
+              "Show recent intel-channel reports (ship/system) alongside Enemy alarms",
+              "correlate_intel_var", True),
     FieldSpec("esi.enabled", "bool", "Intel & ESI", "ESI Augmentation",
               "Show corp/alliance on Enemy alarm", "esi_enabled_var", False),
     FieldSpec("esi.show_corp", "bool", "Intel & ESI", "ESI Augmentation",

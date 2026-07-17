@@ -12,6 +12,7 @@ Required scopes for v4.0 features:
   esi-fleets.read_fleet.v1            — fleet membership (#96)
   esi-assets.read_assets.v1           — asset monitoring (#97)
   esi-corporations.read_structures.v1 — structure fuel (#97)
+  esi-location.read_location.v1       — current system auto-detect (#211)
   publicData                          — ESI character info (no auth needed)
 
 Usage:
@@ -65,9 +66,19 @@ _SCOPES = " ".join(
         "esi-fleets.read_fleet.v1",
         "esi-assets.read_assets.v1",
         "esi-corporations.read_structures.v1",  # #104: needed for structure fuel
+        "esi-location.read_location.v1",  # #211: needed for current-system auto-detect
         "publicData",
     ]
 )
+
+# Set once per process the first time a 403 on the location endpoint is
+# observed, so the "you need to re-authenticate" guidance is logged as a
+# WARNING once (not every 30 s poll) rather than silently at DEBUG (#211).
+# NOTE: existing logged-in users authenticated before this scope was added
+# to _SCOPES will hit this on upgrade -- their token simply predates the
+# scope and cannot gain it without a fresh login/consent; there is no way
+# to add a scope to an already-issued token.
+_location_scope_warning_shown = False
 
 
 def _decode_character_from_jwt(access_token: str) -> tuple[int, str]:
@@ -179,6 +190,7 @@ class EsiAuth:
         if token:
             self._token = token
             self._save_token()
+            reset_location_scope_warning()  # #211: fresh consent may have granted it
             return True
         return False
 
@@ -384,6 +396,26 @@ async def get_character_location(auth: EsiAuth) -> str | None:
                 f"https://esi.evetech.net/v1/characters/{char_id}/location/",
                 headers={"Authorization": f"Bearer {token}"},
             )
+            if loc_resp.status_code == 403:
+                # #211: a 403 here almost always means the current token was
+                # issued before esi-location.read_location.v1 was added to
+                # _SCOPES -- ESI scopes are fixed at consent time and cannot
+                # be granted retroactively. Surface this ONCE as a WARNING
+                # (previously silent at DEBUG, so the feature just looked
+                # broken with no explanation) with actionable guidance,
+                # instead of failing the same way as a transient network error.
+                global _location_scope_warning_shown  # noqa: PLW0603
+                if not _location_scope_warning_shown:
+                    _location_scope_warning_shown = True
+                    logger.warning(
+                        "ESI location fetch got 403 Forbidden -- your current "
+                        "login token doesn't have the 'esi-location.read_location.v1' "
+                        "permission (added for auto system-detection). Log out and "
+                        "log back in via Settings -> Intel & ESI -> EVE SSO to grant "
+                        "it; existing tokens cannot gain new scopes without "
+                        "re-authenticating."
+                    )
+                return None
             loc_resp.raise_for_status()
             solar_system_id = loc_resp.json().get("solar_system_id")
             if not solar_system_id:
@@ -398,6 +430,13 @@ async def get_character_location(auth: EsiAuth) -> str | None:
     except Exception as exc:
         logger.debug("ESI location fetch failed: %s", exc)
         return None
+
+
+def reset_location_scope_warning() -> None:
+    """Clear the one-time 403 warning flag (used by tests, and by a fresh
+    successful login so a subsequent scope regression can warn again)."""
+    global _location_scope_warning_shown  # noqa: PLW0603
+    _location_scope_warning_shown = False
 
 
 async def get_fleet_membership(auth: EsiAuth) -> dict | None:

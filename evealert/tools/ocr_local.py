@@ -131,7 +131,7 @@ async def _winrt_recognize_lines_async(pil_img) -> list[tuple[str, float, float]
 
     Returns a list of ``(text, y_top, y_bottom)`` tuples, in the pixel
     coordinate space of *pil_img* (the preprocessed/upscaled image) — used
-    by ``read_local_names_near_rows`` (#206) to correlate each OCR'd line
+    by ``match_names_to_targets`` (#206, #213) to correlate each OCR'd line
     with the row of a detected enemy standing-icon, so only the alerted
     pilot's name (not the whole Local roster) is sent to the intel pipeline.
 
@@ -351,24 +351,27 @@ def parse_eve_names(text: str) -> list[str]:
 
     Icon-glyph handling (#199): the standing icon frequently OCRs as a short
     LETTER token instead of a symbol ("S Naveia", "CS Bronwen Morgan"), which
-    the non-alphanumeric strip cannot remove.  When a line's first token is
-    1–2 chars and something name-like follows, BOTH the stripped remainder
-    and the full line are emitted (stripped first).  Downstream ESI name
-    resolution is exact-match, so the wrong candidate fails silently while
-    the right one resolves — at worst this costs one extra lookup per line.
+    the non-alphanumeric strip cannot remove. When a line's first token is
+    1–2 chars and something name-like follows, the stripped remainder is
+    tried first. The full line is only tried as a fallback when the stripped
+    remainder did NOT validate as a name (#209) — once the stripped
+    candidate is confirmed a real name, emitting the noisy full-line form
+    too produced visible duplicates like "Mick Lun" + "g Mick Lun" for the
+    same pilot in one alarm, and wasted a slot in the 5-name ESI query cap.
     """
     names: list[str] = []
     seen: set[str] = set()
 
-    def _emit(candidate: str) -> None:
+    def _emit(candidate: str) -> bool:
         if not candidate or candidate.lower() in seen:
-            return
+            return False
         if not _NAME_RE.match(candidate):
-            return
+            return False
         if not _HAS_LETTER.search(candidate):
-            return
+            return False
         seen.add(candidate.lower())
         names.append(candidate)
+        return True
 
     for raw_line in (text or "").splitlines():
         # Strip leading non-alphanumeric garbage (standing icons, symbols)
@@ -378,11 +381,15 @@ def parse_eve_names(text: str) -> list[str]:
         if not base:
             continue
         parts = base.split(" ", 1)
+        stripped_ok = False
         if len(parts) == 2 and len(parts[0]) <= 2 and len(parts[1]) >= 3:
             # Likely icon glyph misread as a short letter token — try the
-            # remainder first, but keep the full line as a fallback candidate.
-            _emit(parts[1].strip())
-        _emit(base)
+            # remainder first.
+            stripped_ok = _emit(parts[1].strip())
+        if not stripped_ok:
+            # Either there was no short-prefix pattern to begin with, or the
+            # stripped remainder didn't validate — fall back to the full line.
+            _emit(base)
     return names
 
 
@@ -411,8 +418,8 @@ def _capture_and_recognize_lines(
 ) -> tuple[list[tuple[str, float, float]], object]:
     """Capture *region* and OCR it, preserving per-line vertical position.
 
-    Shared by read_local_names() and read_local_names_near_rows() (#206) so
-    both go through identical capture/backend-selection logic. Returns
+    Shared by read_local_names() and match_names_to_targets() (#206, #213)
+    so both go through identical capture/backend-selection logic. Returns
     ``(lines, raw_img)`` where *lines* is a list of ``(text, y_top, y_bottom)``
     in the PREPROCESSED (upscaled) image's pixel space, and *raw_img* is the
     unprocessed capture (or None if capture failed) for debug-screenshot use.
@@ -483,66 +490,83 @@ def read_local_names(region: tuple[int, int, int, int]) -> list[str]:
     return names
 
 
-def read_local_names_near_rows(
+def match_names_to_targets(
     region: tuple[int, int, int, int],
-    target_abs_ys: list[float],
+    targets: dict,
     row_tolerance: float = 14.0,
-) -> list[str]:
-    """Like read_local_names(), but returns only the pilot name(s) whose text
-    row is within *row_tolerance* pixels of one of *target_abs_ys* (#206).
+) -> tuple[dict, list[str]]:
+    """Capture *region* and OCR it, matching each target position to the
+    closest OCR'd pilot name within *row_tolerance* pixels (#206, #213).
 
-    *target_abs_ys* are ABSOLUTE screen Y coordinates — typically the
-    vertical centers of standing-icon matches that triggered the current
-    Enemy alarm (AlertAgent._enemy_points, translated to screen space).
-    *region* is (left, top, right, bottom) in absolute screen coordinates —
-    *region[1]* (top) is used to translate each OCR'd line's position (which
-    is in the preprocessed/upscaled image's LOCAL pixel space) back to
-    absolute screen Y: ``abs_y = region_top + line_y / _OCR_UPSCALE``.
+    *targets* maps an arbitrary caller-defined key (e.g. AlertAgent's
+    quantized icon screen position) to that icon's ABSOLUTE screen Y
+    coordinate — typically translated from AlertAgent._enemy_points, which
+    are vertical centers of standing-icon matches, region-local to the
+    Alert Region.
+    *region* is (left, top, right, bottom) in ABSOLUTE screen coordinates
+    for the region actually captured (the configured OCR region, or the
+    Alert Region as a fallback) — *region[1]* (top) is used to translate
+    each OCR'd line's position (in the preprocessed/upscaled image's LOCAL
+    pixel space) back to absolute screen Y:
+    ``abs_y = region_top + line_y / _OCR_UPSCALE``.
 
-    Degrades gracefully rather than ever making alarm intel WORSE than the
-    unfiltered behavior: if row-filtering matches nothing (e.g. the OCR
-    region isn't row-aligned with the alert region — a misconfiguration, not
-    a crash condition) but names WERE found in the capture, falls back to
-    returning the full unfiltered list instead of an empty one.
+    Returns ``(matches, all_names)``:
+      matches   -- ``{key: name}`` for every target whose closest OCR'd row
+                   fell within *row_tolerance*. A target key that OCR
+                   couldn't confidently attach a name to is simply absent
+                   -- callers needing per-icon identity (#213) should treat
+                   a missing key as "unresolved", not "no names at all".
+      all_names -- every distinct name found in the capture, in row order,
+                   regardless of whether it matched a target. This is what
+                   the alarm headline / ESI hint list should use — it
+                   degrades gracefully (still populated) even when
+                   per-target matching finds nothing, e.g. because the OCR
+                   region isn't row-aligned with the Alert Region (a
+                   configuration issue, not a reason to go silent).
     """
     lines, raw_img = _capture_and_recognize_lines(region)
     if not lines:
-        return []
+        return {}, []
 
     region_top = region[1]
-    matched_texts = []
+    # Each line's absolute center Y, plus every name parse_eve_names() found
+    # in its text (normally one; the icon-glyph fallback can rarely yield
+    # more than one candidate for a single row).
+    line_entries: list[tuple[float, list[str]]] = []
+    all_names: list[str] = []
+    seen_all: set[str] = set()
     for text, y_top, y_bottom in lines:
         line_center_abs = region_top + ((y_top + y_bottom) / 2.0) / _OCR_UPSCALE
-        if any(abs(line_center_abs - target) <= row_tolerance for target in target_abs_ys):
-            matched_texts.append(text)
+        names = parse_eve_names(text)
+        line_entries.append((line_center_abs, names))
+        for n in names:
+            if n.lower() not in seen_all:
+                seen_all.add(n.lower())
+                all_names.append(n)
 
-    if matched_texts:
-        names = parse_eve_names("\n".join(matched_texts))
-        if names:
-            return names
-        logger.debug(
-            "OCR row-match found %d line(s) near enemy icon rows, but none "
-            "parsed as a valid name — falling back to unfiltered names",
-            len(matched_texts),
-        )
+    matches: dict = {}
+    for key, target_y in targets.items():
+        best_name = None
+        best_dist = row_tolerance + 1.0
+        for line_y, names in line_entries:
+            if not names:
+                continue
+            dist = abs(line_y - target_y)
+            if dist <= row_tolerance and dist < best_dist:
+                best_dist = dist
+                best_name = names[0]
+        if best_name is not None:
+            matches[key] = best_name
 
-    # No row matched any target (or matched text didn't parse as a name) —
-    # fall back to the unfiltered list rather than silently returning
-    # nothing; this keeps alarms useful for setups where the OCR region and
-    # alert region aren't row-aligned.
-    all_text = "\n".join(t for t, _top, _bottom in lines)
-    names = parse_eve_names(all_text)
-    if names:
-        logger.debug(
-            "OCR row-filter matched no lines near enemy icon rows "
-            "(targets=%s, region_top=%s) — falling back to all %d name(s) found. "
-            "If this happens often, check that your OCR region covers the "
-            "same rows as your Alert Region.",
-            target_abs_ys, region_top, len(names),
-        )
-    elif raw_img is not None:
+    if not all_names and raw_img is not None:
+        # No names found anywhere in the capture — save a debug screenshot
+        # so the user can check whether the region is pointing at the right
+        # area. (Per-target *matches* coming up empty while *all_names* is
+        # populated is a row-alignment issue, not an OCR failure — no debug
+        # screenshot needed for that case; see the docstring above.)
         _save_ocr_debug_screenshot(raw_img, region)
-    return names
+
+    return matches, all_names
 
 
 # --------------------------------------------------------------------------- #

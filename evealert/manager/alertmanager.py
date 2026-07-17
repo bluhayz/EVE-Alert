@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import time
+from collections import deque
 from typing import Callable, NamedTuple
 
 import numpy as np
@@ -42,6 +43,7 @@ from evealert.bridge import UIBridge  # noqa: F401
 from evealert.settings.store import get_settings_store
 from evealert.settings.validator import ConfigValidator
 from evealert.statistics import AlarmStatistics
+from evealert.tools.link_markers import make_link
 from evealert.tools.vision import Vision
 from evealert.tools.windowscapture import WindowCapture
 
@@ -83,6 +85,18 @@ def _load_image_files() -> tuple[list[str], list[str]]:
     return alert_files, faction_files
 
 
+def _format_intel_age(seconds: float) -> str:
+    """Render a report age as a short human string ("45s", "2m", "1h") for
+    the #212 intel-correlation line."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h"
+
+
 class AlertAgent:
     """Alert Agent for EVE Online local chat monitoring.
 
@@ -95,6 +109,20 @@ class AlertAgent:
     self._bridge (UIBridge).  self.main is kept only for WindowCapture
     compatibility and must not be accessed for any GUI operation.
     """
+
+    # #213: minimum seconds between OCR-based enemy-identity re-resolves
+    # while the SET of detected icon positions is unchanged. A capture+
+    # recognize pass costs ~0.3-1s; running it on every 0.1-0.2s poll cycle
+    # would be prohibitively expensive. A genuinely new icon position always
+    # triggers an immediate re-resolve regardless of this interval (see
+    # _resolve_enemy_identities).
+    _IDENTITY_RESOLVE_MIN_INTERVAL = 1.5
+
+    # #212: how far back an intel-channel report can be and still be
+    # considered "current" enough to surface alongside an Enemy alarm for
+    # the same pilot — ships change and reports age, so this is a hard
+    # cutoff rather than a decaying weight.
+    _INTEL_CORRELATION_WINDOW_SECONDS = 600  # 10 minutes
 
     def __init__(self, main: "MainMenu"):
         self.main = main
@@ -136,9 +164,16 @@ class AlertAgent:
         self.faction = False
         # Match centers from the last enemy scan (for per-enemy dedup, #100)
         self._enemy_points: list = []
-        # Quantized enemy center -> sighting record
+        # Dedup identity (resolved pilot name, or quantized position as a
+        # fallback when OCR can't identify a given icon) -> sighting record
         self._seen_enemies: dict = {}
         self._rearm_minutes: int = 0  # 0 = disabled
+
+        # #213: per-icon name resolution, throttled independently of the
+        # main 0.1-0.2s poll loop so OCR doesn't run on every single cycle.
+        self._last_identity_keys: frozenset = frozenset()
+        self._last_identity_resolve_time: float = 0.0
+        self._last_enemy_identities: dict = {}  # quantized position -> name
 
         # Long-running asyncio task handles (cancelled in stop(), #102)
         self.vision_t = None
@@ -186,6 +221,12 @@ class AlertAgent:
         self._intel_watcher = None  # IntelWatcher instance
         self._intel_threat_check_enabled = False  # #198
         self._intel_threat_radius = 5             # #198
+        # #212: rolling buffer of recent intel-channel reports so a
+        # resolved Enemy-alarm pilot can be cross-referenced against what
+        # intel just said about them (e.g. current ship) without re-reading
+        # the chat log. (timestamp, IntelReport) tuples, oldest first.
+        self._intel_reports_recent: deque = deque(maxlen=50)
+        self._correlate_intel_enabled = True
 
         # ESI augmentation
         self._esi_enabled = False
@@ -638,6 +679,8 @@ class AlertAgent:
             # Intel threat-radius gating (#198)
             self._intel_threat_check_enabled = bool(intel.get("intel_threat_check_enabled", False))
             self._intel_threat_radius = int(intel.get("intel_threat_radius", 5))
+            # Intel-report correlation on Enemy alarms (#212)
+            self._correlate_intel_enabled = bool(intel.get("correlate_intel_reports", True))
 
             # ESI augmentation settings
             esi = settings.get("esi", {})
@@ -893,6 +936,11 @@ class AlertAgent:
             self._wh_drop_seen_names.clear()  # #106: reset WH-drop counting
             if self._wh_drop_detector is not None:
                 self._wh_drop_detector.reset()
+            # #213: drop cached OCR identities too — the next engagement
+            # should resolve fresh rather than reuse stale name mappings.
+            self._last_identity_keys = frozenset()
+            self._last_identity_resolve_time = 0.0
+            self._last_enemy_identities = {}
 
         if self._webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
@@ -912,7 +960,7 @@ class AlertAgent:
         x, y = point
         return (int(x) // grid, int(y) // grid)
 
-    def _should_alarm_enemy(self) -> bool:
+    def _should_alarm_enemy(self, enemy_identities: dict | None = None) -> bool:
         """Return True only when a genuinely new enemy has appeared, or an
         already-seen enemy's cooldown window has elapsed. Prevents the alarm
         (stats/sound/webhook/plugins/push) from re-firing on every poll while
@@ -920,10 +968,24 @@ class AlertAgent:
 
         When rearm_minutes > 0, also re-arms (returns True) when an enemy has
         been continuously present for that many minutes (#144).
+
+        #213: dedup identity is the OCR-resolved pilot NAME when available
+        (enemy_identities, from _resolve_enemy_identities — quantized
+        position -> name), falling back to the icon's quantized screen
+        position for any icon OCR couldn't identify. Keying by name (not
+        just position) prevents a Local-roster re-sort from making a
+        still-present pilot look like a "brand-new enemy" and re-firing the
+        alarm mid-cooldown; it also prevents a genuinely different pilot
+        from being silently suppressed just because they landed on the
+        screen position an earlier, now-departed pilot used to occupy.
         """
         now = time.time()
         cooldown = max(int(self._cooldown_enemy), 1)
-        keys = {self._quantize_point(p) for p in (self._enemy_points or [])}
+        enemy_identities = enemy_identities or {}
+        keys = {
+            enemy_identities.get(self._quantize_point(p), self._quantize_point(p))
+            for p in (self._enemy_points or [])
+        }
         if not keys:
             keys = {(-1, -1)}
 
@@ -1104,45 +1166,60 @@ class AlertAgent:
     def _on_intel_report(self, report) -> None:
         """Called from IntelWatcher with a parsed IntelReport (#142).
 
-        Logs a structured summary line with dotlan and zkillboard links, and
+        Logs a structured summary line with dotlan and zkillboard links,
+        buffers the report for Enemy-alarm correlation (#212), and
         schedules an async jump-distance lookup if the user's home system is
         configured.
         """
         try:
+            self._intel_reports_recent.append((time.time(), report))
             if report.is_clear:
-                system_str = f"{report.system} " if report.system else ""
-                dotlan = (
-                    f" — dotlan.net/system/{report.system.replace(' ', '_')}"
-                    if report.system else ""
-                )
-                self._ui(self.main.write_message, f"Intel: {system_str}CLEAR{dotlan}", "green")
+                # Dotlan link for the reported system, embedded on the
+                # system name (#210) rather than a separate visible URL.
+                system_display = report.system or ""
+                if report.system:
+                    system_display = make_link(
+                        report.system,
+                        f"https://dotlan.net/system/{report.system.replace(' ', '_')}",
+                    )
+                system_str = f"{system_display} " if report.system else ""
+                self._ui(self.main.write_message, f"Intel: {system_str}CLEAR", "green")
             else:
                 count_str = f"{report.hostile_count}" if report.hostile_count else "?"
                 ship_str = f" [{', '.join(report.ships[:3])}]" if report.ships else ""
-                system_str = report.system or "unknown system"
 
-                # Dotlan link for the reported system
-                dotlan = (
-                    f" — dotlan.net/system/{report.system.replace(' ', '_')}"
-                    if report.system else ""
-                )
-                # zkillboard search link for the reporting pilot
-                pilot_zkb = ""
+                # Dotlan link for the reported system, embedded on the name.
+                system_display = report.system or "unknown system"
+                if report.system:
+                    system_display = make_link(
+                        report.system,
+                        f"https://dotlan.net/system/{report.system.replace(' ', '_')}",
+                    )
+                # zkillboard search link for the reporting pilot, embedded
+                # on their name (#210) rather than a separate visible URL.
+                reporter_str = ""
                 if report.pilot:
                     pilot_enc = report.pilot.replace(" ", "+")
-                    pilot_zkb = f" | reporter: zkillboard.com/search/#{pilot_enc}"
+                    reporter_link = make_link(
+                        report.pilot, f"https://zkillboard.com/search/#{pilot_enc}"
+                    )
+                    reporter_str = f" | reporter: {reporter_link}"
 
                 self._ui(
                     self.main.write_message,
-                    f"Intel: {count_str} hostile(s) in {system_str}{ship_str}{dotlan}{pilot_zkb}",
+                    f"Intel: {count_str} hostile(s) in {system_display}{ship_str}{reporter_str}",
                     "red",
                 )
-                # Log zkillboard links for each mentioned hostile pilot (#197)
+                # zkillboard links for each mentioned hostile pilot (#197),
+                # embedded on their name (#210) rather than a separate URL.
                 for hostile in report.mentioned_pilots:
                     hostile_enc = hostile.replace(" ", "+")
+                    hostile_link = make_link(
+                        hostile, f"https://zkillboard.com/search/#{hostile_enc}"
+                    )
                     self._ui(
                         self.main.write_message,
-                        f"  hostile: {hostile} — zkillboard.com/search/#{hostile_enc}",
+                        f"  hostile: {hostile_link}",
                         "orange",
                     )
                 # Queue a jump-distance lookup if we have a home system
@@ -1153,6 +1230,33 @@ class AlertAgent:
                     )
         except Exception as exc:
             logger.debug("_on_intel_report failed: %s", exc)
+
+    def _find_recent_intel_report(self, pilot_name: str):
+        """#212: return (IntelReport, age_seconds) for the most recent
+        buffered intel report that mentions *pilot_name* -- a case-
+        insensitive exact match against either the report's
+        mentioned_pilots (reuses intel_parser._find_mentioned_pilots'
+        heuristics, not reinvented here) or the reporting pilot themselves
+        -- within _INTEL_CORRELATION_WINDOW_SECONDS. Returns None if
+        nothing matches.
+
+        The buffer is appended in chronological order, so the newest
+        report is checked first and iteration stops at the first entry
+        older than the correlation window (everything before it is only
+        older still).
+        """
+        name_lower = pilot_name.lower()
+        now = time.time()
+        for received_at, report in reversed(self._intel_reports_recent):
+            age = now - received_at
+            if age > self._INTEL_CORRELATION_WINDOW_SECONDS:
+                break
+            mentioned_lower = {p.lower() for p in report.mentioned_pilots}
+            if name_lower in mentioned_lower or (
+                report.pilot and report.pilot.lower() == name_lower
+            ):
+                return report, age
+        return None
 
     async def _lookup_jump_distance(
         self,
@@ -1418,7 +1522,19 @@ class AlertAgent:
                     "yellow": "[CAUTION]",
                 }.get(tier or "", "")
 
-                parts = [f"  {tier_prefix} {display_name}".strip()]
+                # zkillboard character link (#205) is embedded directly on
+                # the pilot's name (#210) rather than shown as a separate
+                # visible URL — only when zkillboard actually has this
+                # pilot on record (#208); otherwise the page 404s (common
+                # for very young / PvE-only pilots).
+                name_display = display_name
+                if info is not None and zkb is not None:
+                    name_display = make_link(
+                        display_name,
+                        f"https://zkillboard.com/character/{info.character_id}/",
+                    )
+
+                parts = [f"  {tier_prefix} {name_display}".strip()]
                 if info is not None:
                     if self._esi_show_corp and corp_name:
                         parts.append(f"[{corp_name}]")
@@ -1429,11 +1545,6 @@ class AlertAgent:
                         age_str = f"{info.age_days}d old"
                         corps_str = f"{info.corp_history_count} corp(s)"
                         parts.append(f"— {age_str}, {corps_str}")
-                    # zkillboard character link (#205) — only when zkillboard
-                    # actually has this pilot on record (#208); otherwise the
-                    # page 404s (common for very young / PvE-only pilots).
-                    if zkb is not None:
-                        parts.append(f"| zkillboard.com/character/{info.character_id}/")
                 else:
                     # #203: ESI didn't resolve this name — KOS still checked below.
                     parts.append("— ESI lookup unavailable")
@@ -1487,6 +1598,32 @@ class AlertAgent:
                                     )
                     except Exception as exc:
                         logger.debug("Zkillboard stats line rendering failed: %s", exc)
+
+                # ── Intel-channel correlation (#212) — runs regardless of
+                # ESI resolution: intel matches on the raw name, not an ESI
+                # character ID, so an unresolved name can still correlate. ─
+                if self._correlate_intel_enabled:
+                    try:
+                        from evealert.tools.intel_parser import (  # pylint: disable=import-outside-toplevel
+                            _strip_header as _strip_intel_header,
+                        )
+
+                        match = self._find_recent_intel_report(display_name)
+                        if match is not None:
+                            intel_report, age_seconds = match
+                            parsed = _strip_intel_header(intel_report.raw_line)
+                            message = parsed[1] if parsed else intel_report.raw_line
+                            detail = f'"{message}"'
+                            if intel_report.system:
+                                detail += f" in {intel_report.system}"
+                            self._ui(
+                                self.main.write_message,
+                                f"    Intel ({_format_intel_age(age_seconds)} ago, "
+                                f"reported by {intel_report.pilot}): {detail}",
+                                "cyan",
+                            )
+                    except Exception as exc:
+                        logger.debug("Intel correlation failed: %s", exc)
 
                 # ── KOS check (v3.4) — runs regardless of ESI resolution (#203) ─
                 try:
@@ -2079,18 +2216,22 @@ class AlertAgent:
             logger.debug("Zkillboard lookup failed: %s", exc)
             return
 
-        dotlan = f"dotlan.net/system/{system_name.replace(' ', '_')}"
+        # Dotlan link embedded on the system name (#210) rather than a
+        # separate visible URL.
+        system_display = make_link(
+            system_name, f"https://dotlan.net/system/{system_name.replace(' ', '_')}"
+        )
         if not kills:
             self._ui(
                 self.main.write_message,
-                f"Intel: No recent kills found for {system_name} — {dotlan}",
+                f"Intel: No recent kills found for {system_display}",
                 "yellow",
             )
             return
 
         self._ui(
             self.main.write_message,
-            f"Intel: Recent kills in {system_name} ({len(kills)}) — {dotlan}",
+            f"Intel: Recent kills in {system_display} ({len(kills)})",
             "yellow",
         )
         for k in kills:
@@ -2233,31 +2374,49 @@ class AlertAgent:
             finally:
                 self.currently_playing_sounds.pop(alarm_type, None)
 
-    def _build_enemy_alarm_text(self) -> str:
-        """Build the Enemy alarm headline, including OCR'd pilot names when available.
+    def _resolve_enemy_identities(self) -> dict:
+        """Resolve each currently-detected enemy icon to a pilot name via OCR
+        (#213), throttled so this doesn't run OCR on every 0.1–0.2 s poll.
 
-        Captures the configured Local-chat screen region via OCR (Tesseract)
-        so the alarm headline reads 'Enemy Appears! — Bad Pilot, Other Pilot'
-        instead of firing a plain message and logging names separately.
-        Falls back to 'Enemy Appears!' when OCR is disabled or unavailable.
+        Returns ``{quantized_position: name}`` — only for icons OCR could
+        confidently attach a name to; an icon absent from the returned dict
+        means OCR found nothing for that specific row (caller falls back to
+        its position as the identity for dedup purposes).
 
-        #206: only the row(s) whose position matches a detected enemy
-        standing-icon (self._enemy_points, set moments earlier in this same
-        run() iteration by vision_thread) are sent to the intel pipeline —
-        not the entire Local roster OCR happens to see. Falls back to the
-        full unfiltered name list if no row lines up with an icon (e.g. an
-        OCR region that isn't row-aligned with the Alert Region), so a
-        misconfigured setup degrades to the old behavior instead of going
-        silent.
+        Also updates ``self._last_ocr_names`` (flat, deduped list — used by
+        _augment_with_esi and _build_enemy_alarm_text) as a side effect,
+        exactly once per fresh OCR attempt.
+
+        Throttling: re-runs OCR immediately whenever the SET of detected
+        icon positions changes (a new arrival must be identified right
+        away), otherwise at most once every
+        ``_IDENTITY_RESOLVE_MIN_INTERVAL`` seconds. User-facing log lines
+        (detected pilots / no backend / invalid region) are only emitted on
+        an actual fresh OCR attempt, not on throttle-cache-hits, so a
+        sustained multi-pilot engagement doesn't spam the log pane.
         """
-        base = "Enemy Appears!"
+        now = time.time()
+        current_keys = frozenset(
+            self._quantize_point(p) for p in (self._enemy_points or [])
+        )
+        if (
+            current_keys == self._last_identity_keys
+            and now - self._last_identity_resolve_time < self._IDENTITY_RESOLVE_MIN_INTERVAL
+        ):
+            return self._last_enemy_identities  # throttled — reuse cached mapping
+
+        self._last_identity_keys = current_keys
+        self._last_identity_resolve_time = now
+
         if not self._ocr_enabled:
-            logger.debug("_build_enemy_alarm_text: OCR disabled — using base text")
-            return base
+            self._last_enemy_identities = {}
+            self._last_ocr_names = []
+            return {}
+
         try:
             from evealert.tools.ocr_local import (  # noqa: PLC0415
                 is_ocr_available,
-                read_local_names_near_rows,
+                match_names_to_targets,
                 resolve_region,
             )
 
@@ -2267,7 +2426,9 @@ class AlertAgent:
                     "OCR [alarm]: no backend available (Windows.Media.Ocr / Tesseract) — name detection skipped",
                     "yellow",
                 )
-                return base
+                self._last_enemy_identities = {}
+                self._last_ocr_names = []
+                return {}
 
             region = resolve_region(
                 self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
@@ -2279,42 +2440,61 @@ class AlertAgent:
                     f"alert_region=({self.x1},{self.y1},{self.x2},{self.y2})) — skipped",
                     "yellow",
                 )
-                return base
+                self._last_enemy_identities = {}
+                self._last_ocr_names = []
+                return {}
 
-            # Translate the detected enemy icon match points (region-local,
-            # set by vision_thread this same cycle) to absolute screen Y so
-            # they can be compared against OCR'd row positions (#206).
-            target_abs_ys = [self.y1 + y for (_x, y) in (self._enemy_points or [])]
+            # Map each detected icon's quantized position to its ABSOLUTE
+            # screen Y (region-local point + Alert Region's own screen
+            # origin), so match_names_to_targets can compare it against
+            # OCR'd row positions regardless of which region was captured.
+            targets = {
+                self._quantize_point((x, y)): self.y1 + y
+                for (x, y) in (self._enemy_points or [])
+            }
             heights = [h for (_w, h) in self.alert_vision.needle_dims if h > 0]
             row_tolerance = (max(heights) if heights else 20) * 0.8
 
             logger.debug(
-                "OCR [alarm]: capturing region %s, target rows(abs y)=%s tol=%.1f",
-                region, target_abs_ys, row_tolerance,
+                "OCR [alarm]: capturing region %s, targets=%s tol=%.1f",
+                region, targets, row_tolerance,
             )
-            names = read_local_names_near_rows(region, target_abs_ys, row_tolerance)
-            if names:
-                self._last_ocr_names = names          # cache for _augment_with_esi
+            identities, all_names = match_names_to_targets(region, targets, row_tolerance)
+            self._last_enemy_identities = identities
+            self._last_ocr_names = all_names
+            if all_names:
                 self._ui(
                     self.main.write_message,
-                    f"OCR [alarm]: detected pilot(s): {', '.join(names)}",
+                    f"OCR [alarm]: detected pilot(s): {', '.join(all_names)}",
                     "cyan",
                 )
-                return f"{base} — {', '.join(names)}"
             else:
-                self._last_ocr_names = []
                 self._ui(
                     self.main.write_message,
                     f"OCR [alarm]: capture at {region} returned no names (check region config)",
                     "yellow",
                 )
+            return identities
         except Exception as exc:
             self._ui(
                 self.main.write_message,
                 f"OCR [alarm]: exception — {exc}",
                 "yellow",
             )
-            logger.debug("_build_enemy_alarm_text: OCR failed: %s", exc, exc_info=True)
+            logger.debug("_resolve_enemy_identities: OCR failed: %s", exc, exc_info=True)
+            self._last_enemy_identities = {}
+            self._last_ocr_names = []
+            return {}
+
+    def _build_enemy_alarm_text(self) -> str:
+        """Build the Enemy alarm headline from the pilot name(s) already
+        resolved by _resolve_enemy_identities() this cycle (#213 — OCR now
+        runs once, before the alarm-fire decision, not here). Falls back to
+        the bare headline when OCR is disabled/unavailable or found nothing.
+        """
+        base = "Enemy Appears!"
+        if self._last_ocr_names:
+            return f"{base} — {', '.join(self._last_ocr_names)}"
         return base
 
     async def run(self) -> None:
@@ -2334,8 +2514,12 @@ class AlertAgent:
                     )
                 if self.enemy:
                     self.alarm_detected = True
+                    # #213: resolve OCR identities first (throttled — see
+                    # _resolve_enemy_identities) so dedup can key on pilot
+                    # name, not just screen position.
+                    enemy_identities = self._resolve_enemy_identities()
                     # Only alarm for a new/re-eligible enemy, not every poll (#100)
-                    if self._should_alarm_enemy():
+                    if self._should_alarm_enemy(enemy_identities):
                         await self.alarm_detection(
                             self._build_enemy_alarm_text(), self._alarm_sound, "Enemy"
                         )
