@@ -1,6 +1,6 @@
 # Changelog
 
-## [6.3.35] 2026-07-17
+## [7.0.0] 2026-07-17
 
 ### Added — v7.0: Pilot Intelligence & Persistence (#214, #215, #216, #217, #218)
 
