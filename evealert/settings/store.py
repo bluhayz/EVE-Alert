@@ -52,6 +52,8 @@ DEFAULT_SETTINGS: dict = {
         "intel_threat_check_enabled": False,
         "intel_threat_radius": 5,
         "correlate_intel_reports": True,
+        "pilot_history_enabled": True,
+        "pilot_history_retention_days": 180,
     },
     "cooldown_timer_enemy": {"value": DEFAULT_COOLDOWN_TIMER},
     "cooldown_timer_faction": {"value": DEFAULT_COOLDOWN_TIMER},

@@ -14,16 +14,23 @@ Cyno detection overrides everything to 10 / CRITICAL.
 
 from dataclasses import dataclass, field
 
+# #218: minimum recent-sighting count before it counts toward the score --
+# matches the "3" confidence threshold used elsewhere in this milestone
+# (MIN_SIGHTINGS_FOR_SUMMARY, MIN_TRANSITION_COUNT).
+_HISTORY_FREQUENCY_THRESHOLD = 3
+
 
 @dataclass
 class ThreatAssessment:
     score: int           # 1–10
     label: str           # CAUTION | HIGH | CRITICAL
     reasons: list[str] = field(default_factory=list)
+    behavioral_label: str | None = None
 
     def __str__(self) -> str:
         reason_str = "; ".join(self.reasons) if self.reasons else "unknown threat"
-        return f"[THREAT: {self.score}/10 \u2014 {self.label}] {reason_str}"
+        label_suffix = f" ({self.behavioral_label})" if self.behavioral_label else ""
+        return f"[THREAT: {self.score}/10 \u2014 {self.label}]{label_suffix} {reason_str}"
 
 
 def compute_threat_score(
@@ -34,6 +41,8 @@ def compute_threat_score(
     dscan_threat_class: str = "", # ShipThreatClass value string
     adjacent_kills: int = 0,
     is_cyno: bool = False,
+    history_frequency: int = 0,
+    history_is_regular_route: bool = False,
 ) -> ThreatAssessment:
     """Compute a composite 1–10 threat score.
 
@@ -45,6 +54,12 @@ def compute_threat_score(
         dscan_threat_class:  ShipThreatClass.value string (e.g. 'tackle').
         adjacent_kills:      Kills in adjacent systems in the last 15 min.
         is_cyno:             Whether a cyno was detected.
+        history_frequency:   Recent sighting count for this pilot in this
+                              system (#214/#215 persistent history, v7.0).
+                              0 (default) leaves the score unaffected.
+        history_is_regular_route: Whether this system is on the pilot's
+                              inferred common route (#217). False
+                              (default) leaves the score unaffected.
     """
     # Cyno overrides everything — capital ship inbound
     if is_cyno:
@@ -95,6 +110,17 @@ def compute_threat_score(
         score += 1
         reasons.append(f"{adjacent_kills} kill(s) in adjacent system")
 
+    # --- Sighting history (#218, v7.0; max 2) ---
+    # Additive on top of the #141 inputs above; both params default to
+    # "no history," under which this block contributes nothing and the
+    # score is byte-for-byte identical to pre-#218 behavior.
+    if history_frequency >= _HISTORY_FREQUENCY_THRESHOLD:
+        score += 1
+        reasons.append(f"seen here {history_frequency}x recently")
+    if history_is_regular_route:
+        score += 1
+        reasons.append("on their regular route")
+
     score = min(score, 10)
     if score >= 7:
         label = "CRITICAL"
@@ -103,4 +129,25 @@ def compute_threat_score(
     else:
         label = "CAUTION"
 
-    return ThreatAssessment(score=score, label=label, reasons=reasons)
+    return ThreatAssessment(
+        score=score,
+        label=label,
+        reasons=reasons,
+        behavioral_label=_behavioral_label(history_frequency, history_is_regular_route),
+    )
+
+
+def _behavioral_label(history_frequency: int, history_is_regular_route: bool) -> str | None:
+    """Derive a short behavioral label from the same sighting-history
+    inputs used above -- separate from the numeric score, for extra
+    context beyond the 1-10 number. None when there's no history signal
+    at all (feature off, or a genuinely new pilot)."""
+    if history_frequency >= 5:
+        return "frequent resident"
+    if history_frequency >= 2:
+        return "occasional visitor"
+    if history_frequency == 1:
+        return "single sighting"
+    if history_is_regular_route:
+        return "known to pass through"
+    return None

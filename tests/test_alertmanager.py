@@ -30,6 +30,7 @@ class TestAlertAgent(unittest.TestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         # Redirect stats writes to temp dir so tests never touch the real file (#159)
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
 
         # Default test settings
         self.test_settings = {
@@ -62,6 +63,7 @@ class TestAlertAgent(unittest.TestCase):
         import shutil
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_agent_initialization(self):
@@ -79,6 +81,21 @@ class TestAlertAgent(unittest.TestCase):
 
         self.assertEqual(self.agent.volume, 1.0)  # 100% -> 1.0
         self.assertEqual(self.agent.cooldowntimer, 30)
+
+    def test_load_settings_pilot_history_retention_defaults_to_180(self):
+        """#214: intelligence.pilot_history_retention_days defaults to 180
+        when not present in settings.json."""
+        self.agent.load_settings()
+        self.assertEqual(self.agent._pilot_history_retention_days, 180)
+
+    def test_load_settings_pilot_history_retention_custom_value(self):
+        self.test_settings["intelligence"] = {"pilot_history_retention_days": 30}
+        with open(self.settings_path, "w") as f:
+            json.dump(self.test_settings, f)
+        reset_settings_store(self.settings_path)
+
+        self.agent.load_settings()
+        self.assertEqual(self.agent._pilot_history_retention_days, 30)
 
     def test_load_settings_with_custom_volume(self):
         """Test loading custom volume setting."""
@@ -242,6 +259,7 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         # Redirect stats writes to temp dir (#159)
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
 
         test_settings = {
             "alert_region_1": {"x": 100, "y": 100},
@@ -269,6 +287,7 @@ class TestAlertAgentAsync(unittest.IsolatedAsyncioTestCase):
         import shutil
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def test_no_premature_event_loop(self):
@@ -362,6 +381,7 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -385,6 +405,7 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
         import shutil
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _logged_messages(self) -> list[str]:
@@ -574,6 +595,7 @@ class ResolveEnemyIdentitiesTests(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -588,6 +610,7 @@ class ResolveEnemyIdentitiesTests(unittest.TestCase):
         import shutil
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _patch_ocr_available(self):
@@ -790,6 +813,7 @@ class FindRecentIntelReportTests(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -800,6 +824,7 @@ class FindRecentIntelReportTests(unittest.TestCase):
         import shutil
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_matches_mentioned_pilot_case_insensitively(self):
@@ -862,6 +887,7 @@ class IntelCorrelationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -881,6 +907,7 @@ class IntelCorrelationPipelineTests(unittest.IsolatedAsyncioTestCase):
         import shutil
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _logged_messages(self) -> list[str]:
@@ -953,6 +980,393 @@ class IntelCorrelationPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         messages = self._logged_messages()
         self.assertFalse(any(m.strip().startswith("Intel (") for m in messages))
+
+
+class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
+    """#215: Local-alarm and intel-channel sightings get recorded into the
+    persistent pilot-history store (#214)."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({"server": {"system": "J5A-IX"}}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._correlate_intel_enabled = False  # keep these tests focused
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _run_intel_check_with_esi_stub(self, name="Bad Guy", top_ship="Loki"):
+        from evealert.tools.esi_standings import KillProfile
+
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(
+                return_value=KillProfile(
+                    kills_total=5, losses_total=1, top_ship=top_ship, danger_ratio=0.5
+                )
+            )
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+
+    async def test_local_alarm_records_sighting_with_system_and_ship(self):
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy", top_ship="Loki")
+
+        mock_record.assert_called_once_with(
+            "Bad Guy", source="local", system="J5A-IX", ship="Loki",
+            corp="Evil Corp", alliance="Evil Alliance",
+        )
+
+    async def test_local_alarm_placeholder_system_recorded_as_none(self):
+        with open(self.settings_path, "w") as f:
+            json.dump({"server": {"system": "Enter a System Name"}}, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        self.assertIsNone(mock_record.call_args.kwargs["system"])
+
+    async def test_local_toggle_disabled_records_nothing(self):
+        self.agent._pilot_history_enabled = False
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+        mock_record.assert_not_called()
+
+    def test_intel_report_records_one_sighting_per_mentioned_pilot_not_reporter(self):
+        report = _make_intel_report(
+            pilot="bluhayz", mentioned_pilots=["MickFun", "OtherGuy"],
+            system="J5A-IX",
+        )
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            self.agent._on_intel_report(report)
+
+        recorded_names = [c.args[0] for c in mock_record.call_args_list]
+        self.assertEqual(sorted(recorded_names), ["MickFun", "OtherGuy"])
+        self.assertNotIn("bluhayz", recorded_names)
+        for c in mock_record.call_args_list:
+            self.assertEqual(c.kwargs["source"], "intel")
+            self.assertEqual(c.kwargs["system"], "J5A-IX")
+
+    def test_intel_toggle_disabled_records_nothing(self):
+        self.agent._pilot_history_enabled = False
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            self.agent._on_intel_report(report)
+        mock_record.assert_not_called()
+
+
+class PilotHistorySummaryDisplayTests(unittest.IsolatedAsyncioTestCase):
+    """#216/#217: the "History: ..." line on Enemy alarms, driven by
+    pilot_history_analytics.summarize() and infer_pathing()."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({"server": {"system": "J5A-IX"}}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._correlate_intel_enabled = False  # keep these tests focused
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def _run_intel_check_with_esi_stub(self, name="Bad Guy"):
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(return_value=None)
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+
+    async def test_history_line_shown_when_summary_available(self):
+        from evealert.tools.pilot_history_analytics import PilotSummary
+
+        summary = PilotSummary(
+            pilot_name="Bad Guy", sighting_count=14, first_seen=0.0,
+            last_seen=45 * 86400.0, top_systems=[("J5A-IX", 9)],
+            top_ship="Loki", active_hour_range="19:00-22:00",
+        )
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ), patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=summary
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("History: 14 sightings over 45d" in m for m in messages),
+            f"Expected a History line, got: {messages}",
+        )
+
+    async def test_pathing_appended_to_history_line_when_available(self):
+        from evealert.tools.pilot_history_analytics import PathingSummary, PilotSummary
+
+        summary = PilotSummary(
+            pilot_name="Bad Guy", sighting_count=14, first_seen=0.0,
+            last_seen=45 * 86400.0, top_systems=[("J5A-IX", 9)],
+            top_ship="Loki", active_hour_range="19:00-22:00",
+        )
+        pathing = PathingSummary(
+            pilot_name="Bad Guy", home_system="J5A-IX",
+            top_transitions=[(("J5A-IX", "1DQ1-A"), 5)],
+        )
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ), patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=summary
+        ), patch(
+            "evealert.tools.pilot_history_analytics.infer_pathing",
+            new=AsyncMock(return_value=pathing),
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("home J5A-IX; often moves J5A-IX -> 1DQ1-A" in m for m in messages),
+            f"Expected pathing appended to the History line, got: {messages}",
+        )
+
+    async def test_no_pathing_segment_when_infer_pathing_returns_none(self):
+        from evealert.tools.pilot_history_analytics import PilotSummary
+
+        summary = PilotSummary(
+            pilot_name="Bad Guy", sighting_count=14, first_seen=0.0,
+            last_seen=45 * 86400.0, top_systems=[("J5A-IX", 9)],
+            top_ship="Loki", active_hour_range="19:00-22:00",
+        )
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ), patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=summary
+        ), patch(
+            "evealert.tools.pilot_history_analytics.infer_pathing",
+            new=AsyncMock(return_value=None),
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        messages = self._logged_messages()
+        history_lines = [m for m in messages if m.strip().startswith("History:")]
+        self.assertEqual(len(history_lines), 1)
+        self.assertNotIn("home", history_lines[0])
+
+    async def test_no_history_line_when_summary_is_none(self):
+        """Fewer than 3 sightings -> summarize() returns None -> no line."""
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ), patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=None
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        messages = self._logged_messages()
+        self.assertFalse(any(m.strip().startswith("History:") for m in messages))
+
+    async def test_no_history_line_when_toggle_disabled(self):
+        from evealert.tools.pilot_history_analytics import PilotSummary
+
+        self.agent._pilot_history_enabled = False
+        summary = PilotSummary(
+            pilot_name="Bad Guy", sighting_count=14, first_seen=0.0,
+            last_seen=45 * 86400.0, top_systems=[("J5A-IX", 9)],
+            top_ship="Loki", active_hour_range="19:00-22:00",
+        )
+        with patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=summary
+        ) as mock_summarize:
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        mock_summarize.assert_not_called()
+        messages = self._logged_messages()
+        self.assertFalse(any(m.strip().startswith("History:") for m in messages))
+
+    async def test_history_frequency_and_route_feed_into_threat_score(self):
+        """#218: sighting history for the CURRENT system feeds
+        compute_threat_score() -- a pilot frequently seen here, on their
+        regular route, must score higher and carry a behavioral label."""
+        from evealert.tools.pilot_history_analytics import PathingSummary, PilotSummary
+
+        summary = PilotSummary(
+            pilot_name="Bad Guy", sighting_count=14, first_seen=0.0,
+            last_seen=45 * 86400.0, top_systems=[("J5A-IX", 5)],
+            top_ship="Loki", active_hour_range=None,
+        )
+        pathing = PathingSummary(
+            pilot_name="Bad Guy", home_system="J5A-IX", top_transitions=[],
+        )
+        with patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=summary
+        ), patch(
+            "evealert.tools.pilot_history_analytics.infer_pathing",
+            new=AsyncMock(return_value=pathing),
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        messages = self._logged_messages()
+        threat_line = next((m for m in messages if m.startswith("[THREAT:")), None)
+        self.assertIsNotNone(threat_line, f"Expected a THREAT line, got: {messages}")
+        self.assertIn("frequent resident", threat_line)
+        self.assertIn("seen here 5x recently", threat_line)
+        self.assertIn("on their regular route", threat_line)
+
+    async def test_no_history_data_leaves_threat_score_unaffected(self):
+        """No sighting history at all -- summarize()/infer_pathing() both
+        return None -- the THREAT line must show no behavioral label."""
+        with patch(
+            "evealert.tools.pilot_history_analytics.summarize", return_value=None
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+
+        messages = self._logged_messages()
+        threat_line = next((m for m in messages if m.startswith("[THREAT:")), None)
+        self.assertIsNotNone(threat_line, f"Expected a THREAT line, got: {messages}")
+        self.assertNotIn("(", threat_line)
+
+
+class PruneOnStartupTests(unittest.TestCase):
+    """#214: the persistent pilot-history store is pruned once per app
+    start (AlertAgent.__init__), not on every load_settings() reload."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            # Non-degenerate regions -- load_settings() validates and
+            # early-returns (skipping the intelligence section entirely,
+            # including pilot_history_retention_days) when x1 == x2.
+            json.dump({
+                "alert_region_1": {"x": 100, "y": 100},
+                "alert_region_2": {"x": 300, "y": 300},
+                "faction_region_1": {"x": 400, "y": 100},
+                "faction_region_2": {"x": 600, "y": 300},
+                "intelligence": {"pilot_history_retention_days": 42},
+            }, f)
+        reset_settings_store(self.settings_path)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_prune_called_once_at_construction_with_configured_retention(self):
+        with patch(
+            "evealert.tools.pilot_history_store.prune_older_than"
+        ) as mock_prune, patch(
+            "evealert.manager.alertmanager.AlertAgent._validate_audio_files"
+        ):
+            AlertAgent(self.mock_main)
+        mock_prune.assert_called_once_with(42)
+
+    def test_prune_not_called_again_on_a_second_load_settings(self):
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._validate_audio_files"
+        ):
+            agent = AlertAgent(self.mock_main)
+        with patch(
+            "evealert.tools.pilot_history_store.prune_older_than"
+        ) as mock_prune:
+            agent.load_settings()
+        mock_prune.assert_not_called()
+
+    def test_prune_failure_does_not_raise(self):
+        """A DB error during startup prune must not crash construction."""
+        with patch(
+            "evealert.tools.pilot_history_store.prune_older_than",
+            side_effect=OSError("disk full"),
+        ), patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            AlertAgent(self.mock_main)  # must not raise
 
 
 if __name__ == "__main__":

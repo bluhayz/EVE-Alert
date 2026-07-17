@@ -81,6 +81,90 @@ class ThreatScoreTests(unittest.TestCase):
         self.assertGreaterEqual(a.score, 4)
         self.assertIn(a.label, ("HIGH", "CRITICAL"))
 
+    def test_zero_history_leaves_behavioral_label_none(self):
+        """#218: no history args passed -- behavioral_label must be None,
+        matching pre-#218 ThreatAssessment (default field value)."""
+        a = compute_threat_score(local_hostile_count=2, is_kos=True)
+        self.assertIsNone(a.behavioral_label)
+
+
+class HistorySignalTests(unittest.TestCase):
+    """#218: sighting history is an additive signal on top of #141's
+    existing inputs -- a pilot with frequent recent local sightings must
+    score measurably higher than an identical pilot with no history."""
+
+    def test_frequent_sightings_score_higher_than_no_history(self):
+        a_with_history = compute_threat_score(local_hostile_count=1, history_frequency=5)
+        a_without = compute_threat_score(local_hostile_count=1)
+        self.assertGreater(a_with_history.score, a_without.score)
+
+    def test_below_threshold_frequency_does_not_add_points(self):
+        below = compute_threat_score(local_hostile_count=1, history_frequency=2)
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(below.score, baseline.score)
+
+    def test_at_threshold_frequency_adds_one_point(self):
+        at_threshold = compute_threat_score(local_hostile_count=1, history_frequency=3)
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(at_threshold.score - baseline.score, 1)
+
+    def test_regular_route_adds_one_point(self):
+        with_route = compute_threat_score(
+            local_hostile_count=1, history_is_regular_route=True
+        )
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(with_route.score - baseline.score, 1)
+
+    def test_frequency_and_route_combine_to_max_two_points(self):
+        both = compute_threat_score(
+            local_hostile_count=1, history_frequency=5, history_is_regular_route=True
+        )
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(both.score - baseline.score, 2)
+
+    def test_history_still_respects_the_overall_10_cap(self):
+        a = compute_threat_score(
+            local_hostile_count=5, is_kos=True, danger_ratio=1.0,
+            dscan_threat_class="force_recon", adjacent_kills=5,
+            history_frequency=10, history_is_regular_route=True,
+        )
+        self.assertEqual(a.score, 10)
+
+
+class BehavioralLabelTests(unittest.TestCase):
+    """#218: explicit thresholds for the behavioral label, separate from
+    the numeric score."""
+
+    def test_five_or_more_is_frequent_resident(self):
+        a = compute_threat_score(history_frequency=5)
+        self.assertEqual(a.behavioral_label, "frequent resident")
+
+    def test_two_to_four_is_occasional_visitor(self):
+        for freq in (2, 3, 4):
+            with self.subTest(freq=freq):
+                a = compute_threat_score(history_frequency=freq)
+                self.assertEqual(a.behavioral_label, "occasional visitor")
+
+    def test_exactly_one_is_single_sighting(self):
+        a = compute_threat_score(history_frequency=1)
+        self.assertEqual(a.behavioral_label, "single sighting")
+
+    def test_zero_frequency_but_regular_route_is_pass_through(self):
+        a = compute_threat_score(history_frequency=0, history_is_regular_route=True)
+        self.assertEqual(a.behavioral_label, "known to pass through")
+
+    def test_no_signal_at_all_is_no_label(self):
+        a = compute_threat_score(history_frequency=0, history_is_regular_route=False)
+        self.assertIsNone(a.behavioral_label)
+
+    def test_label_appears_in_str_output(self):
+        a = compute_threat_score(local_hostile_count=1, history_frequency=5)
+        self.assertIn("(frequent resident)", str(a))
+
+    def test_no_label_no_parens_in_str_output(self):
+        a = compute_threat_score(local_hostile_count=1)
+        self.assertNotIn("(", str(a))
+
 
 if __name__ == "__main__":
     unittest.main()

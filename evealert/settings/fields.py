@@ -65,6 +65,13 @@ FIELDS: list = [
     FieldSpec("intelligence.correlate_intel_reports", "bool", "Intel & ESI", "Intelligence",
               "Show recent intel-channel reports (ship/system) alongside Enemy alarms",
               "correlate_intel_var", True),
+    # Persistent pilot-sighting history (#214/#215, v7.0)
+    FieldSpec("intelligence.pilot_history_enabled", "bool", "Intel & ESI", "Intelligence",
+              "Record pilot sightings (Local alarms + intel mentions) for long-term history",
+              "pilot_history_enabled_var", True),
+    FieldSpec("intelligence.pilot_history_retention_days", "int", "Intel & ESI", "Intelligence",
+              "Pilot sighting history retention (days, 0 = keep forever)",
+              "pilot_history_retention_entry", 180),
     FieldSpec("esi.enabled", "bool", "Intel & ESI", "ESI Augmentation",
               "Show corp/alliance on Enemy alarm", "esi_enabled_var", False),
     FieldSpec("esi.show_corp", "bool", "Intel & ESI", "ESI Augmentation",

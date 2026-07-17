@@ -21,6 +21,7 @@ def _make_agent(tmp_dir: Path) -> AlertAgent:
     settings_path.write_text("{}")
     reset_settings_store(settings_path)
     os.environ["EVEALERT_STATS_PATH"] = str(tmp_dir / "statistics.json")
+    os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(tmp_dir / "pilot_history.db")
 
     mock_main = MagicMock()
     mock_main.write_message = MagicMock()
@@ -52,6 +53,7 @@ class StopRestartTests(unittest.TestCase):
     def tearDown(self):
         import shutil
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_stop_does_not_raise(self):

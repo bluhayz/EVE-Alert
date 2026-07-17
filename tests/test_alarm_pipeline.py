@@ -24,6 +24,7 @@ def _make_agent(tmp_dir: Path) -> tuple[AlertAgent, list]:
     settings_path.write_text("{}")
     reset_settings_store(settings_path)
     os.environ["EVEALERT_STATS_PATH"] = str(tmp_dir / "statistics.json")
+    os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(tmp_dir / "pilot_history.db")
 
     log_calls: list[tuple[str, str]] = []
 
@@ -49,6 +50,7 @@ class UiDispatchTests(unittest.TestCase):
     def tearDown(self):
         import shutil
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_write_message_reaches_main(self):
@@ -84,6 +86,7 @@ class AlarmDetectionPipelineTests(unittest.TestCase):
     def tearDown(self):
         import shutil
         os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _run_alarm_detection(self, agent: AlertAgent, text: str, alarm_type: str) -> None:

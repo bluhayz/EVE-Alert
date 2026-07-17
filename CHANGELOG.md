@@ -1,5 +1,47 @@
 # Changelog
 
+## [6.3.35] 2026-07-17
+
+### Added — v7.0: Pilot Intelligence & Persistence (#214, #215, #216, #217, #218)
+
+Every pilot sighting — Local enemy detections and intel-channel mentions — is
+now recorded to a durable local history, and that history feeds back into
+Enemy alarms as it accumulates.
+
+- **Persistent sighting store (#214)**: new `evealert/tools/pilot_history_store.py`,
+  a local SQLite database (`pilot_history.db`, stdlib `sqlite3`, no new
+  dependency) recording pilot name, system, ship, source (local/intel),
+  corp/alliance, and timestamp for every sighting. A configurable retention
+  window (`intelligence.pilot_history_retention_days`, default 180 days,
+  `0` = keep forever) is pruned once per app start.
+- **Ingestion (#215)**: Enemy-alarm pilots and intel-channel `mentioned_pilots`
+  are now recorded automatically. The reporting pilot in an intel message is
+  deliberately excluded — only who they *mention* counts as a sighting. Gated
+  behind `intelligence.pilot_history_enabled` (default on).
+- **History summary on alarms (#216)**: pilots with 3+ recorded sightings get
+  an extra log line — `History: 14 sightings over 45d — mostly in J5A-IX
+  (9x), 1DQ1-A (3x); usually flies Loki; most active 19:00-22:00` — computed
+  in `evealert/tools/pilot_history_analytics.py`.
+- **Pathing inference (#217)**: sightings are grouped into sessions (a >4h
+  gap starts a new session) to infer a pilot's home system and their most
+  common system-to-system transitions, cross-checked against the jump graph
+  for plausibility. Requires a transition to repeat at least 3 times before
+  reporting it — no result is shown rather than a low-confidence guess.
+  Appears as a trailing segment on the History line, e.g. `home J5A-IX;
+  often moves J5A-IX -> 1DQ1-A`.
+- **Historical threat scoring (#218)**: `evealert/tools/threat_score.py`'s
+  composite scorer now accepts `history_frequency` and
+  `history_is_regular_route` as additive signals — a pilot frequently seen
+  in the current system, or known to pass through on their regular route,
+  scores measurably higher. Both default to "no history," so the score is
+  byte-for-byte unchanged for a pilot with none (verified against the full
+  pre-#218 test suite run unmodified). A short behavioral label ("frequent
+  resident", "occasional visitor", "single sighting", "known to pass
+  through") is appended to the rendered threat line, separate from the
+  numeric score.
+- 63 new tests across `test_pilot_history_store.py`, `test_pilot_history_analytics.py`,
+  `test_threat_score.py`, and `test_alertmanager.py`.
+
 ## [6.3.34] 2026-07-17
 
 ### Changed — log pane now shows newest-first (#222)

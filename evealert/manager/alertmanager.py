@@ -230,6 +230,10 @@ class AlertAgent:
         # the chat log. (timestamp, IntelReport) tuples, oldest first.
         self._intel_reports_recent: deque = deque(maxlen=50)
         self._correlate_intel_enabled = True
+        # #214: persistent pilot-sighting history retention window (days)
+        self._pilot_history_retention_days = 180
+        # #215: gate for recording sightings from Local alarms/intel mentions
+        self._pilot_history_enabled = True
 
         # ESI augmentation
         self._esi_enabled = False
@@ -327,6 +331,7 @@ class AlertAgent:
         self.load_settings()
         self._load_plugins()
         self._validate_audio_files()
+        self._prune_pilot_history()
 
     # ------------------------------------------------------------------
     # Thread safety helper
@@ -422,6 +427,19 @@ class AlertAgent:
         if not valid_faction:
             logger.warning(error_faction)
             self._ui(self.main.write_message, f"Warning: {error_faction}", "red")
+
+    def _prune_pilot_history(self) -> None:
+        """Prune the persistent pilot-sighting store (#214) once per app
+        start -- not on every load_settings() reload, since that can fire
+        repeatedly during a session whenever settings.json changes."""
+        try:
+            from evealert.tools.pilot_history_store import (  # noqa: PLC0415
+                prune_older_than,
+            )
+
+            prune_older_than(self._pilot_history_retention_days)
+        except Exception as exc:
+            logger.debug("Pilot history prune failed: %s", exc)
 
     def start(self) -> bool:
         """Start the detection engine in this (daemon) thread."""
@@ -684,6 +702,11 @@ class AlertAgent:
             self._intel_threat_radius = int(intel.get("intel_threat_radius", 5))
             # Intel-report correlation on Enemy alarms (#212)
             self._correlate_intel_enabled = bool(intel.get("correlate_intel_reports", True))
+            # Persistent pilot-sighting history (#214/#215, v7.0)
+            self._pilot_history_retention_days = int(
+                intel.get("pilot_history_retention_days", 180)
+            )
+            self._pilot_history_enabled = bool(intel.get("pilot_history_enabled", True))
 
             # ESI augmentation settings
             esi = settings.get("esi", {})
@@ -1232,6 +1255,27 @@ class AlertAgent:
                         f"  hostile: {hostile_link}",
                         "orange",
                     )
+                # Persistent pilot-sighting history (#215, v7.0): one
+                # sighting per mentioned hostile pilot. The reporting pilot
+                # themselves is deliberately excluded -- they're your own
+                # intel channel's population (often allies), not a hostile
+                # sighting; only who they *mention* counts.
+                if self._pilot_history_enabled:
+                    try:
+                        from evealert.tools.pilot_history_store import (  # pylint: disable=import-outside-toplevel
+                            record_sighting,
+                        )
+
+                        report_ship = report.ships[0] if report.ships else None
+                        for hostile in report.mentioned_pilots:
+                            record_sighting(
+                                hostile,
+                                source="intel",
+                                system=report.system,
+                                ship=report_ship,
+                            )
+                    except Exception as exc:
+                        logger.debug("Pilot history record (intel) failed: %s", exc)
                 # Queue a jump-distance lookup if we have a home system
                 home = self._settings_store.get("server.system", "").strip()
                 if home and home != "Enter a System Name" and report.system:
@@ -1493,6 +1537,9 @@ class AlertAgent:
             _any_kos = False
             _kos_tier_label = ""
             _max_danger_ratio = 0.0
+            # #218: aggregated across pilots, same pattern as _max_danger_ratio
+            _max_history_frequency = 0
+            _any_history_regular_route = False
 
             for name in names[:5]:
                 info = results_by_name.get(name.lower())
@@ -1635,6 +1682,87 @@ class AlertAgent:
                     except Exception as exc:
                         logger.debug("Intel correlation failed: %s", exc)
 
+                # ── Persistent pilot-sighting history (#215, v7.0) — runs
+                # regardless of ESI resolution: the pilot's name and current
+                # system are known even when ESI can't resolve them. ─
+                if self._pilot_history_enabled:
+                    try:
+                        from evealert.tools.pilot_history_store import (  # pylint: disable=import-outside-toplevel
+                            record_sighting,
+                        )
+
+                        current_system = self._settings_store.get(
+                            "server.system", ""
+                        ).strip()
+                        if current_system == "Enter a System Name":
+                            current_system = ""
+                        record_sighting(
+                            display_name,
+                            source="local",
+                            system=current_system or None,
+                            ship=(zkb.top_ship if zkb else None),
+                            corp=corp_name or None,
+                            alliance=alliance_name or None,
+                        )
+                    except Exception as exc:
+                        logger.debug("Pilot history record (local) failed: %s", exc)
+
+                # ── Pilot sighting-history summary (#216, v7.0) — makes the
+                # accumulated history in #214/#215's store useful in the
+                # moment, not just data at rest. Runs regardless of ESI
+                # resolution, same reasoning as the blocks above. ─
+                if self._pilot_history_enabled:
+                    try:
+                        from evealert.tools.pilot_history_analytics import (  # pylint: disable=import-outside-toplevel
+                            format_pathing,
+                            format_summary,
+                            infer_pathing,
+                            summarize,
+                        )
+
+                        current_system = self._settings_store.get(
+                            "server.system", ""
+                        ).strip()
+                        if current_system == "Enter a System Name":
+                            current_system = ""
+
+                        summary = summarize(display_name)
+                        if summary is not None:
+                            history_line = f"    History: {format_summary(summary)}"
+                            # #217: pathing is an additional segment on the
+                            # same line, only when it clears its own
+                            # confidence floor (see infer_pathing).
+                            pathing = await infer_pathing(display_name)
+                            if pathing is not None:
+                                history_line += f" — {format_pathing(pathing)}"
+                            self._ui(self.main.write_message, history_line, "cyan")
+
+                            # #218: feed the same history data into the
+                            # composite threat score -- aggregated across
+                            # pilots the same way _max_danger_ratio is.
+                            if current_system:
+                                pilot_frequency = next(
+                                    (
+                                        count
+                                        for sys, count in summary.top_systems
+                                        if sys == current_system
+                                    ),
+                                    0,
+                                )
+                                _max_history_frequency = max(
+                                    _max_history_frequency, pilot_frequency
+                                )
+                                if pathing is not None and (
+                                    pathing.home_system == current_system
+                                    or any(
+                                        current_system in pair
+                                        for pair, _count in pathing.top_transitions
+                                    )
+                                ):
+                                    _any_history_regular_route = True
+                    except Exception as exc:
+                        logger.debug("Pilot history summary failed: %s", exc)
+
                 # ── KOS check (v3.4) — runs regardless of ESI resolution (#203) ─
                 try:
                     from evealert.tools.kos_checker import (  # pylint: disable=import-outside-toplevel
@@ -1719,6 +1847,8 @@ class AlertAgent:
                 adjacent_kills=self._neighbor_monitor.last_kill_count
                     if self._neighbor_monitor and hasattr(self._neighbor_monitor, "last_kill_count") else 0,
                 is_cyno=ShipThreatClass.CYNO in self._dscan_last_classes,
+                history_frequency=_max_history_frequency,
+                history_is_regular_route=_any_history_regular_route,
             )
             colour = {"CRITICAL": "red", "HIGH": "yellow", "CAUTION": "cyan"}[assessment.label]
             self._ui(self.main.write_message, str(assessment), colour)
