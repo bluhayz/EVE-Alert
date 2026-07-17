@@ -2383,9 +2383,13 @@ class AlertAgent:
         means OCR found nothing for that specific row (caller falls back to
         its position as the identity for dedup purposes).
 
-        Also updates ``self._last_ocr_names`` (flat, deduped list — used by
-        _augment_with_esi and _build_enemy_alarm_text) as a side effect,
-        exactly once per fresh OCR attempt.
+        Also updates ``self._last_ocr_names`` (flat, deduped list of names
+        actually matched to an enemy icon's row — used by _augment_with_esi
+        and _build_enemy_alarm_text) as a side effect, exactly once per
+        fresh OCR attempt. Deliberately NOT every name OCR finds in the
+        captured region (that would include the player's own name and any
+        non-hostile pilots sharing the region, e.g. the whole Local
+        roster).
 
         Throttling: re-runs OCR immediately whenever the SET of detected
         icon positions changes (a new arrival must be identified right
@@ -2461,12 +2465,30 @@ class AlertAgent:
             )
             identities, all_names = match_names_to_targets(region, targets, row_tolerance)
             self._last_enemy_identities = identities
-            self._last_ocr_names = all_names
-            if all_names:
+            # Regression fix: _last_ocr_names feeds the alarm headline
+            # (_build_enemy_alarm_text) AND the ESI hint-name list
+            # (_augment_with_esi's hint_names) -- it must only ever contain
+            # names actually matched to an enemy icon's row. Using
+            # all_names here (every name OCR found anywhere in the
+            # captured region, i.e. the whole Local roster including the
+            # player's own name and corp/fleet mates) reported and
+            # ESI-queried the entire roster as "the enemy" whenever the
+            # region spans more than the enemy's own row.
+            matched_names = list(dict.fromkeys(identities.values()))
+            self._last_ocr_names = matched_names
+            if matched_names:
                 self._ui(
                     self.main.write_message,
-                    f"OCR [alarm]: detected pilot(s): {', '.join(all_names)}",
+                    f"OCR [alarm]: identified pilot(s): {', '.join(matched_names)}",
                     "cyan",
+                )
+            elif all_names:
+                self._ui(
+                    self.main.write_message,
+                    f"OCR [alarm]: found {len(all_names)} name(s) in region but none "
+                    f"matched an enemy icon's row (region/tolerance misaligned?): "
+                    f"{', '.join(all_names)}",
+                    "yellow",
                 )
             else:
                 self._ui(

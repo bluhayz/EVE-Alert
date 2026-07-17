@@ -1,5 +1,27 @@
 # Changelog
 
+## [6.3.32] 2026-07-17
+
+### Fixed — OCR alarm headline/ESI query reported the entire Local roster as "the enemy" (#220, regression from #213)
+
+- v6.3.31's #213 fix set `AlertAgent._last_ocr_names` to `match_names_to_targets()`'s
+  `all_names` — every distinct name OCR found anywhere in the captured region — instead
+  of only the names actually matched to a detected enemy icon's row. Since
+  `_last_ocr_names` feeds both the Enemy alarm headline and the ESI query's
+  `hint_names`, a single enemy icon on screen could produce an alarm listing (and
+  ESI-querying) the entire visible Local roster, including the player's own name and
+  corp/fleet mates, whenever the OCR region spanned more than the enemy's own row.
+- `_last_ocr_names` is now built strictly from the icon-matched identities. When no
+  icon matches any OCR'd row, it's left empty (bare `"Enemy Appears!"` headline, no
+  ESI query) rather than falling back to the full roster. The `OCR [alarm]:` diagnostic
+  log line was split into three honest cases — names matched to an enemy icon,
+  names found but none matched a row (a region/tolerance-misalignment warning, not
+  reported as hostiles), and no names found — so region tuning still has useful
+  diagnostic output without implying everyone visible is the enemy.
+- 2 new regression tests in `test_alertmanager.py` reproduce the exact reported
+  scenario (a matched name buried in a larger `all_names` roster dump, and the
+  no-match case) and fail against the pre-fix code.
+
 ## [6.3.31] 2026-07-17
 
 ### Fixed — OCR emitting the same pilot name twice, with icon-glyph prefixes leaking through (#209)

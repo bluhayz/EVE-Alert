@@ -607,6 +607,46 @@ class ResolveEnemyIdentitiesTests(unittest.TestCase):
         self.assertEqual(identities, {(2, 51): "Bad Guy"})
         self.assertEqual(self.agent._last_ocr_names, ["Bad Guy"])
 
+    def test_last_ocr_names_excludes_unmatched_roster_names(self):
+        """Regression: a release shipped with _last_ocr_names set to
+        match_names_to_targets()'s all_names (every name OCR found
+        anywhere in the captured region -- the whole Local roster,
+        including the player's own name and corp/fleet mates) instead of
+        only the names actually matched to an enemy icon's row. That fed
+        the alarm headline AND the ESI query, reporting/querying the
+        entire roster as "the enemy". Only the matched identity may ever
+        end up in _last_ocr_names."""
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=(
+                {(2, 51): "Bad Guy"},
+                [
+                    "Bad Guy", "bluhauz", "AschRafie", "Bronwen Morgan",
+                    "Demi Tras", "Floki Orti",
+                ],
+            ),
+        ):
+            identities = self.agent._resolve_enemy_identities()
+        self.assertEqual(identities, {(2, 51): "Bad Guy"})
+        self.assertEqual(self.agent._last_ocr_names, ["Bad Guy"])
+        self.assertNotIn("bluhauz", self.agent._last_ocr_names)
+        self.assertNotIn("AschRafie", self.agent._last_ocr_names)
+
+    def test_last_ocr_names_empty_when_no_icon_matches_a_row(self):
+        """No enemy icon matched any OCR'd row -> the alarm headline/ESI
+        hint list must stay empty, NOT fall back to every name found in
+        the region (that's the same bug as above, just via the
+        no-match path instead of the some-match path)."""
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=({}, ["bluhauz", "AschRafie", "Bronwen Morgan"]),
+        ):
+            identities = self.agent._resolve_enemy_identities()
+        self.assertEqual(identities, {})
+        self.assertEqual(self.agent._last_ocr_names, [])
+
     def test_throttled_when_position_set_unchanged(self):
         """A second call within _IDENTITY_RESOLVE_MIN_INTERVAL, with the
         SAME detected positions, must reuse the cached mapping instead of
