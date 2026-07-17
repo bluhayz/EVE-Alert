@@ -961,13 +961,23 @@ class AlertAgent:
         return (int(x) // grid, int(y) // grid)
 
     def _should_alarm_enemy(self, enemy_identities: dict | None = None) -> bool:
-        """Return True only when a genuinely new enemy has appeared, or an
-        already-seen enemy's cooldown window has elapsed. Prevents the alarm
-        (stats/sound/webhook/plugins/push) from re-firing on every poll while
-        the same enemy stays on screen (#100).
+        """Return True only when a genuinely new enemy has appeared, or a
+        previously-alarmed enemy has become due for a sustained-presence
+        re-arm. Prevents the alarm (stats/sound/webhook/plugins/push) from
+        re-firing on every poll while the same enemy stays on screen (#100).
 
-        When rearm_minutes > 0, also re-arms (returns True) when an enemy has
-        been continuously present for that many minutes (#144).
+        A still-present enemy does NOT re-alarm just because
+        cooldown_timer_enemy seconds have elapsed since their last alarm —
+        an earlier version did exactly that, which meant a pilot who simply
+        sat in system re-triggered the full alarm pipeline (log/ESI/sound/
+        webhook) once per cooldown window, indefinitely, for as long as
+        they stayed. An identity that has already alarmed only fires again
+        when either (a) it drops out of _seen_enemies because the pilot
+        actually left (see reset_alarm, #100), or (b) rearm_minutes > 0 and
+        they've been continuously present for that long (#144) — an
+        explicit opt-in for periodic reminders on a sustained threat, off
+        by default. cooldown_timer_enemy still governs the separate,
+        alarm-type-level sound-spam throttle in play_sound().
 
         #213: dedup identity is the OCR-resolved pilot NAME when available
         (enemy_identities, from _resolve_enemy_identities — quantized
@@ -975,12 +985,11 @@ class AlertAgent:
         position for any icon OCR couldn't identify. Keying by name (not
         just position) prevents a Local-roster re-sort from making a
         still-present pilot look like a "brand-new enemy" and re-firing the
-        alarm mid-cooldown; it also prevents a genuinely different pilot
-        from being silently suppressed just because they landed on the
-        screen position an earlier, now-departed pilot used to occupy.
+        alarm; it also prevents a genuinely different pilot from being
+        silently suppressed just because they landed on the screen position
+        an earlier, now-departed pilot used to occupy.
         """
         now = time.time()
-        cooldown = max(int(self._cooldown_enemy), 1)
         enemy_identities = enemy_identities or {}
         keys = {
             enemy_identities.get(self._quantize_point(p), self._quantize_point(p))
@@ -995,11 +1004,8 @@ class AlertAgent:
             if sighting is None:
                 # Brand-new enemy
                 trigger = True
-            elif now - sighting.last_alarm >= cooldown:
-                # Cooldown elapsed — re-alarm
-                trigger = True
             elif sighting.rearm_at > 0 and now >= sighting.rearm_at:
-                # Sustained-presence re-arm (#144)
+                # Sustained-presence re-arm (#144) — opt-in only
                 trigger = True
 
         # Prune to only currently-visible enemies; update or create records.

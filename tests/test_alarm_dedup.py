@@ -59,14 +59,35 @@ class AlarmDedupTests(unittest.TestCase):
         self.agent._enemy_points = [(103, 101)]  # same 20px grid cell
         self.assertFalse(self.agent._should_alarm_enemy())
 
-    def test_reeligible_after_cooldown_window(self):
+    def test_stationary_enemy_does_not_realarm_after_cooldown_elapses(self):
+        """A pilot who never leaves must not re-trigger the full alarm
+        pipeline just because cooldown_timer_enemy seconds passed -- an
+        earlier version did exactly that, re-alarming on a fixed interval
+        for as long as the pilot sat in system. cooldown_timer_enemy still
+        governs the separate sound-spam throttle in play_sound(); it no
+        longer controls per-pilot re-alarming here."""
         with mock.patch("evealert.manager.alertmanager.time.time", return_value=1000.0):
             self.agent._enemy_points = [(100, 100)]
             self.assertTrue(self.agent._should_alarm_enemy())
             self.assertFalse(self.agent._should_alarm_enemy())
-        # Advance beyond the cooldown window
+        # Advance well beyond the (30s) cooldown window -- still no re-alarm
+        # while the same enemy remains continuously present.
         with mock.patch(
-            "evealert.manager.alertmanager.time.time", return_value=1000.0 + 31
+            "evealert.manager.alertmanager.time.time", return_value=1000.0 + 3600
+        ):
+            self.assertFalse(self.agent._should_alarm_enemy())
+
+    def test_rearm_minutes_still_triggers_periodic_reminder(self):
+        """rearm_minutes remains the (opt-in, off by default) lever for a
+        periodic reminder on a sustained threat -- unaffected by the
+        removal of the cooldown-elapsed auto-refire."""
+        self.agent._rearm_minutes = 1  # opt in: remind every 1 minute
+        with mock.patch("evealert.manager.alertmanager.time.time", return_value=1000.0):
+            self.agent._enemy_points = [(100, 100)]
+            self.assertTrue(self.agent._should_alarm_enemy())
+            self.assertFalse(self.agent._should_alarm_enemy())
+        with mock.patch(
+            "evealert.manager.alertmanager.time.time", return_value=1000.0 + 61
         ):
             self.assertTrue(self.agent._should_alarm_enemy())
 

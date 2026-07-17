@@ -1,5 +1,31 @@
 # Changelog
 
+## [6.3.33] 2026-07-17
+
+### Fixed — stationary enemy pilot re-triggered the full alarm every cooldown_timer_enemy seconds (#221)
+
+- A pilot who stayed continuously in system re-fired the entire Enemy alarm
+  pipeline — log line, ESI query, sound, webhook — every `cooldown_timer_enemy`
+  seconds, indefinitely, even though they never left. Reported log showed the
+  same pilot re-alarming roughly once a minute for 15+ minutes straight.
+- `AlertAgent._should_alarm_enemy()` had a cooldown-elapsed branch that
+  re-triggered on a still-present, unchanged identity purely because time had
+  passed, independent of whether the pilot had actually left and returned.
+  This conflicted with `docs/FEATURES.md`'s own documented design, which
+  already separated "per-enemy dedup + re-alert" (`rearm_minutes`) from
+  "per-type sound cooldown" (`cooldown_timer_enemy/_faction`, scoped to
+  `play_sound()`) as two distinct mechanisms.
+- Removed the cooldown-elapsed auto-refire. An identity that has already
+  alarmed now only fires again when it drops out of `_seen_enemies` because
+  the pilot actually left (`reset_alarm`, unchanged, #100), or when
+  `rearm_minutes > 0` and they've been continuously present for that long
+  (#144) — the existing, opt-in lever for periodic reminders on a sustained
+  threat, off by default. `cooldown_timer_enemy`/`cooldown_timer_faction`
+  are unaffected for their other purpose, the alarm-type-level sound-spam
+  throttle in `play_sound()`.
+- Updated/added regression tests in `test_alarm_dedup.py` covering both the
+  no-more-auto-refire case and that `rearm_minutes` still works as before.
+
 ## [6.3.32] 2026-07-17
 
 ### Fixed — OCR alarm headline/ESI query reported the entire Local roster as "the enemy" (#220, regression from #213)
