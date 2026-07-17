@@ -6,6 +6,8 @@ that provides:
   - Free-text live search
   - Pause mode (buffer keeps filling; re-renders on resume)
   - Right-click context menu: Copy line / Copy all visible
+  - Newest-first display: each new entry is prepended above the previous
+    one, so the most recent activity is always visible without scrolling
 
 Usage::
 
@@ -214,7 +216,11 @@ class LogPane(QWidget):
         self._log.setReadOnly(True)
         self._log.setOpenExternalLinks(True)
         self._log.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        self._log.document().setMaximumBlockCount(_WIDGET_BLOCK_MAX)
+        # No setMaximumBlockCount here: Qt's built-in cap always trims from
+        # the document's structural start, which is now the newest entry
+        # (log is newest-first) -- that would silently delete the latest
+        # lines instead of the oldest. _trim_to_max_blocks() below trims
+        # from the end (oldest) manually instead.
         self._log.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._log.customContextMenuRequested.connect(self._show_context_menu)
         root.addWidget(self._log, 1)
@@ -266,25 +272,43 @@ class LogPane(QWidget):
         return True
 
     def _rerender(self) -> None:
-        """Clear the widget and re-insert all matching buffer entries."""
+        """Clear the widget and re-insert all matching buffer entries.
+
+        _buffer is stored oldest-first; _insert_entry() prepends each entry
+        above the previous one, so inserting in oldest-first order here
+        naturally leaves the newest entry on top -- no reversal needed.
+        """
         self._log.clear()
         for entry in self._buffer:
             if self._matches(entry):
                 self._insert_entry(entry)
-        scrollbar = self._log.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        self._log.verticalScrollBar().setValue(0)  # newest entry is at the top
 
     def _insert_entry(self, entry: _Entry) -> None:
-        """Append one entry to the display widget."""
+        """Prepend one entry above the current top of the display widget,
+        so the most recent log line is always shown first."""
+        was_at_top = self._log.verticalScrollBar().value() <= 4
         hex_color = theme.LOG_COLORS.get(entry.color, theme.TEXT)
         cursor = self._log.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        if cursor.position() > 0:
-            cursor.insertBlock()  # new paragraph, keeps prior line's formatting isolated
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        if not self._log.document().isEmpty():
+            cursor.insertBlock()  # push existing content down one block
+            cursor.movePosition(QTextCursor.MoveOperation.Start)  # back into the new empty first block
         cursor.insertHtml(_entry_to_html(entry.text, hex_color))
-        scrollbar = self._log.verticalScrollBar()
-        if scrollbar.value() >= scrollbar.maximum() - 4:
-            self._log.ensureCursorVisible()
+        self._trim_to_max_blocks()
+        if was_at_top:
+            self._log.verticalScrollBar().setValue(0)
+
+    def _trim_to_max_blocks(self) -> None:
+        """Drop the oldest (last) block(s) once the widget exceeds
+        _WIDGET_BLOCK_MAX -- the manual equivalent of Qt's
+        setMaximumBlockCount, but trimming from the end since the newest
+        entry now lives at the start of the document."""
+        doc = self._log.document()
+        while doc.blockCount() > _WIDGET_BLOCK_MAX:
+            cursor = QTextCursor(doc.lastBlock())
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+            cursor.removeSelectedText()
 
     # ------------------------------------------------------------------
     # Context menu

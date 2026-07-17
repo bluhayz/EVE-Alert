@@ -7,6 +7,7 @@ Uses the offscreen Qt platform so no display is needed in CI.
 import os
 import re
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -180,8 +181,53 @@ class LogPaneRenderTests(unittest.TestCase):
         plain = pane._log.toPlainText()
         lines = [l for l in plain.splitlines() if l.strip()]
         self.assertEqual(len(lines), 2)
-        self.assertIn("zkillboard.com/character/1/", lines[0])
-        self.assertIn("zkillboard.com/character/2/", lines[1])
+        # Newest-first: the most recently appended entry is on top.
+        self.assertIn("zkillboard.com/character/2/", lines[0])
+        self.assertIn("zkillboard.com/character/1/", lines[1])
+
+    def test_many_entries_stay_newest_first(self):
+        pane = _make_pane()
+        for i in range(5):
+            pane.append(f"line {i}", "normal")
+        plain = pane._log.toPlainText()
+        lines = [ln for ln in plain.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 5)
+        # line 4 (most recently appended) is on top, line 0 is at the bottom.
+        for i, line in enumerate(lines):
+            self.assertIn(f"line {4 - i}", line)
+
+    def test_rerender_preserves_newest_first_order(self):
+        """Switching filters (which calls _rerender) must not flip the
+        newest-first order back to chronological."""
+        pane = _make_pane()
+        pane.append("System: one", "green")
+        pane.append("System: two", "green")
+        pane._set_tag_filter("system")
+        plain = pane._log.toPlainText()
+        lines = [ln for ln in plain.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("System: two", lines[0])
+        self.assertIn("System: one", lines[1])
+
+    def test_trim_keeps_newest_entries_when_exceeding_block_max(self):
+        """When the widget exceeds _WIDGET_BLOCK_MAX, the OLDEST entries
+        must be dropped -- not the newest, which now live at the top of
+        the document instead of the bottom."""
+        import evealert.ui.log_pane as log_pane_mod
+
+        pane = _make_pane()
+        with patch.object(log_pane_mod, "_WIDGET_BLOCK_MAX", 3):
+            for i in range(6):
+                pane.append(f"line {i}", "normal")
+            plain = pane._log.toPlainText()
+        lines = [ln for ln in plain.splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 3)
+        # The 3 most recent lines (3, 4, 5) survive, newest on top.
+        self.assertIn("line 5", lines[0])
+        self.assertIn("line 4", lines[1])
+        self.assertIn("line 3", lines[2])
+        self.assertNotIn("line 0", plain)
+        self.assertNotIn("line 2", plain)
 
     def test_name_with_period_not_linkified_in_widget(self):
         pane = _make_pane()

@@ -174,6 +174,9 @@ class AlertAgent:
         self._last_identity_keys: frozenset = frozenset()
         self._last_identity_resolve_time: float = 0.0
         self._last_enemy_identities: dict = {}  # quantized position -> name
+        # Last OCR [alarm] diagnostic line actually logged, so an unchanged
+        # result on a later fresh resolve doesn't re-print the same line.
+        self._last_ocr_log_message: str = ""
 
         # Long-running asyncio task handles (cancelled in stop(), #102)
         self.vision_t = None
@@ -941,6 +944,7 @@ class AlertAgent:
             self._last_identity_keys = frozenset()
             self._last_identity_resolve_time = 0.0
             self._last_enemy_identities = {}
+            self._last_ocr_log_message = ""
 
         if self._webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
@@ -2431,8 +2435,7 @@ class AlertAgent:
             )
 
             if not is_ocr_available():
-                self._ui(
-                    self.main.write_message,
+                self._log_ocr_message(
                     "OCR [alarm]: no backend available (Windows.Media.Ocr / Tesseract) — name detection skipped",
                     "yellow",
                 )
@@ -2444,8 +2447,7 @@ class AlertAgent:
                 self._ocr_region, (self.x1, self.y1, self.x2, self.y2)
             )
             if not region:
-                self._ui(
-                    self.main.write_message,
+                self._log_ocr_message(
                     f"OCR [alarm]: region is invalid (ocr_region={self._ocr_region}, "
                     f"alert_region=({self.x1},{self.y1},{self.x2},{self.y2})) — skipped",
                     "yellow",
@@ -2483,36 +2485,44 @@ class AlertAgent:
             matched_names = list(dict.fromkeys(identities.values()))
             self._last_ocr_names = matched_names
             if matched_names:
-                self._ui(
-                    self.main.write_message,
+                self._log_ocr_message(
                     f"OCR [alarm]: identified pilot(s): {', '.join(matched_names)}",
                     "cyan",
                 )
             elif all_names:
-                self._ui(
-                    self.main.write_message,
+                self._log_ocr_message(
                     f"OCR [alarm]: found {len(all_names)} name(s) in region but none "
                     f"matched an enemy icon's row (region/tolerance misaligned?): "
                     f"{', '.join(all_names)}",
                     "yellow",
                 )
             else:
-                self._ui(
-                    self.main.write_message,
+                self._log_ocr_message(
                     f"OCR [alarm]: capture at {region} returned no names (check region config)",
                     "yellow",
                 )
             return identities
         except Exception as exc:
-            self._ui(
-                self.main.write_message,
-                f"OCR [alarm]: exception — {exc}",
-                "yellow",
-            )
+            self._log_ocr_message(f"OCR [alarm]: exception — {exc}", "yellow")
             logger.debug("_resolve_enemy_identities: OCR failed: %s", exc, exc_info=True)
             self._last_enemy_identities = {}
             self._last_ocr_names = []
             return {}
+
+    def _log_ocr_message(self, message: str, color: str) -> None:
+        """Log an OCR [alarm] diagnostic line, but only when it differs from
+        the last one logged.
+
+        Without this, every fresh (non-throttled) OCR resolve re-printed
+        "identified pilot(s): ..." even when the result was identical to
+        last time -- e.g. a single stationary pilot re-announced every
+        _IDENTITY_RESOLVE_MIN_INTERVAL seconds for as long as they stayed,
+        even though nothing about the sighting had changed.
+        """
+        if message == self._last_ocr_log_message:
+            return
+        self._last_ocr_log_message = message
+        self._ui(self.main.write_message, message, color)
 
     def _build_enemy_alarm_text(self) -> str:
         """Build the Enemy alarm headline from the pilot name(s) already

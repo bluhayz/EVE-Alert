@@ -1,5 +1,37 @@
 # Changelog
 
+## [6.3.34] 2026-07-17
+
+### Changed — log pane now shows newest-first (#222)
+
+- New log entries appear at the top instead of the bottom, so watching live
+  activity no longer requires scrolling down.
+- `LogPane._insert_entry()` prepends each entry above the previous top entry.
+  `setMaximumBlockCount` was removed in favor of a manual
+  `_trim_to_max_blocks()` that trims from the end of the document, since the
+  oldest entry now lives at the bottom rather than the top — Qt's built-in
+  cap always trims from the structural start, which would otherwise have
+  silently deleted the newest lines instead of the oldest. Auto-scroll now
+  follows the top of the view (and only when the user was already there),
+  the mirror of the old bottom-follow behavior.
+
+### Fixed — OCR [alarm] messages repeated for an unchanged result (#222)
+
+- `OCR [alarm]: identified pilot(s): ...` re-printed on every fresh
+  (non-throttled) OCR resolve even when the result was identical to last
+  time — a single stationary pilot got re-announced every
+  ~1.5–2.5 seconds for as long as they stayed, drowning out everything
+  else in the log.
+- Added `AlertAgent._log_ocr_message()`, which all five `OCR [alarm]: ...`
+  log sites in `_resolve_enemy_identities()` now route through. It tracks
+  the last message actually logged and only emits again when the text
+  changes. The dedup state resets in `reset_alarm("Enemy")` alongside the
+  other #213 per-engagement state, so a later, genuinely new engagement
+  with the same pilot still logs normally.
+- New regression tests in `test_log_pane.py` (ordering, rerender,
+  trim-from-bottom) and `test_alertmanager.py` (message dedup, re-trigger
+  on change, reset behavior).
+
 ## [6.3.33] 2026-07-17
 
 ### Fixed — stationary enemy pilot re-triggered the full alarm every cooldown_timer_enemy seconds (#221)

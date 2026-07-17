@@ -633,6 +633,75 @@ class ResolveEnemyIdentitiesTests(unittest.TestCase):
         self.assertNotIn("bluhauz", self.agent._last_ocr_names)
         self.assertNotIn("AschRafie", self.agent._last_ocr_names)
 
+    def _ocr_alarm_messages(self) -> list[str]:
+        return [
+            c.args[0]
+            for c in self.mock_main.write_message.call_args_list
+            if c.args[0].startswith("OCR [alarm]:")
+        ]
+
+    def test_ocr_message_not_repeated_when_identity_unchanged(self):
+        """Regression: a stationary pilot re-announced 'identified pilot(s):
+        ...' on every fresh (non-throttled) resolve even though nothing
+        about the sighting had changed -- e.g. every
+        _IDENTITY_RESOLVE_MIN_INTERVAL seconds for as long as they stayed.
+        Two fresh resolves (forced via a changing position set, so the
+        throttle doesn't just cache-hit) that both identify the same pilot
+        must only log the message once."""
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=({(2, 51): "Bad Guy"}, ["Bad Guy"]),
+        ) as mock_match:
+            self.agent._resolve_enemy_identities()
+            self.agent._enemy_points = [(50, 33), (50, 333)]  # forces a fresh resolve
+            self.agent._resolve_enemy_identities()
+        self.assertEqual(mock_match.call_count, 2)  # OCR did run twice
+        messages = self._ocr_alarm_messages()
+        self.assertEqual(
+            messages.count("OCR [alarm]: identified pilot(s): Bad Guy"), 1,
+            f"Expected the identical result to be logged only once, got: {messages}",
+        )
+
+    def test_ocr_message_repeated_when_identity_changes(self):
+        """A genuinely different result (new pilot) must still log, even
+        right after a previous OCR [alarm] line."""
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            side_effect=[
+                ({(2, 51): "Bad Guy"}, ["Bad Guy"]),
+                ({(2, 51): "Other Guy"}, ["Other Guy"]),
+            ],
+        ):
+            self.agent._resolve_enemy_identities()
+            self.agent._enemy_points = [(50, 33), (50, 333)]
+            self.agent._resolve_enemy_identities()
+        messages = self._ocr_alarm_messages()
+        self.assertIn("OCR [alarm]: identified pilot(s): Bad Guy", messages)
+        self.assertIn("OCR [alarm]: identified pilot(s): Other Guy", messages)
+
+    def test_ocr_log_message_reset_allows_relogging_same_result(self):
+        """reset_alarm("Enemy") (fired when the pilot leaves, #100) clears
+        the dedup state so a later, genuinely new engagement with the same
+        pilot name still logs -- the suppression must not persist across
+        engagements."""
+        import asyncio
+
+        self.agent._enemy_points = [(50, 33)]
+        with self._patch_ocr_available(), patch(
+            "evealert.tools.ocr_local.match_names_to_targets",
+            return_value=({(2, 51): "Bad Guy"}, ["Bad Guy"]),
+        ):
+            self.agent._resolve_enemy_identities()
+            asyncio.run(self.agent.reset_alarm("Enemy"))
+            self.agent._resolve_enemy_identities()
+        messages = self._ocr_alarm_messages()
+        self.assertEqual(
+            messages.count("OCR [alarm]: identified pilot(s): Bad Guy"), 2,
+            f"Expected the message again after reset_alarm, got: {messages}",
+        )
+
     def test_last_ocr_names_empty_when_no_icon_matches_a_row(self):
         """No enemy icon matched any OCR'd row -> the alarm headline/ESI
         hint list must stay empty, NOT fall back to every name found in
