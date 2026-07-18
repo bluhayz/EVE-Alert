@@ -1,5 +1,33 @@
 # Changelog
 
+## [7.2.2] 2026-07-18
+
+### Fixed — OCR misreads fired repeat alarms and fragmented pilot history (#224)
+
+- The same on-screen enemy icon, read slightly differently between polls
+  (classic `l`/`t`/`I`/`1` confusion in condensed UI fonts, e.g.
+  `lilbitofgoop` → `litbitofgoop` → `titbitofgoop`), was treated as a
+  brand-new pilot on every misread — retriggering the alarm, redundant
+  ESI/zKillboard lookups, and splitting one pilot's sighting history
+  across N near-duplicate records.
+- `_stabilize_enemy_identities()` (`alertmanager.py`) now debounces OCR
+  reads per on-screen position: the first read is trusted immediately (no
+  delay on new threats), a near-miss (length-scaled Levenshtein
+  edit-distance) is absorbed into the existing anchor, and a genuinely
+  different name only takes over after repeating for 2 consecutive polls
+  — so a real pilot swap at the same screen slot still works. Feeds into
+  dedup, the alarm headline, ESI hint names, and pilot-history writes.
+
+### Fixed — intel channel discovery never found real EVE chatlog files (#225)
+
+- `discover_channels()` (`intel_watcher.py`) anchored its filename regex
+  on `_YYYYMMDD_HHMMSS.txt`, but real EVE clients append a further
+  `_<ownerID>` segment before `.txt` (e.g.
+  `I. Ftn Intel_20260718_120036_620084186.txt`). The regex never matched
+  real logs, so the Settings dialog's channel auto-discovery list came
+  back empty on every real installation. The date/time suffix now allows
+  an optional trailing `_<digits>` owner-ID segment.
+
 ## [7.2.1] 2026-07-18
 
 ### Fixed — duplicate System/Sov info logged on startup (#223)
