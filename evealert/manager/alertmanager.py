@@ -2780,10 +2780,14 @@ class AlertAgent:
                         f"System: auto-detected \u2192 {system_name}",
                         "cyan",
                     )
-                    # Re-run one-shot system info on system change
+                    # Re-run one-shot system info on a REAL system change.
+                    # The starting system's info was already displayed by
+                    # start()'s own one-shot _display_system_info() call --
+                    # firing it again here on the first ESI detection (which
+                    # typically resolves within seconds of startup) produced
+                    # duplicate "System: ..."/"Sov: ..." log lines (#223).
                     if _first_detection:
                         _first_detection = False
-                        self.loop.create_task(self._display_system_info())
                     else:
                         self.loop.create_task(self._display_system_info())
 

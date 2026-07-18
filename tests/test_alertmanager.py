@@ -2340,5 +2340,92 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
             await self._run_one_cycle()  # must not raise
 
 
+class LocationMonitorDuplicateSystemInfoTests(unittest.IsolatedAsyncioTestCase):
+    """#223: _location_monitor() must not re-fire _display_system_info()
+    on the FIRST ESI-detected system -- start() already displayed it
+    once; only a genuine later system change should trigger a fresh
+    display."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.mock_main.refresh_context_line = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent.loop = MagicMock()
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _run_two_polls(self, locations):
+        """Drive _location_monitor() through exactly len(locations) poll
+        iterations, one system-location result per call, then stop."""
+        self.agent.running = True
+        mock_auth = MagicMock()
+        mock_auth.is_authenticated = True
+        location_iter = iter(locations)
+
+        async def fake_get_location(auth):
+            try:
+                return next(location_iter)
+            except StopIteration:
+                self.agent.running = False
+                return None
+
+        with patch(
+            "evealert.tools.esi_auth.get_esi_auth", return_value=mock_auth
+        ), patch(
+            "evealert.tools.esi_auth.get_character_location",
+            new=AsyncMock(side_effect=fake_get_location),
+        ), patch(
+            "evealert.manager.alertmanager.asyncio.sleep", new=AsyncMock()
+        ):
+            await self.agent._location_monitor()
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def test_first_detection_does_not_schedule_display_system_info(self):
+        await self._run_two_polls(["Jita"])
+
+        self.agent.loop.create_task.assert_not_called()
+
+    async def test_first_detection_still_logs_auto_detected_message(self):
+        """The lighter "System: auto-detected -> X" line is unrelated to
+        _display_system_info() and must still fire every time."""
+        await self._run_two_polls(["Jita"])
+
+        messages = self._logged_messages()
+        self.assertTrue(any("auto-detected" in m and "Jita" in m for m in messages))
+
+    async def test_second_real_system_change_schedules_display_system_info(self):
+        await self._run_two_polls(["Jita", "Amarr"])
+
+        self.agent.loop.create_task.assert_called_once()
+
+    async def test_unchanged_system_between_polls_does_not_reschedule(self):
+        await self._run_two_polls(["Jita", "Jita"])
+
+        self.agent.loop.create_task.assert_not_called()
+
+    async def test_settings_store_updated_on_every_detection_including_first(self):
+        """server.system must stay correct even though the display is
+        suppressed on the first detection."""
+        await self._run_two_polls(["Jita"])
+
+        self.assertEqual(self.agent._settings_store.get("server.system"), "Jita")
+
+
 if __name__ == "__main__":
     unittest.main()
