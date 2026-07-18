@@ -135,5 +135,92 @@ class PruneOlderThanTests(PilotHistoryStoreTestCase):
         self.assertEqual(len(get_sightings("Bad Guy")), 1)
 
 
+class CharacterIdAndMigrationTests(PilotHistoryStoreTestCase):
+    """#238: schema v1 -> v2 -- nullable character_id column plus the
+    composite indexes analytics queries need."""
+
+    def test_character_id_round_trips(self):
+        from evealert.tools.pilot_history_store import get_sightings, record_sighting
+
+        record_sighting("Bad Guy", source="local", character_id=987654)
+        result = get_sightings("Bad Guy")[0]
+        self.assertEqual(result.character_id, 987654)
+
+    def test_character_id_defaults_to_none(self):
+        from evealert.tools.pilot_history_store import get_sightings, record_sighting
+
+        record_sighting("Bad Guy", source="intel")  # intel mentions never resolve one
+        result = get_sightings("Bad Guy")[0]
+        self.assertIsNone(result.character_id)
+
+    def test_existing_v1_database_migrates_without_data_loss(self):
+        """A pre-#238 database has no character_id column and no
+        composite indexes. Connecting to it must add both in place
+        without touching existing rows."""
+        import sqlite3
+
+        from evealert.tools.pilot_history_store import (
+            get_pilot_history_path,
+            get_sightings,
+        )
+
+        # Build a v1-shaped database by hand -- no character_id column,
+        # PRAGMA user_version left at its SQLite default of 0.
+        v1_conn = sqlite3.connect(get_pilot_history_path())
+        v1_conn.executescript("""
+            CREATE TABLE sightings (
+                id INTEGER PRIMARY KEY,
+                pilot_name TEXT NOT NULL,
+                system TEXT,
+                ship TEXT,
+                source TEXT NOT NULL CHECK(source IN ('local', 'intel')),
+                corp TEXT,
+                alliance TEXT,
+                seen_at REAL NOT NULL
+            );
+        """)
+        v1_conn.execute(
+            "INSERT INTO sightings (pilot_name, system, ship, source, corp, alliance, seen_at) "
+            "VALUES ('Bad Guy', 'Jita', 'Loki', 'local', 'Evil Corp', 'Evil Alliance', 1000.0)"
+        )
+        v1_conn.commit()
+        v1_conn.close()
+
+        # A normal read through the module must migrate in place.
+        results = get_sightings("Bad Guy")
+
+        self.assertEqual(len(results), 1)
+        row = results[0]
+        self.assertEqual(row.pilot_name, "Bad Guy")
+        self.assertEqual(row.system, "Jita")
+        self.assertEqual(row.ship, "Loki")
+        self.assertEqual(row.corp, "Evil Corp")
+        self.assertEqual(row.alliance, "Evil Alliance")
+        self.assertEqual(row.seen_at, 1000.0)
+        self.assertIsNone(row.character_id)  # pre-existing row, never had one
+
+        # Verify the migration actually ran: user_version bumped, indexes exist.
+        conn = sqlite3.connect(get_pilot_history_path())
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        self.assertGreaterEqual(version, 2)
+        index_names = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()
+        }
+        self.assertIn("idx_sightings_pilot_seen", index_names)
+        self.assertIn("idx_sightings_system_seen", index_names)
+        conn.close()
+
+    def test_migration_is_idempotent_across_repeated_connections(self):
+        from evealert.tools.pilot_history_store import get_sightings, record_sighting
+
+        record_sighting("Bad Guy", source="local", character_id=1)
+        get_sightings("Bad Guy")  # second connection -- must not raise or duplicate columns
+        get_sightings("Bad Guy")  # third connection
+        result = get_sightings("Bad Guy")[0]
+        self.assertEqual(result.character_id, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ class _StopAgent(AlertAgent):
         self.currently_playing_sounds = {}
         self.alarm_trigger_counts = {}
         self.cooldown_timers = {}
+        self._combat_backfilled_character_ids = set()
         # Task handles
         self.vision_t = mock.MagicMock()
         self.vision_faction_t = mock.MagicMock()

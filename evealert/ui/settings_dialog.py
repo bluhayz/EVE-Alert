@@ -486,6 +486,15 @@ class SettingsDialog(QDialog):
         form5.addRow("Threat tiers & ESI standings:", standings_btn)
         intel.addWidget(box5)
 
+        # Hostile watchlist (#240, v7.3): named pilots/corps/alliances
+        # that get an alarm-text tag, a threat-score bump, and (with the
+        # live killmail feed enabled) tracked anywhere in New Eden.
+        box5b, form5b = _group("Watchlist")
+        watchlist_btn = QPushButton("Watchlist Manager…")
+        watchlist_btn.clicked.connect(self._open_watchlist_manager)
+        form5b.addRow("Hostile pilots/corps/alliances:", watchlist_btn)
+        intel.addWidget(box5b)
+
         # R2Z2 live kill feed (#169) -- alliance watchlist is a non-registry
         # comma-separated ID list; enabled/alarm_jumps/watch_jumps are
         # registry-driven (see fields.py) and share this same section box
@@ -544,6 +553,12 @@ class SettingsDialog(QDialog):
         from evealert.ui.standings_manager import StandingsManagerDialog  # noqa: PLC0415
 
         dlg = StandingsManagerDialog(self, self._store)
+        dlg.exec()
+
+    def _open_watchlist_manager(self) -> None:
+        from evealert.ui.watchlist_manager import WatchlistManagerDialog  # noqa: PLC0415
+
+        dlg = WatchlistManagerDialog(self, self._store)
         dlg.exec()
 
     def _browse_intel_log_dir(self) -> None:

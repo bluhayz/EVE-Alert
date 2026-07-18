@@ -131,6 +131,35 @@ class HistorySignalTests(unittest.TestCase):
         self.assertEqual(a.score, 10)
 
 
+class WatchlistSignalTests(unittest.TestCase):
+    """#240: watchlist membership is an additive signal, same pattern as
+    #218's history signal -- defaults to False/no-op so pre-#240 callers
+    (and this milestone's other tests) get byte-identical scores."""
+
+    def test_watchlisted_adds_one_point(self):
+        watchlisted = compute_threat_score(local_hostile_count=1, is_watchlisted=True)
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(watchlisted.score - baseline.score, 1)
+
+    def test_default_is_watchlisted_false_leaves_score_unaffected(self):
+        explicit_false = compute_threat_score(local_hostile_count=1, is_watchlisted=False)
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(explicit_false.score, baseline.score)
+
+    def test_reason_mentions_watchlist(self):
+        a = compute_threat_score(local_hostile_count=1, is_watchlisted=True)
+        self.assertIn("on hostile watchlist", a.reasons)
+
+    def test_watchlist_still_respects_the_overall_10_cap(self):
+        a = compute_threat_score(
+            local_hostile_count=5, is_kos=True, danger_ratio=1.0,
+            dscan_threat_class="force_recon", adjacent_kills=5,
+            history_frequency=10, history_is_regular_route=True,
+            is_watchlisted=True,
+        )
+        self.assertEqual(a.score, 10)
+
+
 class BehavioralLabelTests(unittest.TestCase):
     """#218: explicit thresholds for the behavioral label, separate from
     the numeric score."""

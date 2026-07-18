@@ -107,6 +107,12 @@ DEFAULT_SETTINGS: dict = {
     },
     "dscan": {"enabled": False, "alert_red": True, "alert_orange": False,
               "alert_probes": True, "alert_new_signatures": True},
+    # #240: named pilot/corp/alliance lists that prioritize collection
+    # and alerting. Names only -- IDs are resolved once per session (see
+    # AlertAgent._resolve_watchlist_ids()) rather than persisted, since a
+    # resolved ID can go stale (corp renamed/dissolved) in a way a name
+    # in settings.json wouldn't reflect until the next resolution anyway.
+    "watchlist": {"pilots": [], "corporations": [], "alliances": []},
     "kos": {"cva_enabled": False, "custom_urls": []},  # CVA KOS domain offline (#135)
     "kos_list": [],
     "push": {

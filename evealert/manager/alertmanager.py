@@ -383,6 +383,25 @@ class AlertAgent:
         # standing camp doesn't re-alarm every monitor cycle.
         self._gatecamp_last_warned: dict = {}
 
+        # v7.3 (#237): combat-activity store -- character IDs already
+        # zKB-backfilled this session, so a repeat Enemy alarm for the
+        # same pilot doesn't re-fetch their kill history every time.
+        self._combat_backfilled_character_ids: set = set()
+
+        # v7.3 (#240): hostile watchlist -- name-based sets for cheap
+        # synchronous checks (alarm tag, threat score), raw name lists
+        # for the one-time async ID resolution R2Z2 filtering needs, and
+        # resolved ID sets once that resolution has run (start()).
+        self._watchlist_pilots: set = set()          # lowercased names
+        self._watchlist_corps_lower: set = set()      # lowercased names
+        self._watchlist_alliances_lower: set = set()  # lowercased names
+        self._watchlist_pilot_names: list = []
+        self._watchlist_corp_names: list = []
+        self._watchlist_alliance_names: list = []
+        self._watchlist_pilot_ids: set = set()
+        self._watchlist_corp_ids: set = set()
+        self._watchlist_alliance_ids: set = set()
+
         # v3.3: D-scan monitor
         self._dscan_enabled = False
         self._dscan_alert_red = True
@@ -552,9 +571,10 @@ class AlertAgent:
             self._ui(self.main.write_message, f"Warning: {error_faction}", "red")
 
     def _prune_pilot_history(self) -> None:
-        """Prune the persistent pilot-sighting store (#214) once per app
-        start -- not on every load_settings() reload, since that can fire
-        repeatedly during a session whenever settings.json changes."""
+        """Prune the persistent pilot-sighting and combat-activity stores
+        (#214, #237) once per app start -- not on every load_settings()
+        reload, since that can fire repeatedly during a session whenever
+        settings.json changes."""
         try:
             from evealert.tools.pilot_history_store import (  # noqa: PLC0415
                 prune_older_than,
@@ -563,6 +583,31 @@ class AlertAgent:
             prune_older_than(self._pilot_history_retention_days)
         except Exception as exc:
             logger.debug("Pilot history prune failed: %s", exc)
+        try:
+            from evealert.tools.combat_activity_store import (  # noqa: PLC0415
+                prune_older_than as prune_combat_activity_older_than,
+            )
+
+            # #237: same retention window as pilot_history_store -- both
+            # are "how much hostile-pilot history do I keep" under one
+            # user-facing setting, not two separate knobs.
+            prune_combat_activity_older_than(self._pilot_history_retention_days)
+        except Exception as exc:
+            logger.debug("Combat activity prune failed: %s", exc)
+
+    async def _backfill_combat_activity(self, character_id: int, pilot_name: str) -> None:
+        """#237: fire-and-forget zKillboard backfill for a pilot's first
+        Enemy alarm this session. Never raises into the caller -- a
+        backfill failure (network hiccup, no zKB history) should be
+        invisible, not disrupt the alarm pipeline."""
+        try:
+            from evealert.tools.combat_activity_store import (  # noqa: PLC0415
+                backfill_from_zkillboard,
+            )
+
+            await backfill_from_zkillboard(character_id, pilot_name)
+        except Exception as exc:
+            logger.debug("Combat activity backfill failed for %s: %s", pilot_name, exc)
 
     def _build_intel_watchers(self) -> list:
         """#171: construct one IntelWatcher per entry in self._intel_channels.
@@ -617,10 +662,20 @@ class AlertAgent:
                     system_name,
                 )
                 return
+            # #240: resolve watchlist corp/pilot NAMES to IDs before
+            # constructing the consumer -- R2Z2Consumer matches killmails
+            # by ID (a per-kill name lookup would be a per-kill ESI round
+            # trip). Only needed here: the alarm-tag/threat-score checks
+            # elsewhere match on name directly, no resolution required.
+            await self._resolve_watchlist_ids()
             self._r2z2_consumer = R2Z2Consumer(
                 origin_system_id=origin_id,
                 watch_jumps=self._r2z2_watch_jumps,
-                alliance_watchlist=self._r2z2_alliance_watchlist,
+                alliance_watchlist=(
+                    self._r2z2_alliance_watchlist | self._watchlist_alliance_ids
+                ),
+                corp_watchlist=self._watchlist_corp_ids,
+                pilot_watchlist=self._watchlist_pilot_ids,
                 on_kill=self._on_r2z2_kill,
                 sequence=self._r2z2_last_sequence,
             )
@@ -631,6 +686,33 @@ class AlertAgent:
             )
         except Exception as exc:
             logger.debug("R2Z2 consumer failed to start: %s", exc)
+
+    async def _resolve_watchlist_ids(self) -> None:
+        """#240: resolve watchlist pilot/corp/alliance NAMES to ESI IDs
+        once per session so R2Z2Consumer can match killmails by ID.
+
+        Best-effort: a resolution failure just means those entries don't
+        filter the live-kill feed this session -- the name-based checks
+        (alarm tag, threat score, combat-activity "tracked" test) are
+        completely unaffected either way, since those match on the
+        already-resolved display name, not an ID.
+        """
+        all_names = list({
+            *self._watchlist_pilot_names,
+            *self._watchlist_corp_names,
+            *self._watchlist_alliance_names,
+        })
+        if not all_names:
+            return
+        try:
+            from evealert.tools.universe import resolve_ids  # noqa: PLC0415
+
+            data = await resolve_ids(all_names)
+            self._watchlist_pilot_ids = {e["id"] for e in data.get("characters", [])}
+            self._watchlist_corp_ids = {e["id"] for e in data.get("corporations", [])}
+            self._watchlist_alliance_ids = {e["id"] for e in data.get("alliances", [])}
+        except Exception as exc:
+            logger.debug("Watchlist ID resolution failed: %s", exc)
 
     async def _gatecamp_monitor(self, origin_id: int) -> None:
         """#170: periodically check the R2Z2 kill buffer for gate-camp
@@ -719,6 +801,104 @@ class AlertAgent:
                 await self.play_sound(ALARM_SOUND, "Enemy")
         except Exception as exc:
             logger.debug("R2Z2 kill report failed: %s", exc)
+
+        # #237: combat-activity ingest path 1 (live). Split into its own
+        # task so a slow name-resolution batch never delays the "LIVE
+        # KILL" log line or the alarm trigger above.
+        if self._pilot_history_enabled:
+            self.loop.create_task(self._record_combat_activity_from_kill(killmail, jump_dist))
+
+    async def _record_combat_activity_from_kill(self, killmail, jump_dist: int | None = None) -> None:
+        """#237/#240: record a combat_activity row for any pilot on
+        *killmail* (attacker or victim) who is "tracked" -- currently
+        OCR-visible in Local, already present in pilot_history_store, or
+        on the hostile watchlist (#240). Only reached for kills
+        R2Z2Consumer already filtered to jump-radius/alliance/corp/pilot
+        watchlist relevance (see R2Z2Consumer._handle_package), so this
+        isn't resolving names for the whole galaxy's kill feed.
+
+        A watchlisted pilot additionally gets a low-priority log line
+        (distinct from the always-on "LIVE KILL: ..." line, which never
+        names the pilot) -- "Watchlist: BadGuy killed a Venture in
+        1DQ1-A, 23j away".
+        """
+        try:
+            from evealert.tools.combat_activity_store import (  # noqa: PLC0415
+                record_activity,
+            )
+            from evealert.tools.pilot_history_store import get_sightings  # noqa: PLC0415
+            from evealert.tools.r2z2 import resolve_ship_name  # noqa: PLC0415
+            from evealert.tools.universe import get_universe_cache, resolve_names  # noqa: PLC0415
+            from evealert.tools.http_common import DEFAULT_HEADERS  # noqa: PLC0415
+            import httpx  # noqa: PLC0415
+
+            candidate_ids = set(killmail.attacker_character_ids)
+            if killmail.victim_character_id:
+                candidate_ids.add(killmail.victim_character_id)
+            if not candidate_ids:
+                return
+
+            id_to_name = await resolve_names(list(candidate_ids))
+            if not id_to_name:
+                return
+
+            def _is_tracked(name: str) -> bool:
+                if name in self._last_ocr_names or name.lower() in self._watchlist_pilots:
+                    return True
+                try:
+                    return bool(get_sightings(name, limit=1))
+                except Exception:
+                    return False
+
+            tracked = {cid: name for cid, name in id_to_name.items() if _is_tracked(name)}
+            if not tracked:
+                return
+
+            cache = get_universe_cache()
+            system_name = await cache.get_system_name(killmail.solar_system_id)
+            system_label = system_name or f"system {killmail.solar_system_id}"
+            jump_note = f", {jump_dist}j away" if jump_dist is not None else ""
+            async with httpx.AsyncClient(timeout=8.0, headers=DEFAULT_HEADERS) as client:
+                victim_ship_name = await resolve_ship_name(client, killmail.victim_ship_type_id)
+                for character_id, pilot_name in tracked.items():
+                    if character_id == killmail.victim_character_id:
+                        role = "victim"
+                        ship_type_id = killmail.victim_ship_type_id
+                        ship_name = victim_ship_name
+                    else:
+                        role = "attacker"
+                        ship_type_id = killmail.attacker_ship_types.get(character_id)
+                        ship_name = await resolve_ship_name(client, ship_type_id)
+
+                    record_activity(
+                        killmail.killmail_id,
+                        pilot_name,
+                        role=role,
+                        character_id=character_id,
+                        ship_type_id=ship_type_id,
+                        ship_name=ship_name,
+                        solar_system_id=killmail.solar_system_id,
+                        system_name=system_name,
+                        gang_size=killmail.attacker_count,
+                        victim_ship_name=victim_ship_name,
+                    )
+
+                    if pilot_name.lower() in self._watchlist_pilots:
+                        if role == "attacker":
+                            victim_label = victim_ship_name or "a ship"
+                            msg = (
+                                f"Watchlist: {pilot_name} killed {victim_label} "
+                                f"in {system_label}{jump_note}"
+                            )
+                        else:
+                            msg = (
+                                f"Watchlist: {pilot_name} was killed "
+                                f"(flying {ship_name or 'an unknown ship'}) "
+                                f"in {system_label}{jump_note}"
+                            )
+                        self._ui(self.main.write_message, msg, "yellow")
+        except Exception as exc:
+            logger.debug("Combat activity live-kill record failed: %s", exc)
 
     def _get_adjacent_kill_count(self) -> int:
         """Recent-kill count for the threat score's adjacent_kills signal.
@@ -960,6 +1140,7 @@ class AlertAgent:
             self.currently_playing_sounds.clear()
             self.alarm_trigger_counts.clear()
             self.cooldown_timers.clear()
+            self._combat_backfilled_character_ids.clear()
             self.alert_vision.debug_mode = False
             self.alert_vision_faction.debug_mode_faction = False
             self._ui(self.main.update_alert_button)
@@ -1126,6 +1307,25 @@ class AlertAgent:
             self._dscan_alert_orange = bool(ds.get("alert_orange", False))
             self._dscan_alert_probes = bool(ds.get("alert_probes", True))
             self._dscan_alert_new_sig = bool(ds.get("alert_new_signatures", True))
+
+            # v7.3 (#240): hostile watchlist. Name-based sets for the
+            # cheap synchronous checks (alarm tag, threat score) are
+            # rebuilt every load_settings() call; ID resolution for R2Z2
+            # filtering is a network round-trip and only happens once per
+            # session, in start() -- see _resolve_watchlist_ids().
+            watchlist = settings.get("watchlist", {})
+            self._watchlist_pilot_names = [
+                str(n).strip() for n in watchlist.get("pilots", []) if str(n).strip()
+            ]
+            self._watchlist_corp_names = [
+                str(n).strip() for n in watchlist.get("corporations", []) if str(n).strip()
+            ]
+            self._watchlist_alliance_names = [
+                str(n).strip() for n in watchlist.get("alliances", []) if str(n).strip()
+            ]
+            self._watchlist_pilots = {n.lower() for n in self._watchlist_pilot_names}
+            self._watchlist_corps_lower = {n.lower() for n in self._watchlist_corp_names}
+            self._watchlist_alliances_lower = {n.lower() for n in self._watchlist_alliance_names}
 
             # KOS settings
             kos = settings.get("kos", {})
@@ -1854,23 +2054,14 @@ class AlertAgent:
                 # sighting per mentioned hostile pilot. The reporting pilot
                 # themselves is deliberately excluded -- they're your own
                 # intel channel's population (often allies), not a hostile
-                # sighting; only who they *mention* counts.
-                if self._pilot_history_enabled:
-                    try:
-                        from evealert.tools.pilot_history_store import (  # pylint: disable=import-outside-toplevel
-                            record_sighting,
-                        )
-
-                        report_ship = report.ships[0] if report.ships else None
-                        for hostile in report.mentioned_pilots:
-                            record_sighting(
-                                hostile,
-                                source="intel",
-                                system=report.system,
-                                ship=report_ship,
-                            )
-                    except Exception as exc:
-                        logger.debug("Pilot history record (intel) failed: %s", exc)
+                # sighting; only who they *mention* counts. #238: deferred
+                # to a task because validating report.system against the
+                # universe cache needs an async call; self.loop can be
+                # None when nothing is running (mirrors the #237 lesson --
+                # skip gracefully rather than crash the rest of this
+                # handler with an unguarded create_task()).
+                if self._pilot_history_enabled and self.loop is not None:
+                    self.loop.create_task(self._record_intel_sightings(report))
                 # Queue a jump-distance lookup if we have a home system
                 home = self._settings_store.get("server.system", "").strip()
                 if home and home != "Enter a System Name" and report.system:
@@ -1879,6 +2070,42 @@ class AlertAgent:
                     )
         except Exception as exc:
             logger.debug("_on_intel_report failed: %s", exc)
+
+    async def _record_intel_sightings(self, report) -> None:
+        """#215/#238: one sighting per mentioned hostile pilot from an
+        intel report.
+
+        #238: validates the parsed system name against the universe cache
+        before recording -- an intel message's system token can still be
+        a plausible-looking but nonexistent name even after #230's parser
+        fix (a typo, an ambiguous short token); recording a bad system
+        pollutes downstream analytics (top_systems, pathing inference), so
+        an unresolvable name is recorded as None rather than the raw
+        token.
+        """
+        try:
+            from evealert.tools.pilot_history_store import (  # pylint: disable=import-outside-toplevel
+                record_sighting,
+            )
+
+            system = report.system
+            if system:
+                from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
+
+                resolved = await get_universe_cache().get_system_id(system)
+                if resolved is None:
+                    system = None
+
+            report_ship = report.ships[0] if report.ships else None
+            for hostile in report.mentioned_pilots:
+                record_sighting(
+                    hostile,
+                    source="intel",
+                    system=system,
+                    ship=report_ship,
+                )
+        except Exception as exc:
+            logger.debug("Pilot history record (intel) failed: %s", exc)
 
     def _is_duplicate_intel_line(self, line: str) -> bool:
         """#171: cross-channel dedup shared by every IntelWatcher instance
@@ -2162,12 +2389,25 @@ class AlertAgent:
             # #218: aggregated across pilots, same pattern as _max_danger_ratio
             _max_history_frequency = 0
             _any_history_regular_route = False
+            # #240: aggregated across pilots, same pattern as _any_kos --
+            # any watchlisted pilot/corp/alliance in this batch counts.
+            _any_watchlisted = False
 
             for name in names[:5]:
                 info = results_by_name.get(name.lower())
                 display_name = info.name if info is not None else name
                 corp_name = (info.corporation_name or "") if info is not None else ""
                 alliance_name = (info.alliance_name or "") if info is not None else ""
+
+                # #240: pilot/corp/alliance watchlist check -- name-based,
+                # available immediately (no extra ESI call beyond what's
+                # already resolved above).
+                if (
+                    display_name.lower() in self._watchlist_pilots
+                    or (corp_name and corp_name.lower() in self._watchlist_corps_lower)
+                    or (alliance_name and alliance_name.lower() in self._watchlist_alliances_lower)
+                ):
+                    _any_watchlisted = True
 
                 # Fetch the zKillboard profile FIRST (#208) so its result can
                 # gate whether the character link is even shown: a pilot
@@ -2332,16 +2572,58 @@ class AlertAgent:
                         ).strip()
                         if current_system == "Enter a System Name":
                             current_system = ""
+                        # #238: prefer the ship type actually visible on
+                        # D-scan right now over zKB's historical top_ship
+                        # guess -- the guess can be stale/wrong for the
+                        # pilot's CURRENT fit, while D-scan reflects what
+                        # they're flying at the moment of this sighting.
+                        ship = zkb.top_ship if zkb else None
+                        if self._dscan_watcher is not None:
+                            visible = self._dscan_watcher.current_visible_types
+                            if visible:
+                                from evealert.data.ship_classes import (  # noqa: PLC0415
+                                    classify_ship,
+                                )
+
+                                ship = max(visible, key=lambda t: classify_ship(t).urgency)
                         record_sighting(
                             display_name,
                             source="local",
                             system=current_system or None,
-                            ship=(zkb.top_ship if zkb else None),
+                            ship=ship,
                             corp=corp_name or None,
                             alliance=alliance_name or None,
+                            # #238: character_id already resolved above --
+                            # disambiguates a later rename/name collision.
+                            character_id=(info.character_id if info is not None else None),
                         )
                     except Exception as exc:
                         logger.debug("Pilot history record (local) failed: %s", exc)
+
+                # ── Combat-activity backfill (#237, v7.3) — on a pilot's
+                # first Enemy alarm this session, pull their recent zKB
+                # killmail history in the background so a dossier isn't
+                # empty on first encounter. Fire-and-forget: never blocks
+                # the alarm path, and the check-and-mark below (no await
+                # in between) makes a repeat alarm for the same pilot a
+                # guaranteed no-op re-fetch even across rapid-fire alarms.
+                # self.loop can be None here -- run_intel_check() (this
+                # method's caller) is a public entry point that works
+                # whether or not the detection engine is running; without
+                # a loop there's simply nothing to schedule the backfill
+                # onto, so skip it rather than let an unguarded
+                # create_task() crash the rest of this per-pilot loop.
+                if (
+                    self.loop is not None
+                    and self._pilot_history_enabled
+                    and info is not None
+                    and info.character_id
+                    and info.character_id not in self._combat_backfilled_character_ids
+                ):
+                    self._combat_backfilled_character_ids.add(info.character_id)
+                    self.loop.create_task(
+                        self._backfill_combat_activity(info.character_id, display_name)
+                    )
 
                 # ── Pilot sighting-history summary (#216, v7.0) — makes the
                 # accumulated history in #214/#215's store useful in the
@@ -2485,6 +2767,7 @@ class AlertAgent:
                 is_cyno=ShipThreatClass.CYNO in self._dscan_last_classes,
                 history_frequency=_max_history_frequency,
                 history_is_regular_route=_any_history_regular_route,
+                is_watchlisted=_any_watchlisted,
             )
             colour = {"CRITICAL": "red", "HIGH": "yellow", "CAUTION": "cyan"}[assessment.label]
             self._ui(self.main.write_message, str(assessment), colour)
@@ -2864,6 +3147,19 @@ class AlertAgent:
                     )
             except Exception as exc:
                 logger.debug("Cache maintenance cycle failed: %s", exc)
+
+            # #239: separate try/except so a rollup-sweep failure can
+            # never block the TTL-cache purges above (or vice versa).
+            # Only touches pilots with activity newer than their stored
+            # rollup, so this is cheap even on a long-running session.
+            try:
+                from evealert.tools.intel_rollups import sweep_stale_rollups  # noqa: PLC0415
+
+                refreshed = sweep_stale_rollups()
+                if refreshed:
+                    logger.debug("Cache maintenance: refreshed %d stale pilot rollup(s)", refreshed)
+            except Exception as exc:
+                logger.debug("Rollup sweep cycle failed: %s", exc)
 
     async def _peak_hours_monitor(self) -> None:
         """Warn the pilot 15 min before a historically dangerous hour (#151).
@@ -3446,10 +3742,21 @@ class AlertAgent:
         resolved by _resolve_enemy_identities() this cycle (#213 — OCR now
         runs once, before the alarm-fire decision, not here). Falls back to
         the bare headline when OCR is disabled/unavailable or found nothing.
+
+        #240: a [WATCHLIST] tag is added when any resolved name matches
+        the hostile watchlist -- pilot-name-only check, deliberately not
+        waiting on ESI corp/alliance resolution (which happens later,
+        async) so the tag appears on the very first headline, not a
+        follow-up line.
         """
         base = "Enemy Appears!"
         if self._last_ocr_names:
-            return f"{base} — {', '.join(self._last_ocr_names)}"
+            tag = ""
+            if self._watchlist_pilots and any(
+                name.lower() in self._watchlist_pilots for name in self._last_ocr_names
+            ):
+                tag = " [WATCHLIST]"
+            return f"{base}{tag} — {', '.join(self._last_ocr_names)}"
         return base
 
     async def run(self) -> None:

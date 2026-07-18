@@ -43,6 +43,7 @@ def compute_threat_score(
     is_cyno: bool = False,
     history_frequency: int = 0,
     history_is_regular_route: bool = False,
+    is_watchlisted: bool = False,
 ) -> ThreatAssessment:
     """Compute a composite 1–10 threat score.
 
@@ -60,6 +61,9 @@ def compute_threat_score(
         history_is_regular_route: Whether this system is on the pilot's
                               inferred common route (#217). False
                               (default) leaves the score unaffected.
+        is_watchlisted:       Whether the pilot (or their corp/alliance) is
+                              on the user's hostile watchlist (#240, v7.3).
+                              False (default) leaves the score unaffected.
     """
     # Cyno overrides everything — capital ship inbound
     if is_cyno:
@@ -120,6 +124,11 @@ def compute_threat_score(
     if history_is_regular_route:
         score += 1
         reasons.append("on their regular route")
+
+    # --- Hostile watchlist (#240, v7.3; max 1) ---
+    if is_watchlisted:
+        score += 1
+        reasons.append("on hostile watchlist")
 
     score = min(score, 10)
     if score >= 7:

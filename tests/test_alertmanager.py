@@ -951,6 +951,29 @@ class ResolveEnemyIdentitiesTests(unittest.TestCase):
         self.agent._last_ocr_names = []
         self.assertEqual(self.agent._build_enemy_alarm_text(), "Enemy Appears!")
 
+    def test_watchlisted_pilot_gets_tagged(self):
+        """#240 acceptance criterion: a watchlisted pilot's Enemy alarm
+        text carries the tag."""
+        self.agent._watchlist_pilots = {"bad guy"}
+        self.agent._last_ocr_names = ["Bad Guy", "Other Guy"]
+        text = self.agent._build_enemy_alarm_text()
+        self.assertEqual(text, "Enemy Appears! [WATCHLIST] — Bad Guy, Other Guy")
+
+    def test_non_watchlisted_pilot_gets_no_tag(self):
+        self.agent._watchlist_pilots = {"someone else"}
+        self.agent._last_ocr_names = ["Bad Guy"]
+        text = self.agent._build_enemy_alarm_text()
+        self.assertEqual(text, "Enemy Appears! — Bad Guy")
+
+    def test_empty_watchlist_is_byte_identical_to_no_watchlist(self):
+        """#240 acceptance criterion: empty watchlist = byte-identical
+        behavior to today."""
+        self.agent._watchlist_pilots = set()
+        self.agent._last_ocr_names = ["Bad Guy", "Other Guy"]
+        self.assertEqual(
+            self.agent._build_enemy_alarm_text(), "Enemy Appears! — Bad Guy, Other Guy"
+        )
+
 
 def _make_intel_report(pilot="bluhayz", mentioned_pilots=None, system="J5A-IX",
                         message="MickFun  J5A-IX nv but maybe shuttle"):
@@ -1164,6 +1187,7 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
             self.agent = AlertAgent(self.mock_main)
+        self.agent.loop = asyncio.get_event_loop()
         self.agent._threat_tiers = {}
         self.agent._kos_cva_enabled = False
         self.agent._kos_custom_urls = []
@@ -1194,7 +1218,14 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
             "evealert.tools.esi_standings.get_esi_client"
         ) as mock_get_client, patch(
             "evealert.tools.kos_checker.get_kos_checker"
-        ) as mock_get_kos:
+        ) as mock_get_kos, patch(
+            # self.agent.loop is set (below, for #238's async system
+            # validation) so #237's backfill trigger also fires for any
+            # info.character_id-bearing pilot here -- stub it so tests in
+            # this class never make a real (slow, flaky) network call.
+            "evealert.tools.combat_activity_store.backfill_from_zkillboard",
+            new=AsyncMock(return_value=0),
+        ):
             mock_client = AsyncMock()
             mock_client.lookup_many = AsyncMock(return_value=[info])
             mock_client.get_zkillboard_profile = AsyncMock(
@@ -1208,6 +1239,7 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
             mock_get_kos.return_value = mock_kos
 
             await self.agent.run_intel_check([name])
+            await asyncio.sleep(0.05)  # let any scheduled background task run
 
     async def test_local_alarm_records_sighting_with_system_and_ship(self):
         with patch(
@@ -1217,7 +1249,7 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
 
         mock_record.assert_called_once_with(
             "Bad Guy", source="local", system="J5A-IX", ship="Loki",
-            corp="Evil Corp", alliance="Evil Alliance",
+            corp="Evil Corp", alliance="Evil Alliance", character_id=987654,
         )
 
     async def test_local_alarm_placeholder_system_recorded_as_none(self):
@@ -1241,15 +1273,70 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
             await self._run_intel_check_with_esi_stub("Bad Guy")
         mock_record.assert_not_called()
 
-    def test_intel_report_records_one_sighting_per_mentioned_pilot_not_reporter(self):
+    async def test_dscan_visible_ship_preferred_over_zkb_top_ship(self):
+        """#238: D-scan reflects what the pilot is ACTUALLY flying right
+        now; zKB's top_ship is a historical guess and may be stale."""
+        mock_dscan = MagicMock()
+        mock_dscan.current_visible_types = frozenset({"Sabre"})
+        self.agent._dscan_watcher = mock_dscan
+
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy", top_ship="Loki")
+
+        self.assertEqual(mock_record.call_args.kwargs["ship"], "Sabre")
+
+    async def test_most_threatening_dscan_type_chosen_when_multiple_visible(self):
+        mock_dscan = MagicMock()
+        # Venture (industrial, urgency 0) vs Sabre (dictor, urgency 8) --
+        # Sabre must win regardless of set iteration order.
+        mock_dscan.current_visible_types = frozenset({"Venture", "Sabre"})
+        self.agent._dscan_watcher = mock_dscan
+
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy", top_ship="Loki")
+
+        self.assertEqual(mock_record.call_args.kwargs["ship"], "Sabre")
+
+    async def test_falls_back_to_zkb_top_ship_when_dscan_empty(self):
+        mock_dscan = MagicMock()
+        mock_dscan.current_visible_types = frozenset()
+        self.agent._dscan_watcher = mock_dscan
+
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy", top_ship="Loki")
+
+        self.assertEqual(mock_record.call_args.kwargs["ship"], "Loki")
+
+    async def test_falls_back_to_zkb_top_ship_when_no_dscan_watcher(self):
+        self.agent._dscan_watcher = None
+
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            await self._run_intel_check_with_esi_stub("Bad Guy", top_ship="Loki")
+
+        self.assertEqual(mock_record.call_args.kwargs["ship"], "Loki")
+
+    async def test_intel_report_records_one_sighting_per_mentioned_pilot_not_reporter(self):
         report = _make_intel_report(
             pilot="bluhayz", mentioned_pilots=["MickFun", "OtherGuy"],
             system="J5A-IX",
         )
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(return_value=30000001)  # resolves fine
         with patch(
             "evealert.tools.pilot_history_store.record_sighting"
-        ) as mock_record:
+        ) as mock_record, patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ):
             self.agent._on_intel_report(report)
+            await asyncio.sleep(0.05)  # let the scheduled recording task run
 
         recorded_names = [c.args[0] for c in mock_record.call_args_list]
         self.assertEqual(sorted(recorded_names), ["MickFun", "OtherGuy"])
@@ -1258,14 +1345,302 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(c.kwargs["source"], "intel")
             self.assertEqual(c.kwargs["system"], "J5A-IX")
 
-    def test_intel_toggle_disabled_records_nothing(self):
+    async def test_intel_toggle_disabled_records_nothing(self):
         self.agent._pilot_history_enabled = False
         report = _make_intel_report(mentioned_pilots=["MickFun"])
         with patch(
             "evealert.tools.pilot_history_store.record_sighting"
         ) as mock_record:
             self.agent._on_intel_report(report)
+            await asyncio.sleep(0.05)
         mock_record.assert_not_called()
+
+    async def test_intel_report_unresolvable_system_records_none_not_the_bad_token(self):
+        """#238: an intel-parsed 'system' token that the universe cache
+        can't resolve to a real system ID must be recorded as None, not
+        passed through verbatim -- garbage-in-garbage-out would pollute
+        downstream analytics (top_systems, pathing inference)."""
+        report = _make_intel_report(
+            pilot="bluhayz", mentioned_pilots=["MickFun"], system="NOTREAL",
+        )
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(return_value=None)  # unresolvable
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record, patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ):
+            self.agent._on_intel_report(report)
+            await asyncio.sleep(0.05)
+
+        mock_record.assert_called_once()
+        self.assertIsNone(mock_record.call_args.kwargs["system"])
+
+    async def test_intel_report_no_running_loop_skips_recording_gracefully(self):
+        """Mirrors the #237 lesson: _on_intel_report must not raise or
+        break other handling when self.loop is None (no engine running)."""
+        self.agent.loop = None
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        with patch(
+            "evealert.tools.pilot_history_store.record_sighting"
+        ) as mock_record:
+            self.agent._on_intel_report(report)  # must not raise
+        mock_record.assert_not_called()
+
+
+class CombatActivityBackfillWiringTests(unittest.IsolatedAsyncioTestCase):
+    """#237: a pilot's first Enemy alarm this session triggers a
+    background zKillboard backfill exactly once per character_id."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({"server": {"system": "J5A-IX"}}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent.loop = asyncio.get_event_loop()
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._correlate_intel_enabled = False
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _run_intel_check_with_esi_stub(self, name="Bad Guy", character_id=987654):
+        from evealert.tools.esi_standings import KillProfile
+
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=character_id, corporation_id=456, alliance_id=789,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(
+                return_value=KillProfile(
+                    kills_total=5, losses_total=1, top_ship="Loki", danger_ratio=0.5
+                )
+            )
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+            await asyncio.sleep(0.05)  # let the scheduled backfill task run
+
+    async def test_first_alarm_schedules_a_backfill(self):
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._backfill_combat_activity",
+            new=AsyncMock(),
+        ) as mock_backfill:
+            await self._run_intel_check_with_esi_stub("Bad Guy", character_id=987654)
+
+        mock_backfill.assert_awaited_once_with(987654, "Bad Guy")
+        self.assertIn(987654, self.agent._combat_backfilled_character_ids)
+
+    async def test_second_alarm_for_same_pilot_does_not_re_backfill(self):
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._backfill_combat_activity",
+            new=AsyncMock(),
+        ) as mock_backfill:
+            await self._run_intel_check_with_esi_stub("Bad Guy", character_id=987654)
+            await self._run_intel_check_with_esi_stub("Bad Guy", character_id=987654)
+
+        mock_backfill.assert_awaited_once()
+
+    async def test_different_pilots_each_get_backfilled(self):
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._backfill_combat_activity",
+            new=AsyncMock(),
+        ) as mock_backfill:
+            await self._run_intel_check_with_esi_stub("Bad Guy", character_id=111)
+            await self._run_intel_check_with_esi_stub("Other Guy", character_id=222)
+
+        self.assertEqual(mock_backfill.await_count, 2)
+
+    async def test_pilot_history_disabled_skips_backfill(self):
+        self.agent._pilot_history_enabled = False
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._backfill_combat_activity",
+            new=AsyncMock(),
+        ) as mock_backfill:
+            await self._run_intel_check_with_esi_stub("Bad Guy")
+        mock_backfill.assert_not_awaited()
+
+    async def test_backfill_failure_does_not_propagate(self):
+        """_backfill_combat_activity itself must swallow errors -- a zKB
+        hiccup on a background task must never surface as a crash."""
+        with patch(
+            "evealert.tools.combat_activity_store.backfill_from_zkillboard",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await self._run_intel_check_with_esi_stub("Bad Guy")  # must not raise
+
+    async def test_no_running_loop_skips_backfill_without_breaking_the_pipeline(self):
+        """#237 regression: run_intel_check() is a public entry point that
+        works whether or not the detection engine is running (self.loop
+        is None in that case). An earlier version of this feature called
+        self.loop.create_task() unconditionally, which raised
+        AttributeError and silently aborted the REST of the per-pilot ESI
+        loop (KOS check, threat score, pilot-history summary) for every
+        caller with no running engine -- not just the backfill itself.
+
+        Written standalone (not via _run_intel_check_with_esi_stub, which
+        installs its own internal KOS mock) so there is exactly one KOS
+        mock in play and the assertion below can't silently check the
+        wrong object.
+        """
+        from evealert.tools.esi_standings import KillProfile
+
+        self.agent.loop = None
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = "Bad Guy"
+
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(
+                return_value=KillProfile(
+                    kills_total=5, losses_total=1, top_ship="Loki", danger_ratio=0.5
+                )
+            )
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check(["Bad Guy"])
+
+        # The KOS check (which runs AFTER the backfill-scheduling code in
+        # the per-pilot loop) must still have executed.
+        mock_kos.check.assert_awaited_once()
+        # And the backfill itself must have been skipped, not attempted.
+        self.assertEqual(self.agent._combat_backfilled_character_ids, set())
+
+
+class WatchlistThreatScoreWiringTests(unittest.IsolatedAsyncioTestCase):
+    """#240 acceptance criterion: a watchlisted pilot's threat score
+    reflects the extra signal, surfaced in the logged [THREAT: ...] line."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._pilot_history_enabled = False  # keep these tests focused
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def _run(self, name="Bad Guy", corp="Evil Corp", alliance="Evil Alliance"):
+        info = MagicMock(
+            corporation_name=corp, alliance_name=alliance,
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(return_value=None)
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+
+    async def test_watchlisted_pilot_name_adds_threat_reason(self):
+        self.agent._watchlist_pilots = {"bad guy"}
+        await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertTrue(any("on hostile watchlist" in m for m in messages))
+
+    async def test_watchlisted_corp_adds_threat_reason(self):
+        self.agent._watchlist_corps_lower = {"evil corp"}
+        await self._run("Bad Guy", corp="Evil Corp")
+        messages = self._logged_messages()
+        self.assertTrue(any("on hostile watchlist" in m for m in messages))
+
+    async def test_watchlisted_alliance_adds_threat_reason(self):
+        self.agent._watchlist_alliances_lower = {"evil alliance"}
+        await self._run("Bad Guy", alliance="Evil Alliance")
+        messages = self._logged_messages()
+        self.assertTrue(any("on hostile watchlist" in m for m in messages))
+
+    async def test_non_watchlisted_pilot_no_threat_reason(self):
+        self.agent._watchlist_pilots = {"someone else"}
+        await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertFalse(any("on hostile watchlist" in m for m in messages))
+
+    async def test_empty_watchlist_is_byte_identical_to_no_watchlist(self):
+        """#240 acceptance criterion: empty watchlist = byte-identical
+        behavior to today."""
+        await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertFalse(any("on hostile watchlist" in m for m in messages))
 
 
 class PilotHistorySummaryDisplayTests(unittest.IsolatedAsyncioTestCase):
@@ -1862,6 +2237,38 @@ class PruneOnStartupTests(unittest.TestCase):
         ), patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
             AlertAgent(self.mock_main)  # must not raise
 
+    def test_combat_activity_also_pruned_with_same_retention(self):
+        """#237: combat_activity shares pilot_history_retention_days --
+        one user-facing "how long do I keep hostile history" setting."""
+        with patch(
+            "evealert.tools.combat_activity_store.prune_older_than"
+        ) as mock_prune, patch(
+            "evealert.manager.alertmanager.AlertAgent._validate_audio_files"
+        ):
+            AlertAgent(self.mock_main)
+        mock_prune.assert_called_once_with(42)
+
+    def test_combat_activity_prune_failure_does_not_raise(self):
+        with patch(
+            "evealert.tools.combat_activity_store.prune_older_than",
+            side_effect=OSError("disk full"),
+        ), patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            AlertAgent(self.mock_main)  # must not raise
+
+    def test_pilot_history_prune_failure_does_not_block_combat_activity_prune(self):
+        """The two prune calls are independent -- one store's failure
+        must not prevent the other's prune from running."""
+        with patch(
+            "evealert.tools.pilot_history_store.prune_older_than",
+            side_effect=OSError("disk full"),
+        ), patch(
+            "evealert.tools.combat_activity_store.prune_older_than"
+        ) as mock_combat_prune, patch(
+            "evealert.manager.alertmanager.AlertAgent._validate_audio_files"
+        ):
+            AlertAgent(self.mock_main)
+        mock_combat_prune.assert_called_once_with(42)
+
 
 class R2Z2SettingsTests(unittest.TestCase):
     """#169: r2z2 settings block -- defaults, explicit values, watchlist
@@ -1969,6 +2376,130 @@ class R2Z2SettingsTests(unittest.TestCase):
         self.assertEqual(before, after)
 
 
+class WatchlistSettingsTests(unittest.TestCase):
+    """#240: settings.watchlist parsing -- name sets for the synchronous
+    alarm-tag/threat-score checks, raw name lists for the async ID
+    resolution R2Z2 filtering needs."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_settings(self, watchlist: dict) -> None:
+        with open(self.settings_path, "w") as f:
+            json.dump({
+                "alert_region_1": {"x": 100, "y": 100},
+                "alert_region_2": {"x": 300, "y": 300},
+                "faction_region_1": {"x": 400, "y": 100},
+                "faction_region_2": {"x": 600, "y": 300},
+                "watchlist": watchlist,
+            }, f)
+        reset_settings_store(self.settings_path)
+
+    def test_defaults_when_no_watchlist_block(self):
+        self._write_settings({})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._watchlist_pilots, set())
+        self.assertEqual(self.agent._watchlist_corps_lower, set())
+        self.assertEqual(self.agent._watchlist_alliances_lower, set())
+
+    def test_explicit_values_lowercased_and_stripped(self):
+        self._write_settings({
+            "pilots": ["Bad Guy", "  Other Guy  "],
+            "corporations": ["Evil Corp"],
+            "alliances": ["Evil Alliance"],
+        })
+        self.agent.load_settings()
+        self.assertEqual(self.agent._watchlist_pilots, {"bad guy", "other guy"})
+        self.assertEqual(self.agent._watchlist_corps_lower, {"evil corp"})
+        self.assertEqual(self.agent._watchlist_alliances_lower, {"evil alliance"})
+        # Raw (non-lowercased) names preserved for ID resolution -- ESI's
+        # /universe/ids/ endpoint expects the real casing.
+        self.assertIn("Bad Guy", self.agent._watchlist_pilot_names)
+        self.assertIn("Other Guy", self.agent._watchlist_pilot_names)
+
+    def test_blank_entries_dropped(self):
+        self._write_settings({"pilots": ["", "  ", "Bad Guy"]})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._watchlist_pilots, {"bad guy"})
+
+
+class WatchlistIdResolutionTests(unittest.IsolatedAsyncioTestCase):
+    """#240: _resolve_watchlist_ids() -- one-time async name->ID
+    resolution for R2Z2Consumer's ID-based filtering."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_empty_watchlist_makes_no_esi_call(self):
+        with patch(
+            "evealert.tools.universe.resolve_ids", new=AsyncMock()
+        ) as mock_resolve:
+            await self.agent._resolve_watchlist_ids()
+        mock_resolve.assert_not_awaited()
+
+    async def test_resolves_and_splits_by_category(self):
+        self.agent._watchlist_pilot_names = ["Bad Guy"]
+        self.agent._watchlist_corp_names = ["Evil Corp"]
+        self.agent._watchlist_alliance_names = ["Evil Alliance"]
+
+        with patch(
+            "evealert.tools.universe.resolve_ids",
+            new=AsyncMock(return_value={
+                "characters": [{"id": 111, "name": "Bad Guy"}],
+                "corporations": [{"id": 222, "name": "Evil Corp"}],
+                "alliances": [{"id": 333, "name": "Evil Alliance"}],
+            }),
+        ):
+            await self.agent._resolve_watchlist_ids()
+
+        self.assertEqual(self.agent._watchlist_pilot_ids, {111})
+        self.assertEqual(self.agent._watchlist_corp_ids, {222})
+        self.assertEqual(self.agent._watchlist_alliance_ids, {333})
+
+    async def test_resolution_failure_does_not_raise(self):
+        self.agent._watchlist_pilot_names = ["Bad Guy"]
+        with patch(
+            "evealert.tools.universe.resolve_ids",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await self.agent._resolve_watchlist_ids()  # must not raise
+        self.assertEqual(self.agent._watchlist_pilot_ids, set())
+
+
 class R2Z2AdjacentKillCountTests(unittest.TestCase):
     """#169: the threat score's adjacent_kills signal prefers the R2Z2
     consumer's buffer over NeighborMonitor when R2Z2 is active."""
@@ -2065,6 +2596,8 @@ class R2Z2ConsumerWiringTests(unittest.IsolatedAsyncioTestCase):
             origin_system_id=30000142,
             watch_jumps=5,
             alliance_watchlist={99000001},
+            corp_watchlist=set(),
+            pilot_watchlist=set(),
             on_kill=self.agent._on_r2z2_kill,
             sequence=self.agent._r2z2_last_sequence,
         )
@@ -2134,6 +2667,240 @@ class R2Z2ConsumerWiringTests(unittest.IsolatedAsyncioTestCase):
         messages = self._logged_messages()
         self.assertTrue(any("(watchlist)" in m for m in messages))
         mock_play.assert_not_awaited()
+
+
+class CombatActivityLiveKillWiringTests(unittest.IsolatedAsyncioTestCase):
+    """#237 ingest path 1: a matched R2Z2 kill records combat_activity
+    rows for any "tracked" pilot on the killmail (current OCR identity,
+    or already present in pilot_history_store)."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent.loop = asyncio.get_event_loop()
+        self.agent._pilot_history_enabled = True
+        self.agent._last_ocr_names = []
+        self.agent._watchlist_pilots = set()
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _make_killmail(self, **overrides):
+        from evealert.tools.r2z2 import LiveKillmail
+
+        defaults = dict(
+            killmail_id=555, solar_system_id=30000142,
+            victim_ship_type_id=32880, attacker_count=2, location_id=None,
+            victim_character_id=None,
+            attacker_character_ids={111, 222},
+            attacker_ship_types={111: 17738, 222: 11202},
+        )
+        defaults.update(overrides)
+        return LiveKillmail(**defaults)
+
+    def _patched(self, ocr_names_matching=None, pilot_history_matching=None):
+        """Context manager stack: resolves character IDs to fixed names,
+        stubs the OCR-identity and pilot-history "tracked" checks, and
+        captures record_activity() calls without touching real SQLite."""
+        id_to_name = {111: "Attacker One", 222: "Attacker Two", 999: "Victim Guy"}
+        ocr_names_matching = ocr_names_matching or []
+        pilot_history_matching = pilot_history_matching or []
+
+        def fake_get_sightings(name, limit=1):
+            return ["sighting"] if name in pilot_history_matching else []
+
+        return (
+            patch("evealert.tools.universe.resolve_names", new=AsyncMock(return_value=id_to_name)),
+            patch("evealert.tools.pilot_history_store.get_sightings", side_effect=fake_get_sightings),
+            patch("evealert.tools.r2z2.resolve_ship_name", new=AsyncMock(return_value="Some Ship")),
+            patch("evealert.tools.universe.get_universe_cache"),
+            patch("evealert.tools.combat_activity_store.record_activity"),
+        )
+
+    async def test_untracked_kill_records_nothing(self):
+        killmail = self._make_killmail()
+        p1, p2, p3, p4, p5 = self._patched()
+        with p1, p2, p3, p4 as mock_get_cache, p5 as mock_record:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail)
+
+        mock_record.assert_not_called()
+
+    async def test_ocr_tracked_attacker_is_recorded(self):
+        self.agent._last_ocr_names = ["Attacker One"]
+        killmail = self._make_killmail()
+        p1, p2, p3, p4, p5 = self._patched(ocr_names_matching=["Attacker One"])
+        with p1, p2, p3, p4 as mock_get_cache, p5 as mock_record:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail)
+
+        mock_record.assert_called_once()
+        _, kwargs = mock_record.call_args
+        args = mock_record.call_args.args
+        self.assertEqual(args[0], 555)  # killmail_id
+        self.assertEqual(args[1], "Attacker One")  # pilot_name
+        self.assertEqual(kwargs["role"], "attacker")
+        self.assertEqual(kwargs["character_id"], 111)
+        self.assertEqual(kwargs["ship_type_id"], 17738)  # from attacker_ship_types
+        self.assertEqual(kwargs["system_name"], "Jita")
+        self.assertEqual(kwargs["gang_size"], 2)
+
+    async def test_pilot_history_tracked_victim_is_recorded(self):
+        killmail = self._make_killmail(victim_character_id=999)
+        p1, p2, p3, p4, p5 = self._patched(pilot_history_matching=["Victim Guy"])
+        with p1, p2, p3, p4 as mock_get_cache, p5 as mock_record:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail)
+
+        mock_record.assert_called_once()
+        args = mock_record.call_args.args
+        kwargs = mock_record.call_args.kwargs
+        self.assertEqual(args[1], "Victim Guy")
+        self.assertEqual(kwargs["role"], "victim")
+        self.assertEqual(kwargs["character_id"], 999)
+        self.assertEqual(kwargs["ship_type_id"], 32880)  # victim_ship_type_id
+
+    async def test_no_candidate_ids_short_circuits_without_resolving(self):
+        killmail = self._make_killmail(attacker_character_ids=set(), victim_character_id=None)
+        with patch(
+            "evealert.tools.universe.resolve_names", new=AsyncMock()
+        ) as mock_resolve:
+            await self.agent._record_combat_activity_from_kill(killmail)
+        mock_resolve.assert_not_awaited()
+
+    async def test_pilot_history_disabled_skips_recording_entirely(self):
+        """_report_r2z2_kill only schedules the combat-activity task when
+        pilot_history_enabled -- verified via the public entry point."""
+        self.agent._pilot_history_enabled = False
+        self.agent._r2z2_alarm_jumps = 2
+        killmail = self._make_killmail()
+        self.agent._r2z2_consumer = MagicMock(last_sequence=1)
+
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._record_combat_activity_from_kill",
+            new=AsyncMock(),
+        ) as mock_record, patch(
+            "evealert.tools.r2z2.resolve_ship_name", new=AsyncMock(return_value="Venture")
+        ), patch(
+            "evealert.tools.universe.get_universe_cache"
+        ) as mock_get_cache, patch.object(
+            self.agent, "play_sound", new=AsyncMock()
+        ):
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            self.agent._on_r2z2_kill(killmail, 1)
+            await asyncio.sleep(0.05)
+
+        mock_record.assert_not_awaited()
+
+    async def test_record_activity_exception_does_not_propagate(self):
+        killmail = self._make_killmail()
+        self.agent._last_ocr_names = ["Attacker One"]
+        p1, p2, p3, p4, p5 = self._patched(ocr_names_matching=["Attacker One"])
+        with p1, p2, p3, p4 as mock_get_cache, p5 as mock_record:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+            mock_record.side_effect = RuntimeError("boom")
+
+            await self.agent._record_combat_activity_from_kill(killmail)  # must not raise
+
+    async def test_watchlisted_pilot_is_tracked_without_ocr_or_history(self):
+        """#240: 'anywhere in New Eden' -- a watchlisted pilot's kill is
+        recorded even with no OCR sighting or prior pilot_history_store
+        entry at all (the R2Z2Consumer-level ID filter is what lets the
+        kill through in the first place; this proves the Python-side
+        tracked check honors the watchlist too)."""
+        self.agent._watchlist_pilots = {"attacker one"}
+        killmail = self._make_killmail()
+        p1, p2, p3, p4, p5 = self._patched()  # no OCR/history match configured
+        with p1, p2, p3, p4 as mock_get_cache, p5 as mock_record:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail)
+
+        mock_record.assert_called_once()
+        self.assertEqual(mock_record.call_args.args[1], "Attacker One")
+
+    async def test_watchlisted_attacker_emits_low_priority_log_line(self):
+        self.agent._watchlist_pilots = {"attacker one"}
+        killmail = self._make_killmail()
+        p1, p2, p3, p4, p5 = self._patched()
+        with p1, p2, p3, p4 as mock_get_cache, p5:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail, jump_dist=23)
+
+        messages = [c.args[0] for c in self.mock_main.write_message.call_args_list]
+        self.assertTrue(
+            any(
+                "Watchlist: Attacker One killed" in m and "Jita" in m and "23j away" in m
+                for m in messages
+            ),
+            f"Expected a Watchlist log line, got: {messages}",
+        )
+
+    async def test_watchlisted_victim_emits_low_priority_log_line(self):
+        self.agent._watchlist_pilots = {"victim guy"}
+        killmail = self._make_killmail(victim_character_id=999)
+        p1, p2, p3, p4, p5 = self._patched()
+        with p1, p2, p3, p4 as mock_get_cache, p5:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail)
+
+        messages = [c.args[0] for c in self.mock_main.write_message.call_args_list]
+        self.assertTrue(
+            any("Watchlist: Victim Guy was killed" in m for m in messages),
+            f"Expected a Watchlist log line, got: {messages}",
+        )
+
+    async def test_non_watchlisted_tracked_pilot_gets_no_watchlist_log_line(self):
+        """A pilot tracked via OCR (not the watchlist) must not get the
+        Watchlist-specific log line -- only actual watchlist hits do."""
+        self.agent._last_ocr_names = ["Attacker One"]
+        self.agent._watchlist_pilots = set()
+        killmail = self._make_killmail()
+        p1, p2, p3, p4, p5 = self._patched(ocr_names_matching=["Attacker One"])
+        with p1, p2, p3, p4 as mock_get_cache, p5:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            await self.agent._record_combat_activity_from_kill(killmail)
+
+        messages = [c.args[0] for c in self.mock_main.write_message.call_args_list]
+        self.assertFalse(any("Watchlist:" in m for m in messages))
 
 
 def _mock_camp(system_id=30000144, location_id=999, confidence="camp",
@@ -2360,6 +3127,8 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
         settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(settings_path)
@@ -2386,6 +3155,8 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def _run_one_cycle(self):
@@ -2472,6 +3243,32 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError("boom"),
         ):
             await self._run_one_cycle()  # must not raise
+
+    async def test_rollup_sweep_refreshes_pilots_with_new_activity(self):
+        """#239: the maintenance task also sweeps stale pilot rollups,
+        independent of the TTL-cache purges above."""
+        from evealert.tools.combat_activity_store import record_activity
+        from evealert.tools.intel_rollups import _load_stored_pilot_rollup
+
+        record_activity(1, "Bad Guy", role="attacker", occurred_at=time.time())
+
+        await self._run_one_cycle()
+
+        self.assertIsNotNone(_load_stored_pilot_rollup("Bad Guy"))
+
+    async def test_rollup_sweep_failure_does_not_prevent_cache_purges(self):
+        stale = time.time() - 100_000
+        from evealert.tools.universe import get_universe_cache
+
+        get_universe_cache()._kill_count_cache[30000142] = (stale, 5)
+
+        with patch(
+            "evealert.tools.intel_rollups.sweep_stale_rollups",
+            side_effect=RuntimeError("boom"),
+        ):
+            await self._run_one_cycle()  # must not raise
+
+        self.assertNotIn(30000142, get_universe_cache()._kill_count_cache)
 
 
 class LocationMonitorDuplicateSystemInfoTests(unittest.IsolatedAsyncioTestCase):

@@ -18,10 +18,13 @@ _SEQUENCE_URL = "https://r2z2.zkillboard.com/ephemeral/sequence.json"
 def _make_package(
     killmail_id=1, solar_system_id=30000142, ship_type_id=587,
     victim_alliance_id=None, attacker_alliance_ids=None, location_id=None,
+    victim_character_id=None, attackers=None,
 ):
-    attackers = []
-    for aid in (attacker_alliance_ids or []):
-        attackers.append({"alliance_id": aid, "character_id": 111, "corporation_id": 222})
+    if attackers is None:
+        attackers = [
+            {"alliance_id": aid, "character_id": 111, "corporation_id": 222}
+            for aid in (attacker_alliance_ids or [])
+        ]
     return {
         "killmail_id": killmail_id,
         "killmail": {
@@ -30,6 +33,7 @@ def _make_package(
                 "ship_type_id": ship_type_id,
                 "alliance_id": victim_alliance_id,
                 "corporation_id": 456,
+                "character_id": victim_character_id,
             },
             "attackers": attackers,
         },
@@ -95,6 +99,44 @@ class ParsePackageTests(unittest.TestCase):
         package = _make_package(location_id=60003760)
         km = _parse_package(package)
         self.assertEqual(km.location_id, 60003760)
+
+    def test_victim_character_id_extracted(self):
+        """#237: combat-activity recording needs to identify the victim by
+        character -- previously only victim_corporation_id was captured."""
+        package = _make_package(victim_character_id=987654)
+        km = _parse_package(package)
+        self.assertEqual(km.victim_character_id, 987654)
+
+    def test_victim_character_id_none_when_absent(self):
+        package = _make_package()
+        km = _parse_package(package)
+        self.assertIsNone(km.victim_character_id)
+
+    def test_attacker_ship_types_captured_per_character(self):
+        """#237: need to know what ship EACH attacker flew, not just the
+        victim's ship -- previously not captured at all."""
+        package = _make_package(attackers=[
+            {"character_id": 111, "ship_type_id": 17738},  # Sabre
+            {"character_id": 222, "ship_type_id": 11202},  # Loki
+        ])
+        km = _parse_package(package)
+        self.assertEqual(km.attacker_ship_types, {111: 17738, 222: 11202})
+
+    def test_attacker_without_character_id_not_included_in_ship_types(self):
+        package = _make_package(attackers=[
+            {"ship_type_id": 17738},  # NPC/no character_id
+            {"character_id": 222, "ship_type_id": 11202},
+        ])
+        km = _parse_package(package)
+        self.assertEqual(km.attacker_ship_types, {222: 11202})
+
+    def test_attacker_without_ship_type_id_not_included(self):
+        package = _make_package(attackers=[
+            {"character_id": 111},  # no ship_type_id
+        ])
+        km = _parse_package(package)
+        self.assertEqual(km.attacker_ship_types, {})
+        self.assertIn(111, km.attacker_character_ids)  # still counted as an attacker
 
 
 class ResolveShipNameTests(unittest.IsolatedAsyncioTestCase):
@@ -168,6 +210,75 @@ class HandlePackageFilterTests(unittest.TestCase):
 
         self.assertEqual(received, [])
         self.assertEqual(consumer.get_recent_kills(), [])
+
+    def test_kill_matching_corp_watchlist_is_matched(self):
+        """#240: a watchlisted corp among the attackers matches anywhere,
+        same treatment as the existing alliance watchlist."""
+        received = []
+        consumer = R2Z2Consumer(
+            corp_watchlist={222}, on_kill=lambda km, jd: received.append((km, jd))
+        )
+        consumer._handle_package(
+            _make_package(solar_system_id=1, attackers=[
+                {"character_id": 111, "corporation_id": 222},
+            ])
+        )
+        self.assertEqual(len(received), 1)
+        self.assertIsNone(received[0][1])  # no jump distance -- watchlist match only
+
+    def test_kill_matching_pilot_watchlist_attacker_is_matched(self):
+        """#240: a watchlisted pilot's kill anywhere in New Eden matches,
+        regardless of jump distance -- 'anywhere in New Eden' per the
+        issue's own wording."""
+        received = []
+        consumer = R2Z2Consumer(
+            pilot_watchlist={111}, on_kill=lambda km, jd: received.append((km, jd))
+        )
+        consumer._handle_package(
+            _make_package(solar_system_id=1, attackers=[
+                {"character_id": 111, "corporation_id": 222},
+            ])
+        )
+        self.assertEqual(len(received), 1)
+        self.assertIsNone(received[0][1])
+
+    def test_kill_matching_pilot_watchlist_victim_is_matched(self):
+        """A watchlisted pilot getting killed (not just kills they get)
+        also matters -- known losses feed the dossier too."""
+        received = []
+        consumer = R2Z2Consumer(
+            pilot_watchlist={999}, on_kill=lambda km, jd: received.append((km, jd))
+        )
+        consumer._handle_package(
+            _make_package(solar_system_id=1, victim_character_id=999)
+        )
+        self.assertEqual(len(received), 1)
+
+    def test_corp_watchlist_does_not_match_unrelated_corp(self):
+        received = []
+        consumer = R2Z2Consumer(
+            corp_watchlist={555}, on_kill=lambda km, jd: received.append((km, jd))
+        )
+        consumer._handle_package(
+            _make_package(solar_system_id=1, attackers=[
+                {"character_id": 111, "corporation_id": 222},
+            ])
+        )
+        self.assertEqual(received, [])
+
+    def test_empty_watchlists_do_not_change_existing_behavior(self):
+        """#240 acceptance criterion: empty watchlist = byte-identical
+        behavior to today -- no extra matches beyond jump-radius/alliance."""
+        received = []
+        consumer = R2Z2Consumer(on_kill=lambda km, jd: received.append((km, jd)))
+        consumer._nearby_systems = {}  # nothing nearby, no alliance watchlist either
+
+        consumer._handle_package(
+            _make_package(solar_system_id=1, attackers=[
+                {"character_id": 111, "corporation_id": 222},
+            ])
+        )
+        self.assertEqual(received, [])
 
     def test_malformed_package_does_not_crash_or_call_on_kill(self):
         received = []

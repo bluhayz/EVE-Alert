@@ -36,6 +36,14 @@ CREATE INDEX IF NOT EXISTS idx_sightings_pilot ON sightings(pilot_name);
 CREATE INDEX IF NOT EXISTS idx_sightings_seen_at ON sightings(seen_at);
 """
 
+# #238: schema version 2 -- adds a nullable character_id (populated when
+# ESI resolution succeeded, so a later rename/name-collision can still be
+# disambiguated) and the composite indexes the analytics rollup layer's
+# per-pilot/per-system time-range queries need. Tracked via SQLite's
+# built-in PRAGMA user_version so existing v1 databases migrate in place
+# without a separate migrations table.
+_SCHEMA_VERSION = 2
+
 _VALID_SOURCES = ("local", "intel")
 
 
@@ -48,6 +56,7 @@ class Sighting:
     corp: str | None
     alliance: str | None
     seen_at: float
+    character_id: int | None = None
 
 
 def get_pilot_history_path() -> str:
@@ -66,19 +75,63 @@ def get_pilot_history_path() -> str:
     return str(config_dir / "pilot_history.db")
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring *conn*'s database up to _SCHEMA_VERSION.
+
+    #238: a fresh database gets the current schema directly via
+    executescript(); an existing v1 database (no character_id column,
+    missing the composite indexes) gets ALTER TABLE + CREATE INDEX
+    applied in place. PRAGMA user_version tracks which migrations have
+    already run so this is idempotent and cheap on every connection.
+    """
+    conn.executescript(_SCHEMA)
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < 2:
+        try:
+            conn.execute("ALTER TABLE sightings ADD COLUMN character_id INTEGER")
+        except sqlite3.OperationalError:
+            pass  # already has the column (e.g. a fresh DB via executescript above)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sightings_pilot_seen "
+            "ON sightings(pilot_name, seen_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sightings_system_seen "
+            "ON sightings(system, seen_at)"
+        )
+        conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    conn.commit()
+
+
+# #239: _migrate()'s executescript()/PRAGMA user_version dance is DDL,
+# not a plain read/write -- re-running it on every single connection
+# turned out to contend for SQLite's write lock badly enough to raise
+# "database is locked" under real concurrent access (verified via the
+# analytics rollup layer's concurrency test, which calls through this
+# store on every rollup computation). Migration only ever needs to run
+# once per DB file per process; PRAGMA user_version already makes it
+# idempotent ACROSS processes/restarts, this cache just avoids paying
+# the DDL cost EVERY call within one process's lifetime.
+_migrated_paths: set = set()
+
+
 def _connect() -> sqlite3.Connection:
-    """Open a fresh connection with the schema ensured.
+    """Open a fresh connection with the schema ensured and migrated.
 
     One connection per call (no shared/global connection) -- this module
     is called occasionally (once per resolved pilot per alarm/intel
     mention), not in a hot loop, so per-call connection overhead is
     negligible and avoids any cross-thread connection-sharing concerns.
     WAL mode lets the engine thread write while a future UI-side read
-    doesn't block behind it.
+    doesn't block behind it. A generous busy-timeout (default is 5s)
+    lets a connection wait out a competing writer instead of raising.
     """
-    conn = sqlite3.connect(get_pilot_history_path())
+    path = get_pilot_history_path()
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript(_SCHEMA)
+    if path not in _migrated_paths:
+        _migrate(conn)
+        _migrated_paths.add(path)
     return conn
 
 
@@ -91,11 +144,15 @@ def record_sighting(
     corp: str | None = None,
     alliance: str | None = None,
     seen_at: float | None = None,
+    character_id: int | None = None,
 ) -> None:
     """Record one pilot sighting.
 
     *source* must be "local" (Enemy-alarm detection) or "intel"
-    (intel-channel mention). *seen_at* defaults to now.
+    (intel-channel mention). *seen_at* defaults to now. *character_id*
+    (#238) is populated when ESI resolution succeeded, so a later rename
+    or a name shared by two different pilots can still be disambiguated;
+    None when unresolved (e.g. intel-channel mentions never resolve one).
     """
     if source not in _VALID_SOURCES:
         raise ValueError(f"source must be one of {_VALID_SOURCES}, got {source!r}")
@@ -104,9 +161,9 @@ def record_sighting(
     with closing(_connect()) as conn:
         conn.execute(
             "INSERT INTO sightings "
-            "(pilot_name, system, ship, source, corp, alliance, seen_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (pilot_name, system, ship, source, corp, alliance, seen_at),
+            "(pilot_name, system, ship, source, corp, alliance, seen_at, character_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pilot_name, system, ship, source, corp, alliance, seen_at, character_id),
         )
         conn.commit()
 
@@ -119,7 +176,7 @@ def get_sightings(
     *since*, if given, restricts to sightings at or after that unix epoch.
     """
     query = (
-        "SELECT pilot_name, system, ship, source, corp, alliance, seen_at "
+        "SELECT pilot_name, system, ship, source, corp, alliance, seen_at, character_id "
         "FROM sightings WHERE pilot_name = ?"
     )
     params: list = [pilot_name]
@@ -131,6 +188,39 @@ def get_sightings(
     with closing(_connect()) as conn:
         rows = conn.execute(query, params).fetchall()
     return [Sighting(*row) for row in rows]
+
+
+def get_pilots_with_activity_since(since: float, limit: int = 500) -> list[tuple[str, float]]:
+    """Return [(pilot_name, max_seen_at), ...] for pilots with at least
+    one sighting at or after *since*, most-recently-active first.
+
+    Used by #239's rollup-maintenance sweep to find pilots whose data
+    changed since their last rollup, without re-scanning every pilot ever
+    recorded.
+    """
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT pilot_name, MAX(seen_at) FROM sightings "
+            "WHERE seen_at >= ? GROUP BY pilot_name "
+            "ORDER BY MAX(seen_at) DESC LIMIT ?",
+            (since, limit),
+        ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
+def get_latest_corp_for_pilot(pilot_name: str) -> str | None:
+    """Return the most recently recorded corp for *pilot_name*, or None
+    if never resolved. Best-effort helper for #239's system_rollup
+    top_hostile_corps -- combat_activity rows don't carry corp/alliance
+    (#237's schema), so the rollup cross-references the pilot's most
+    recent known corp here instead."""
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT corp FROM sightings WHERE pilot_name = ? AND corp IS NOT NULL "
+            "ORDER BY seen_at DESC LIMIT 1",
+            (pilot_name,),
+        ).fetchone()
+    return row[0] if row else None
 
 
 def prune_older_than(days: int) -> int:

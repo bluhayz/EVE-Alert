@@ -78,6 +78,12 @@ class LiveKillmail:
     alliance_ids: set = field(default_factory=set)  # victim + attacker alliance IDs
     corporation_ids: set = field(default_factory=set)
     attacker_character_ids: set = field(default_factory=set)
+    # #237: combat-activity recording needs to identify the victim by
+    # character (LiveKillmail previously had no victim identity at all,
+    # only victim_corporation_id) and know which ship each attacker flew
+    # (previously only the victim's ship_type_id was captured).
+    victim_character_id: int | None = None
+    attacker_ship_types: dict = field(default_factory=dict)  # character_id -> ship_type_id
 
 
 def _parse_package(package: dict) -> LiveKillmail | None:
@@ -98,6 +104,7 @@ def _parse_package(package: dict) -> LiveKillmail | None:
     alliance_ids = set()
     corporation_ids = set()
     attacker_character_ids = set()
+    attacker_ship_types: dict = {}
     if victim.get("alliance_id"):
         alliance_ids.add(victim["alliance_id"])
     if victim.get("corporation_id"):
@@ -111,6 +118,8 @@ def _parse_package(package: dict) -> LiveKillmail | None:
             corporation_ids.add(a["corporation_id"])
         if a.get("character_id"):
             attacker_character_ids.add(a["character_id"])
+            if a.get("ship_type_id"):
+                attacker_ship_types[a["character_id"]] = a["ship_type_id"]
 
     return LiveKillmail(
         killmail_id=killmail_id,
@@ -122,6 +131,8 @@ def _parse_package(package: dict) -> LiveKillmail | None:
         alliance_ids=alliance_ids,
         corporation_ids=corporation_ids,
         attacker_character_ids=attacker_character_ids,
+        victim_character_id=victim.get("character_id"),
+        attacker_ship_types=attacker_ship_types,
     )
 
 
@@ -169,12 +180,20 @@ class R2Z2Consumer:
         origin_system_id: int | None = None,
         watch_jumps: int = 5,
         alliance_watchlist: set | None = None,
+        corp_watchlist: set | None = None,
+        pilot_watchlist: set | None = None,
         on_kill: Callable[["LiveKillmail", int | None], None] | None = None,
         sequence: int | None = None,
     ) -> None:
         self._origin_system_id = origin_system_id
         self._watch_jumps = max(0, watch_jumps)
         self._watchlist = alliance_watchlist or set()
+        # #240: corp- and pilot-level watchlists, same "match anywhere in
+        # New Eden regardless of jump distance" treatment as the existing
+        # alliance watchlist -- character IDs, resolved once per session
+        # from settings.watchlist.pilots (see AlertAgent._resolve_watchlist_ids).
+        self._corp_watchlist = corp_watchlist or set()
+        self._pilot_watchlist = pilot_watchlist or set()
         self.on_kill = on_kill
         self._sequence = sequence
         self._running = False
@@ -278,7 +297,14 @@ class R2Z2Consumer:
             return
 
         jump_dist = self._nearby_systems.get(killmail.solar_system_id)
-        watchlist_hit = bool(self._watchlist & killmail.alliance_ids)
+        pilot_ids = set(killmail.attacker_character_ids)
+        if killmail.victim_character_id:
+            pilot_ids.add(killmail.victim_character_id)
+        watchlist_hit = bool(
+            self._watchlist & killmail.alliance_ids
+            or self._corp_watchlist & killmail.corporation_ids
+            or self._pilot_watchlist & pilot_ids
+        )
         if jump_dist is None and not watchlist_hit:
             return  # not relevant to this install -- discard, don't buffer
 
