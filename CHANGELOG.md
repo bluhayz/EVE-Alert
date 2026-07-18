@@ -1,5 +1,45 @@
 # Changelog
 
+## [7.2.3] 2026-07-18
+
+### Fixed — 11 bugs from the full-codebase code review (#226-#236)
+
+- **#226**: `UniverseCache.get_route()` didn't exist at all -- two production
+  call sites (jump-distance display, #217 pathing plausibility check)
+  silently no-op'd/soft-failed on `AttributeError`, masked by tests that
+  mocked the method into existence. Added a real implementation.
+- **#227**: `_fetch_neighbors()` truncated to the first 8 stargates instead
+  of bounding concurrency, silently corrupting the jump graph for any
+  system with more gates (trade hubs); a transient ESI failure was also
+  cached as a permanent empty neighbor list. Now resolves all stargates
+  with bounded concurrency and never caches a failed fetch.
+- **#228**: the web status dashboard rendered log lines -- including raw
+  intel-channel chat text -- without HTML-escaping (stored XSS). Fixed.
+- **#229**: the #177 cache-maintenance sweep missed `EsiLookup` and
+  `KosChecker`, the two largest per-pilot TTL caches. Added purge methods
+  and wired them in; also fixed a casing bug in `KosChecker.reconfigure()`.
+- **#230**: the intel-channel parser upper-cased entire messages before
+  system-name detection, so ordinary words became indistinguishable from
+  real systems (`"hostile sabre heading north"` resolved to system
+  `"HOSTILE"`). Fixed to match on original casing.
+- **#231**: `EsiAuth.get_token()` returned a known-expired access token
+  whenever a refresh attempt failed. Now returns `None` on refresh
+  failure; a revoked/expired refresh token clears the session and warns
+  once instead of retrying forever.
+- **#232**: a failed sovereignty-map fetch was cached as a successful
+  "no sov anywhere" result for the full 5-minute TTL. Now serves stale
+  data and retries after a short backoff instead.
+- **#233**: the adjacent-system kill monitor fired one zKillboard request
+  per nearby system with no concurrency bound -- up to 150+ simultaneous
+  requests per poll cycle. Bounded via semaphore.
+- **#234**: an unhandled `OSError` from a deleted/locked D-scan log file
+  could silently kill the D-scan watcher for the rest of the session.
+  Hardened against the race.
+- **#235**: the `kos_list` setting was documented but never actually read
+  anywhere -- entries a user added did nothing. Wired in.
+- **#236**: the test suite wrote real session-report files into the
+  user's actual config directory instead of the test temp dir.
+
 ## [7.2.2] 2026-07-18
 
 ### Fixed — OCR misreads fired repeat alarms and fragmented pilot history (#224)
