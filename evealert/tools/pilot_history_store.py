@@ -223,6 +223,44 @@ def get_latest_corp_for_pilot(pilot_name: str) -> str | None:
     return row[0] if row else None
 
 
+def search_pilot_names(query: str, limit: int = 50) -> list[str]:
+    """Return distinct pilot names with at least one sighting whose name
+    contains *query* (case-insensitive substring match), alphabetically.
+
+    Used by #244's Intel Analytics pilot search.
+    """
+    if not query.strip():
+        return []
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT pilot_name FROM sightings "
+            "WHERE LOWER(pilot_name) LIKE LOWER(?) "
+            "ORDER BY pilot_name LIMIT ?",
+            (f"%{query}%", limit),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_pilots_by_corp_or_alliance(name: str, limit: int = 500) -> list[str]:
+    """Return distinct pilot names with at least one sighting whose corp
+    OR alliance matches *name* (case-insensitive exact match).
+
+    Used by #242's group_activity to find which tracked pilots belong to
+    a given corp/alliance -- combat_activity itself doesn't carry
+    corp/alliance (#237's schema is killmail-shaped), so group membership
+    is cross-referenced from sighting data here, the same pattern
+    get_latest_corp_for_pilot() uses for #239's system_rollup.
+    """
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT pilot_name FROM sightings "
+            "WHERE LOWER(corp) = LOWER(?) OR LOWER(alliance) = LOWER(?) "
+            "LIMIT ?",
+            (name, name, limit),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
 def prune_older_than(days: int) -> int:
     """Delete sightings older than *days* days old. Returns rows deleted.
 

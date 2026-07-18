@@ -222,5 +222,70 @@ class CharacterIdAndMigrationTests(PilotHistoryStoreTestCase):
         self.assertEqual(result.character_id, 1)
 
 
+class GetPilotsByCorpOrAllianceTests(PilotHistoryStoreTestCase):
+    def test_matches_corp_case_insensitively(self):
+        from evealert.tools.pilot_history_store import (
+            get_pilots_by_corp_or_alliance,
+            record_sighting,
+        )
+
+        record_sighting("Alice", source="local", corp="Snuffed Out")
+        self.assertEqual(get_pilots_by_corp_or_alliance("snuffed out"), ["Alice"])
+
+    def test_matches_alliance(self):
+        from evealert.tools.pilot_history_store import (
+            get_pilots_by_corp_or_alliance,
+            record_sighting,
+        )
+
+        record_sighting("Bob", source="local", alliance="Test Alliance Please Ignore")
+        self.assertEqual(
+            get_pilots_by_corp_or_alliance("Test Alliance Please Ignore"), ["Bob"]
+        )
+
+    def test_no_match_returns_empty_list(self):
+        from evealert.tools.pilot_history_store import get_pilots_by_corp_or_alliance
+
+        self.assertEqual(get_pilots_by_corp_or_alliance("Nobody Corp"), [])
+
+    def test_distinct_pilots_only(self):
+        from evealert.tools.pilot_history_store import (
+            get_pilots_by_corp_or_alliance,
+            record_sighting,
+        )
+
+        record_sighting("Alice", source="local", corp="Snuffed Out")
+        record_sighting("Alice", source="intel", corp="Snuffed Out")
+        self.assertEqual(get_pilots_by_corp_or_alliance("Snuffed Out"), ["Alice"])
+
+
+class SearchPilotNamesTests(PilotHistoryStoreTestCase):
+    def test_empty_query_returns_empty_list(self):
+        from evealert.tools.pilot_history_store import search_pilot_names
+
+        self.assertEqual(search_pilot_names(""), [])
+        self.assertEqual(search_pilot_names("   "), [])
+
+    def test_case_insensitive_partial_match(self):
+        from evealert.tools.pilot_history_store import record_sighting, search_pilot_names
+
+        record_sighting("Bad Guy Jones", source="local")
+        record_sighting("Someone Else", source="local")
+
+        self.assertEqual(search_pilot_names("bad guy"), ["Bad Guy Jones"])
+
+    def test_results_sorted_alphabetically(self):
+        from evealert.tools.pilot_history_store import record_sighting, search_pilot_names
+
+        record_sighting("Zed Guy", source="local")
+        record_sighting("Alpha Guy", source="local")
+        self.assertEqual(search_pilot_names("guy"), ["Alpha Guy", "Zed Guy"])
+
+    def test_no_match_returns_empty_list(self):
+        from evealert.tools.pilot_history_store import search_pilot_names
+
+        self.assertEqual(search_pilot_names("Nobody"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

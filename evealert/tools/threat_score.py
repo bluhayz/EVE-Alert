@@ -44,6 +44,8 @@ def compute_threat_score(
     history_frequency: int = 0,
     history_is_regular_route: bool = False,
     is_watchlisted: bool = False,
+    dossier_top_ship_class: str = "",
+    dossier_gang_avg: float = 0.0,
 ) -> ThreatAssessment:
     """Compute a composite 1–10 threat score.
 
@@ -64,6 +66,16 @@ def compute_threat_score(
         is_watchlisted:       Whether the pilot (or their corp/alliance) is
                               on the user's hostile watchlist (#240, v7.3).
                               False (default) leaves the score unaffected.
+        dossier_top_ship_class: ShipThreatClass.value string for the
+                              pilot's most-flown ship per their combat
+                              dossier (#241/#243, v7.4). "" (default)
+                              leaves the score unaffected.
+        dossier_gang_avg:     The pilot's average gang size per their
+                              dossier (#241/#243, v7.4). Combined with a
+                              solo local sighting (local_hostile_count ==
+                              1), a normally-gang-flying pilot showing up
+                              alone reads as an advance scout. 0.0
+                              (default) leaves the score unaffected.
     """
     # Cyno overrides everything — capital ship inbound
     if is_cyno:
@@ -129,6 +141,14 @@ def compute_threat_score(
     if is_watchlisted:
         score += 1
         reasons.append("on hostile watchlist")
+
+    # --- Dossier ship/gang priors (#241/#243, v7.4; max 2) ---
+    if dossier_top_ship_class in {"tackle", "dictor"}:
+        score += 1
+        reasons.append(f"dossier: usually flies {dossier_top_ship_class}")
+    if dossier_gang_avg >= 3 and local_hostile_count == 1:
+        score += 1
+        reasons.append("usually flies with a gang")
 
     score = min(score, 10)
     if score >= 7:

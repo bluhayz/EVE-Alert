@@ -450,6 +450,8 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -474,6 +476,8 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _logged_messages(self) -> list[str]:
@@ -665,6 +669,8 @@ class KosListWiringTests(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({
                 "kos_list": ["BadGuy Corp", "  Evil Alliance  ", ""],
@@ -682,6 +688,8 @@ class KosListWiringTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_load_settings_normalizes_kos_list(self):
@@ -1075,6 +1083,8 @@ class IntelCorrelationPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -1095,6 +1105,8 @@ class IntelCorrelationPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _logged_messages(self) -> list[str]:
@@ -1181,6 +1193,8 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({"server": {"system": "J5A-IX"}}, f)
         reset_settings_store(self.settings_path)
@@ -1203,6 +1217,8 @@ class PilotHistoryIngestionTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def _run_intel_check_with_esi_stub(self, name="Bad Guy", top_ship="Loki"):
@@ -1400,6 +1416,8 @@ class CombatActivityBackfillWiringTests(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({"server": {"system": "J5A-IX"}}, f)
         reset_settings_store(self.settings_path)
@@ -1422,6 +1440,8 @@ class CombatActivityBackfillWiringTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def _run_intel_check_with_esi_stub(self, name="Bad Guy", character_id=987654):
@@ -1551,6 +1571,58 @@ class CombatActivityBackfillWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent._combat_backfilled_character_ids, set())
 
 
+class SendWebhookMessageDossierTemplateTests(unittest.IsolatedAsyncioTestCase):
+    """#243: {dossier} is an optional webhook-template variable, empty by
+    default -- doesn't change the default template's output."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._webhook = MagicMock()
+        self.agent._webhook.execute = MagicMock()
+        self.agent.webhook_sent = False
+        self.agent.webhook_cooldown_timer = 0
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _sent_message(self) -> str:
+        return self.agent._webhook.execute.call_args.args[0]
+
+    async def test_dossier_variable_defaults_to_empty_string(self):
+        self.agent._webhook_template = "{alarm_type} - dossier:[{dossier}]"
+        self.agent._last_dossier_text = ""
+        await self.agent.send_webhook_message("Enemy")
+        self.assertEqual(self._sent_message(), "Enemy - dossier:[]")
+
+    async def test_dossier_variable_renders_when_present(self):
+        self.agent._webhook_template = "{alarm_type} - dossier:[{dossier}]"
+        self.agent._last_dossier_text = "Sabre 58% | prime 19:00-22:00 EVE"
+        await self.agent.send_webhook_message("Enemy")
+        self.assertEqual(
+            self._sent_message(), "Enemy - dossier:[Sabre 58% | prime 19:00-22:00 EVE]"
+        )
+
+    async def test_default_template_output_unaffected(self):
+        """The stock DEFAULT_SETTINGS webhook_template never references
+        {dossier} -- the new kwarg being available to .format() must not
+        change its rendered output."""
+        self.agent._last_dossier_text = "some dossier text"
+        await self.agent.send_webhook_message("Enemy")
+        self.assertNotIn("dossier", self._sent_message().lower())
+
+
 class WatchlistThreatScoreWiringTests(unittest.IsolatedAsyncioTestCase):
     """#240 acceptance criterion: a watchlisted pilot's threat score
     reflects the extra signal, surfaced in the logged [THREAT: ...] line."""
@@ -1562,6 +1634,7 @@ class WatchlistThreatScoreWiringTests(unittest.IsolatedAsyncioTestCase):
         settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
         with open(settings_path, "w") as f:
             json.dump({}, f)
@@ -1583,6 +1656,7 @@ class WatchlistThreatScoreWiringTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -1643,6 +1717,152 @@ class WatchlistThreatScoreWiringTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("on hostile watchlist" in m for m in messages))
 
 
+class DossierAlarmWiringTests(unittest.IsolatedAsyncioTestCase):
+    """#243: the alarm pipeline surfaces a Dossier: line (#241) and feeds
+    dossier ship/gang priors into the composite threat score."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._correlate_intel_enabled = False
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def _run(self, name="Bad Guy"):
+        from evealert.tools.esi_standings import KillProfile
+
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos, patch(
+            "evealert.tools.combat_activity_store.backfill_from_zkillboard",
+            new=AsyncMock(return_value=0),
+        ):
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(
+                return_value=KillProfile(
+                    kills_total=5, losses_total=1, top_ship="Sabre", danger_ratio=0.5
+                )
+            )
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+
+    def _seed_activity(self, pilot_name, n, *, ship="Sabre", gang_size=4):
+        from evealert.tools.combat_activity_store import record_activity
+
+        now = time.time()
+        for i in range(n):
+            record_activity(
+                1000 + i, pilot_name, role="attacker", ship_name=ship,
+                system_name="Jita", gang_size=gang_size, occurred_at=now - i,
+            )
+
+    async def test_dossier_line_appears_when_history_exists(self):
+        self._seed_activity("Bad Guy", 5)
+        await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertTrue(any(m.strip().startswith("Dossier:") for m in messages))
+
+    async def test_no_dossier_line_for_unknown_pilot(self):
+        await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertFalse(any("Dossier:" in m for m in messages))
+
+    async def test_dictor_top_ship_adds_threat_reason(self):
+        self._seed_activity("Bad Guy", 5, ship="Sabre")  # Sabre classifies as dictor
+        await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertTrue(any("dossier: usually flies dictor" in m for m in messages))
+
+    async def test_high_gang_avg_solo_local_adds_advance_scout_reason(self):
+        self._seed_activity("Bad Guy", 5, ship="Rifter", gang_size=5)
+        await self._run("Bad Guy")  # single-name alarm -- local_hostile_count == 1
+        messages = self._logged_messages()
+        self.assertTrue(any("usually flies with a gang" in m for m in messages))
+
+    async def test_last_dossier_text_populated_for_webhook_template(self):
+        self._seed_activity("Bad Guy", 5)
+        self.assertEqual(self.agent._last_dossier_text, "")
+        await self._run("Bad Guy")
+        self.assertNotEqual(self.agent._last_dossier_text, "")
+
+    async def test_last_dossier_text_reset_when_no_dossier_found(self):
+        self.agent._last_dossier_text = "stale text from a previous alarm"
+        await self._run("Bad Guy")  # no history seeded -- no dossier this time
+        self.assertEqual(self.agent._last_dossier_text, "")
+
+    async def test_own_character_excluded_from_fleetmate_lookup(self):
+        from evealert.tools.esi_auth import EsiAuth
+
+        with patch(
+            "evealert.tools.esi_auth.get_esi_auth"
+        ) as mock_get_auth, patch(
+            "evealert.tools.pilot_dossier.build_dossier",
+            new=AsyncMock(return_value=None),
+        ) as mock_build:
+            mock_auth = MagicMock(spec=EsiAuth)
+            mock_auth.character_name = "My Main"
+            mock_get_auth.return_value = mock_auth
+
+            self._seed_activity("Bad Guy", 5)
+            await self._run("Bad Guy")
+
+            mock_build.assert_awaited_once_with("Bad Guy", own_character_name="My Main")
+
+    async def test_dossier_lookup_failure_does_not_crash_pipeline(self):
+        """A dossier lookup error must not abort KOS/threat-score for the
+        rest of the per-pilot loop (same reasoning as #237/#238's
+        loop-is-None regression tests)."""
+        with patch(
+            "evealert.tools.pilot_dossier.build_dossier",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await self._run("Bad Guy")
+        messages = self._logged_messages()
+        self.assertTrue(any("THREAT" in m for m in messages))
+
+
 class PilotHistorySummaryDisplayTests(unittest.IsolatedAsyncioTestCase):
     """#216/#217: the "History: ..." line on Enemy alarms, driven by
     pilot_history_analytics.summarize() and infer_pathing()."""
@@ -1655,6 +1875,8 @@ class PilotHistorySummaryDisplayTests(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({"server": {"system": "J5A-IX"}}, f)
         reset_settings_store(self.settings_path)
@@ -1676,6 +1898,8 @@ class PilotHistorySummaryDisplayTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _logged_messages(self) -> list[str]:
@@ -1861,6 +2085,8 @@ class ManualBlueTierTests(unittest.IsolatedAsyncioTestCase):
         self.settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(self.settings_path, "w") as f:
             json.dump({}, f)
         reset_settings_store(self.settings_path)
@@ -1880,6 +2106,8 @@ class ManualBlueTierTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def _logged_messages(self) -> list[str]:
@@ -3271,6 +3499,123 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(30000142, get_universe_cache()._kill_count_cache)
 
 
+class PeakHoursMonitorDangerWindowTests(unittest.IsolatedAsyncioTestCase):
+    """#242: _peak_hours_monitor() also emits a local-data-driven
+    "DANGER WINDOW" line, independent of the existing zKB-heatmap-backed
+    warning in the same loop -- fires only on the OFF -> ON transition."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        with open(settings_path, "w") as f:
+            json.dump({"server": {"system": "J5A-IX"}}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        # Neutralize the pre-existing zKB-heatmap-backed check so these
+        # tests isolate the new local-data path -- it takes its own early
+        # `continue` when the heatmap fetch returns nothing.
+        self._heatmap_patch = patch(
+            "evealert.tools.threat_heatmap.get_constellation_heatmap",
+            new=AsyncMock(return_value=None),
+        )
+        self._heatmap_patch.start()
+
+    def tearDown(self):
+        import shutil
+
+        self._heatmap_patch.stop()
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _run_n_cycles(self, n):
+        self.agent.running = True
+        call_count = {"n": 0}
+
+        async def fake_sleep(_):
+            call_count["n"] += 1
+            if call_count["n"] >= n:
+                self.agent.running = False
+
+        with patch("evealert.manager.alertmanager.asyncio.sleep", new=fake_sleep):
+            await self.agent._peak_hours_monitor()
+
+    def _danger_window_calls(self):
+        return [
+            c for c in self.mock_main.write_message.call_args_list
+            if "DANGER WINDOW" in c.args[0]
+        ]
+
+    async def test_transition_into_danger_window_fires_once(self):
+        from evealert.tools.hunting_grounds import SystemDanger
+
+        danger = SystemDanger(
+            system_name="J5A-IX", hour_histogram=[5] * 24,
+            current_hour_percentile=90.0, danger_now=True,
+            hot_window="19:00-22:00", hot_window_pct=68.0,
+        )
+        with patch(
+            "evealert.tools.hunting_grounds.system_danger_windows",
+            new=AsyncMock(return_value=danger),
+        ):
+            await self._run_n_cycles(1)
+
+        calls = self._danger_window_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("J5A-IX", calls[0].args[0])
+        self.assertIn("19:00-22:00", calls[0].args[0])
+        self.assertIn("68%", calls[0].args[0])
+        self.assertTrue(self.agent._last_danger_window_active)
+
+    async def test_no_refire_while_window_stays_open(self):
+        from evealert.tools.hunting_grounds import SystemDanger
+
+        danger = SystemDanger(
+            system_name="J5A-IX", hour_histogram=[5] * 24,
+            current_hour_percentile=90.0, danger_now=True,
+        )
+        with patch(
+            "evealert.tools.hunting_grounds.system_danger_windows",
+            new=AsyncMock(return_value=danger),
+        ):
+            await self._run_n_cycles(2)
+
+        self.assertEqual(len(self._danger_window_calls()), 1)
+
+    async def test_transition_out_of_window_does_not_fire(self):
+        from evealert.tools.hunting_grounds import SystemDanger
+
+        self.agent._last_danger_window_active = True
+        danger = SystemDanger(
+            system_name="J5A-IX", hour_histogram=[0] * 24,
+            current_hour_percentile=0.0, danger_now=False,
+        )
+        with patch(
+            "evealert.tools.hunting_grounds.system_danger_windows",
+            new=AsyncMock(return_value=danger),
+        ):
+            await self._run_n_cycles(1)
+
+        self.assertEqual(len(self._danger_window_calls()), 0)
+        self.assertFalse(self.agent._last_danger_window_active)
+
+    async def test_danger_window_check_failure_does_not_crash_loop(self):
+        with patch(
+            "evealert.tools.hunting_grounds.system_danger_windows",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await self._run_n_cycles(1)  # must not raise
+
+        self.assertEqual(len(self._danger_window_calls()), 0)
+
+
 class LocationMonitorDuplicateSystemInfoTests(unittest.IsolatedAsyncioTestCase):
     """#223: _location_monitor() must not re-fire _display_system_info()
     on the FIRST ESI-detected system -- start() already displayed it
@@ -3542,6 +3887,8 @@ class PilotHistoryStabilizationAccumulationTests(unittest.IsolatedAsyncioTestCas
         settings_path = Path(self.temp_dir) / "settings.json"
         os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
         os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        os.environ["EVEALERT_INTEL_ROLLUPS_PATH"] = str(Path(self.temp_dir) / "intel_rollups.db")
         with open(settings_path, "w") as f:
             json.dump({"server": {"system": "J5A-IX"}}, f)
         reset_settings_store(settings_path)
@@ -3562,6 +3909,8 @@ class PilotHistoryStabilizationAccumulationTests(unittest.IsolatedAsyncioTestCas
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        os.environ.pop("EVEALERT_INTEL_ROLLUPS_PATH", None)
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     async def test_misread_sequence_accumulates_under_one_pilot_record(self):

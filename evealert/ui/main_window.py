@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         # Dialog instances (lazy creation)
         self._settings_dlg = None
         self._stats_dlg = None
+        self._intel_analytics_dlg = None
         self._config_dlg = None
         self._current_profile: str | None = None  # active space profile key (#143)
 
@@ -221,6 +222,9 @@ class MainWindow(QMainWindow):
         self._btn_stats = QPushButton("Statistics")
         self._btn_stats.clicked.connect(self._open_statistics)
 
+        self._btn_intel_analytics = QPushButton("Intel Analytics")
+        self._btn_intel_analytics.clicked.connect(self._open_intel_analytics)
+
         self._btn_report = QPushButton("Report Bug")
         self._btn_report.clicked.connect(self._open_bug_reporter)
 
@@ -228,7 +232,7 @@ class MainWindow(QMainWindow):
         self._btn_check_update.clicked.connect(self._check_for_updates_manual)
 
         for btn in (self._btn_config, self._btn_settings, self._btn_stats,
-                    self._btn_report, self._btn_check_update):
+                    self._btn_intel_analytics, self._btn_report, self._btn_check_update):
             row2.addWidget(btn)
         row2.addStretch()
         root.addLayout(row2)
@@ -433,6 +437,12 @@ class MainWindow(QMainWindow):
             from evealert.ui.statistics_window import StatisticsWindow  # noqa: PLC0415
             self._stats_dlg = StatisticsWindow(self, self.alert.statistics)
         self._stats_dlg.show_window()
+
+    def _open_intel_analytics(self) -> None:
+        if self._intel_analytics_dlg is None:
+            from evealert.ui.intel_analytics_window import IntelAnalyticsWindow  # noqa: PLC0415
+            self._intel_analytics_dlg = IntelAnalyticsWindow(self)
+        self._intel_analytics_dlg.show_window()
 
     def _open_bug_reporter(self) -> None:
         """Open the bug reporter dialog, then launch a pre-filled GitHub issue."""

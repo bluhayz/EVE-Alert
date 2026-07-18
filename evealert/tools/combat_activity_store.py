@@ -231,6 +231,78 @@ def get_pilots_with_activity_since(since: float, limit: int = 500) -> list[tuple
     return [(r[0], r[1]) for r in rows]
 
 
+def get_activity_for_pilots(
+    pilot_names: list[str], *, since: float | None = None, limit: int = 2000
+) -> list[CombatActivityRow]:
+    """Return combat_activity rows for any of *pilot_names*, newest-first.
+
+    Used by #242's group_activity to fetch one corp/alliance's worth of
+    tracked pilots' activity in a single query rather than one round-trip
+    per pilot.
+    """
+    if not pilot_names:
+        return []
+    placeholders = ",".join("?" * len(pilot_names))
+    query = (
+        "SELECT killmail_id, pilot_name, character_id, role, ship_type_id, "
+        "ship_name, solar_system_id, system_name, gang_size, "
+        f"victim_ship_name, occurred_at FROM combat_activity WHERE pilot_name IN ({placeholders})"
+    )
+    params: list = list(pilot_names)
+    if since is not None:
+        query += " AND occurred_at >= ?"
+        params.append(since)
+    query += " ORDER BY occurred_at DESC LIMIT ?"
+    params.append(limit)
+    with closing(_connect()) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [CombatActivityRow(*row) for row in rows]
+
+
+def search_pilot_names(query: str, limit: int = 50) -> list[str]:
+    """Return distinct pilot names with at least one combat_activity row
+    whose name contains *query* (case-insensitive substring match),
+    alphabetically.
+
+    Used by #244's Intel Analytics pilot search -- combined with
+    pilot_history_store's own search, this also surfaces pilots only
+    ever recorded via the R2Z2/watchlist path (#240), never through a
+    Local/Enemy-alarm sighting.
+    """
+    if not query.strip():
+        return []
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT pilot_name FROM combat_activity "
+            "WHERE LOWER(pilot_name) LIKE LOWER(?) "
+            "ORDER BY pilot_name LIMIT ?",
+            (f"%{query}%", limit),
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
+def get_co_attackers(killmail_ids: list[int]) -> list[tuple[int, str]]:
+    """Return (killmail_id, pilot_name) for every attacker-role
+    combat_activity row on any of *killmail_ids*.
+
+    Used by #241's fleetmate inference: given one tracked pilot's own
+    attacker-role killmail IDs, this finds which OTHER tracked pilots
+    also attacked those same killmails (each (killmail_id, pilot_name)
+    pair is unique per the schema's UNIQUE constraint, so counting
+    occurrences per pilot_name directly counts shared killmails).
+    """
+    if not killmail_ids:
+        return []
+    placeholders = ",".join("?" * len(killmail_ids))
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            f"SELECT killmail_id, pilot_name FROM combat_activity "
+            f"WHERE role = 'attacker' AND killmail_id IN ({placeholders})",
+            killmail_ids,
+        ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def prune_older_than(days: int) -> int:
     """Delete combat_activity rows older than *days* days old. Returns
     rows deleted.

@@ -160,6 +160,63 @@ class WatchlistSignalTests(unittest.TestCase):
         self.assertEqual(a.score, 10)
 
 
+class DossierSignalTests(unittest.TestCase):
+    """#243: dossier ship/gang priors are additive signals, same pattern
+    as #240's watchlist signal -- defaults to ""/0.0 so pre-#243 callers
+    get byte-identical scores."""
+
+    def test_tackle_top_ship_adds_one_point(self):
+        a = compute_threat_score(local_hostile_count=1, dossier_top_ship_class="tackle")
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(a.score - baseline.score, 1)
+
+    def test_dictor_top_ship_adds_one_point(self):
+        a = compute_threat_score(local_hostile_count=1, dossier_top_ship_class="dictor")
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(a.score - baseline.score, 1)
+
+    def test_non_tackle_top_ship_class_is_a_no_op(self):
+        a = compute_threat_score(local_hostile_count=1, dossier_top_ship_class="combat")
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(a.score, baseline.score)
+
+    def test_solo_gang_flyer_advance_scout_adds_one_point(self):
+        a = compute_threat_score(local_hostile_count=1, dossier_gang_avg=4.0)
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(a.score - baseline.score, 1)
+        self.assertIn("usually flies with a gang", a.reasons)
+
+    def test_gang_avg_below_threshold_is_a_no_op(self):
+        a = compute_threat_score(local_hostile_count=1, dossier_gang_avg=2.9)
+        baseline = compute_threat_score(local_hostile_count=1)
+        self.assertEqual(a.score, baseline.score)
+
+    def test_high_gang_avg_with_multiple_hostiles_is_a_no_op(self):
+        """The advance-scout signal only applies when the pilot is
+        currently ALONE in local -- multiple hostiles present isn't a
+        scout scenario."""
+        a = compute_threat_score(local_hostile_count=3, dossier_gang_avg=5.0)
+        baseline = compute_threat_score(local_hostile_count=3)
+        self.assertEqual(a.score, baseline.score)
+
+    def test_defaults_leave_score_unaffected(self):
+        a = compute_threat_score(local_hostile_count=1)
+        b = compute_threat_score(
+            local_hostile_count=1, dossier_top_ship_class="", dossier_gang_avg=0.0
+        )
+        self.assertEqual(a.score, b.score)
+
+    def test_both_dossier_signals_together_respect_the_10_cap(self):
+        a = compute_threat_score(
+            local_hostile_count=5, is_kos=True, danger_ratio=1.0,
+            dscan_threat_class="force_recon", adjacent_kills=5,
+            history_frequency=10, history_is_regular_route=True,
+            is_watchlisted=True, dossier_top_ship_class="tackle",
+            dossier_gang_avg=5.0,
+        )
+        self.assertEqual(a.score, 10)
+
+
 class BehavioralLabelTests(unittest.TestCase):
     """#218: explicit thresholds for the behavioral label, separate from
     the numeric score."""

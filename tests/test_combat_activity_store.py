@@ -155,6 +155,61 @@ class PruneOlderThanTests(CombatActivityStoreTestCase):
         self.assertEqual(len(get_activity("Bad Guy")), 1)
 
 
+class GetCoAttackersTests(CombatActivityStoreTestCase):
+    def test_returns_other_attackers_on_shared_killmails(self):
+        from evealert.tools.combat_activity_store import get_co_attackers, record_activity
+
+        record_activity(1, "Bad Guy", role="attacker", ship_name="Sabre")
+        record_activity(1, "Wingman", role="attacker", ship_name="Loki")
+        record_activity(2, "Bad Guy", role="attacker", ship_name="Sabre")
+
+        rows = get_co_attackers([1, 2])
+        self.assertEqual(
+            sorted(rows), [(1, "Bad Guy"), (1, "Wingman"), (2, "Bad Guy")]
+        )
+
+    def test_victim_role_excluded(self):
+        from evealert.tools.combat_activity_store import get_co_attackers, record_activity
+
+        record_activity(1, "Bad Guy", role="attacker", ship_name="Sabre")
+        record_activity(1, "Victim Guy", role="victim", ship_name="Venture")
+
+        rows = get_co_attackers([1])
+        self.assertEqual(rows, [(1, "Bad Guy")])
+
+    def test_empty_input_returns_empty_list(self):
+        from evealert.tools.combat_activity_store import get_co_attackers
+
+        self.assertEqual(get_co_attackers([]), [])
+
+    def test_unmatched_killmail_ids_ignored(self):
+        from evealert.tools.combat_activity_store import get_co_attackers, record_activity
+
+        record_activity(1, "Bad Guy", role="attacker", ship_name="Sabre")
+        self.assertEqual(get_co_attackers([999]), [])
+
+
+class SearchPilotNamesTests(CombatActivityStoreTestCase):
+    def test_empty_query_returns_empty_list(self):
+        from evealert.tools.combat_activity_store import search_pilot_names
+
+        self.assertEqual(search_pilot_names(""), [])
+        self.assertEqual(search_pilot_names("   "), [])
+
+    def test_case_insensitive_partial_match(self):
+        from evealert.tools.combat_activity_store import record_activity, search_pilot_names
+
+        record_activity(1, "Bad Guy Jones", role="attacker")
+        record_activity(2, "Someone Else", role="attacker")
+
+        self.assertEqual(search_pilot_names("bad guy"), ["Bad Guy Jones"])
+
+    def test_no_match_returns_empty_list(self):
+        from evealert.tools.combat_activity_store import search_pilot_names
+
+        self.assertEqual(search_pilot_names("Nobody"), [])
+
+
 class BackfillFromZkillboardTests(CombatActivityStoreTestCase):
     """#237 ingest path 2: on-demand backfill from zKillboard."""
 

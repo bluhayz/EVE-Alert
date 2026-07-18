@@ -451,11 +451,20 @@ class AlertAgent:
         # Peak hours monitor (#151)
         self._peak_hours_warning = True
         self._peak_threshold_multiplier = 1.5  # character_id → standing float
+        # #242: tracks whether the home system's local-data danger window
+        # was active last time _peak_hours_monitor checked, so the
+        # "Danger window:" line only fires on the OFF->ON transition, not
+        # every hourly check while it stays open.
+        self._last_danger_window_active = False
 
         # v4.1: OCR pilot-name detection (#98)
         self._ocr_enabled = False
         self._ocr_region = (0, 0, 0, 0)
         self._last_ocr_names: list[str] = []   # names from last _build_enemy_alarm_text OCR
+
+        # #243: most recent Enemy-alarm dossier line, for the {dossier}
+        # webhook/push template variable -- see _augment_with_esi.
+        self._last_dossier_text: str = ""
 
         # #224: per-position OCR identity stabilization, this engagement.
         # quantized_position -> confirmed/anchor pilot name.
@@ -2392,6 +2401,32 @@ class AlertAgent:
             # #240: aggregated across pilots, same pattern as _any_kos --
             # any watchlisted pilot/corp/alliance in this batch counts.
             _any_watchlisted = False
+            # #243: aggregated across pilots -- the most urgent dossier top-
+            # ship class seen this batch (mirrors the D-scan top_class
+            # pattern below) and the highest dossier gang average, both
+            # feeding the threat score after the loop.
+            _dossier_ship_classes: set = set()
+            _max_dossier_gang_avg = 0.0
+            # #243: best-effort "who am I" for fleetmate exclusion in
+            # build_dossier() -- None when ESI auth isn't configured, in
+            # which case build_dossier simply skips that exclusion.
+            _own_character_name = None
+            try:
+                from evealert.tools.esi_auth import get_esi_auth  # noqa: PLC0415
+
+                _own_character_name = get_esi_auth().character_name or None
+            except Exception:
+                _own_character_name = None
+            # #243: {dossier} webhook/push template variable -- reset at
+            # the start of every augmentation run and populated with the
+            # first pilot's dossier line found below. Because
+            # send_webhook_message() fires (in alarm_detection()) BEFORE
+            # this fire-and-forget background task even starts, this
+            # value is always "the most recently completed augmentation
+            # run's dossier" for the *next* alarm's webhook, not this
+            # one -- the same eventually-consistent pattern already used
+            # for _last_ocr_names/_dscan_last_classes elsewhere.
+            self._last_dossier_text = ""
 
             for name in names[:5]:
                 info = results_by_name.get(name.lower())
@@ -2681,6 +2716,48 @@ class AlertAgent:
                     except Exception as exc:
                         logger.debug("Pilot history summary failed: %s", exc)
 
+                # ── Combat dossier (#243, v7.4) — one alarm-ready line
+                # built on top of #241's dossier engine, right after the
+                # History/pathing line above. Runs regardless of ESI
+                # resolution, same reasoning as the blocks above. ─
+                if self._pilot_history_enabled:
+                    try:
+                        from evealert.tools.pilot_dossier import (  # pylint: disable=import-outside-toplevel
+                            build_dossier,
+                            format_dossier_line,
+                        )
+
+                        dossier = await build_dossier(
+                            display_name, own_character_name=_own_character_name
+                        )
+                        if dossier is not None:
+                            dossier_line_text = format_dossier_line(dossier)
+                            if dossier_line_text:
+                                self._ui(
+                                    self.main.write_message,
+                                    f"    Dossier: {dossier_line_text}",
+                                    line_colour,
+                                )
+                                self._last_dossier_text = dossier_line_text
+
+                            # #243: feed dossier ship/gang priors into the
+                            # composite threat score -- aggregated across
+                            # pilots the same way _max_danger_ratio is.
+                            if dossier.top_ships:
+                                from evealert.data.ship_classes import (  # noqa: PLC0415
+                                    classify_ship,
+                                )
+
+                                _dossier_ship_classes.add(
+                                    classify_ship(dossier.top_ships[0][0])
+                                )
+                            if dossier.avg_gang_size is not None:
+                                _max_dossier_gang_avg = max(
+                                    _max_dossier_gang_avg, dossier.avg_gang_size
+                                )
+                    except Exception as exc:
+                        logger.debug("Dossier lookup failed: %s", exc)
+
                 # ── KOS check (v3.4) — runs regardless of ESI resolution (#203) ─
                 try:
                     from evealert.tools.kos_checker import (  # pylint: disable=import-outside-toplevel
@@ -2757,6 +2834,13 @@ class AlertAgent:
                 key=lambda c: ShipThreatClass(c).urgency,
                 default=ShipThreatClass.UNKNOWN,
             )
+            # #243: the most urgent dossier top-ship class seen this batch,
+            # same reduction pattern as top_class above.
+            dossier_top_class = max(
+                _dossier_ship_classes,
+                key=lambda c: ShipThreatClass(c).urgency,
+                default=ShipThreatClass.UNKNOWN,
+            )
             assessment = compute_threat_score(
                 local_hostile_count=len(names) if names else 0,
                 is_kos=_any_kos,
@@ -2768,6 +2852,12 @@ class AlertAgent:
                 history_frequency=_max_history_frequency,
                 history_is_regular_route=_any_history_regular_route,
                 is_watchlisted=_any_watchlisted,
+                dossier_top_ship_class=(
+                    dossier_top_class.value
+                    if dossier_top_class != ShipThreatClass.UNKNOWN
+                    else ""
+                ),
+                dossier_gang_avg=_max_dossier_gang_avg,
             )
             colour = {"CRITICAL": "red", "HIGH": "yellow", "CAUTION": "cyan"}[assessment.label]
             self._ui(self.main.write_message, str(assessment), colour)
@@ -3179,6 +3269,39 @@ class AlertAgent:
                     await asyncio.sleep(300)
                     continue
 
+                # #242: local-data danger window, independent of the
+                # zKB-backed heatmap check below -- runs every time this
+                # loop wakes with a known system, regardless of whether
+                # the zKB fetch below succeeds, so a zKB outage doesn't
+                # also silence this locally-sourced signal. Only fires on
+                # the OFF -> ON transition into a danger window, not on
+                # every hourly check while one stays open.
+                try:
+                    from evealert.tools.hunting_grounds import (  # noqa: PLC0415
+                        system_danger_windows,
+                    )
+
+                    danger = await system_danger_windows(system)
+                    if danger.danger_now and not self._last_danger_window_active:
+                        window_desc = (
+                            f"historically hot {danger.hot_window}"
+                            if danger.hot_window
+                            else "a historically busy hour"
+                        )
+                        pct_desc = (
+                            f" — {danger.hot_window_pct:.0f}% of local kills land in this window"
+                            if danger.hot_window_pct
+                            else ""
+                        )
+                        self._ui(
+                            self.main.write_message,
+                            f"⚠ DANGER WINDOW: {system} {window_desc}{pct_desc}",
+                            "yellow",
+                        )
+                    self._last_danger_window_active = danger.danger_now
+                except Exception as exc:
+                    logger.debug("Local danger-window check failed: %s", exc)
+
                 heatmap = await get_constellation_heatmap(system, days=7)
                 if not heatmap:
                     await asyncio.sleep(3600)
@@ -3419,6 +3542,10 @@ class AlertAgent:
                 system=system,
                 time=time.strftime("%H:%M:%S"),
                 count=self.statistics.session_alarms,
+                # #243: most recently completed alarm's dossier line, or
+                # "" when none is available -- see _augment_with_esi for
+                # why this can't be *this* alarm's own dossier.
+                dossier=self._last_dossier_text,
             )
         except (KeyError, ValueError, IndexError) as exc:
             logger.warning(
