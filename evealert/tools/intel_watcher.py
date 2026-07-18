@@ -31,10 +31,13 @@ _POLL_INTERVAL = 2.0
 # Maximum bytes to read per poll cycle (prevents runaway memory on huge appends)
 _MAX_READ = 65_536
 
-# EVE log filenames are '<ChannelName>_<YYYYMMDD>_<HHMMSS>.txt'. Anchored on
-# the trailing date/time suffix (not split on the first underscore) so
-# multi-word/hyphenated channel names like 'Local_D7-ZAC' stay intact (#191).
-_LOG_FILENAME_RE = re.compile(r"^(.*)_\d{8}_\d{6}\.txt$", re.IGNORECASE)
+# EVE log filenames are '<ChannelName>_<YYYYMMDD>_<HHMMSS>_<ownerID>.txt'
+# (the trailing owner/character ID segment is present on real EVE clients;
+# the two-part '<YYYYMMDD>_<HHMMSS>.txt' suffix is kept optional for older
+# logs/fixtures that lack it, #226). Anchored on the trailing date/time
+# suffix (not split on the first underscore) so multi-word/hyphenated
+# channel names like 'Local_D7-ZAC' or 'I. Ftn Intel' stay intact (#191).
+_LOG_FILENAME_RE = re.compile(r"^(.*)_\d{8}_\d{6}(?:_\d+)?\.txt$", re.IGNORECASE)
 
 
 def get_eve_chatlog_dir() -> Path | None:

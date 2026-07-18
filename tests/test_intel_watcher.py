@@ -163,6 +163,22 @@ class TestDiscoverChannels(unittest.TestCase):
 
         self.assertEqual(result, ["Alpha", "Mid", "Zeta"])
 
+    def test_real_eve_filenames_with_owner_id_suffix_are_discovered(self):
+        """#226: real EVE clients append a trailing '_<ownerID>' segment
+        before '.txt' -- '<Channel>_<YYYYMMDD>_<HHMMSS>_<ownerID>.txt'.
+        The old regex, anchored on '_YYYYMMDD_HHMMSS.txt$', never matched
+        these real filenames, so discover_channels() silently returned []."""
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "I. Ftn Intel_20260718_120036_620084186.txt").write_text("x")
+            (d / "I. C Ring Intel_20260718_120036_620084186.txt").write_text("x")
+
+            result = discover_channels(d)
+
+        self.assertEqual(result, ["I. C Ring Intel", "I. Ftn Intel"])
+
 
 class TestIntelWatcherTailOnce(unittest.TestCase):
     def test_callback_called_for_new_lines(self):
