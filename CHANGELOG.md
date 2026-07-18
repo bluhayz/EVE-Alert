@@ -1,5 +1,43 @@
 # Changelog
 
+## [7.4.0] 2026-07-18
+
+### Added — Enemy Analytics & Situational Awareness (#241-#244)
+
+Turns the v7.3 data foundation into in-the-moment situational awareness:
+per-pilot combat dossiers, hunting-ground/danger-window analytics,
+dossier-enriched alarms and threat scoring, and an Intel Analytics UI
+with export. Completes the Enemy Combat Analytics epic.
+
+- **Pilot combat dossier engine (#241)**: new `pilot_dossier.py` answers
+  "who is this pilot operationally" in one call — ships flown (with
+  frequencies), hunting grounds, active hours/prime window, gang
+  size/solo %, and inferred fleetmates (pilots sharing 3+ killmails).
+  Prefers the cached v7.3 rollup for full-history aggregates and falls
+  back to a bounded recent-activity read, so it's safe to call from the
+  alarm path.
+- **Hunting-ground analytics (#242)**: new `hunting_grounds.py` —
+  `group_activity()` ranks a corp/alliance's top systems, pilots, gang
+  size, and 7d-vs-30d trend; `system_danger_windows()` aggregates a
+  system plus its neighbors within 2 jumps into an hourly kill histogram
+  and a `danger_now` flag, entirely from local data (zero network calls
+  in this module). Wired into the engine as a "Danger window:" log line
+  that fires once per transition into a historically hot hour, gated
+  behind the existing peak-hours-warning setting.
+- **Dossier-enriched alarms and threat scoring (#243)**: Enemy alarms now
+  show a `Dossier:` line when one exists; the composite threat score
+  gains two optional signals — a dossier top-ship class of tackle/dictor,
+  and a normally-gang-flying pilot showing up alone in Local (advance-
+  scout pattern). Both default to no-op, so pre-#243 scores are
+  unaffected. The webhook template gains an optional `{dossier}`
+  variable (empty by default).
+- **Intel Analytics UI (#244)**: new "Intel Analytics" window — a pilot
+  search/dossier browser (ships, hunting grounds, fleetmates, 24h
+  activity, recent sightings), a top-hostiles board ranked by a
+  recency-weighted encounter score, and a group view over
+  `group_activity()`, with CSV/JSON export. All store reads run on a
+  background thread, delivered back to the UI via Qt signal.
+
 ## [7.3.0] 2026-07-18
 
 ### Added — Combat Intelligence Data Foundation (#237-#240)
