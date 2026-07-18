@@ -37,6 +37,14 @@ _NAME_CACHE_TTL = 86400  # system names never change — cache for 24 h
 _SOV_CACHE_TTL = 300  # sovereignty refreshes every 5 min
 _KILL_COUNT_CACHE_TTL = 300  # #172: zKB etiquette -- reuse kill counts for 5 min
 
+# #177: soak reliability -- system/neighbor identity never changes, so
+# caching it forever is correct, but a long-running session with no size
+# guard at all is a latent unbounded-growth risk (e.g. a bug that feeds
+# garbage IDs in a loop). EVE has ~8000 solar systems; this ceiling is
+# comfortably above normal usage and only protects against a pathological
+# case, not normal route-checking/multi-client activity.
+_MAX_IDENTITY_CACHE_SIZE = 10_000
+
 # #172: route-avoidance search tuning
 _ROUTE_SEARCH_MAX_HOPS = 30
 _ROUTE_SEARCH_MAX_ZKB_CALLS = 50  # cap total zKB probes per suggestion
@@ -203,6 +211,18 @@ class UniverseCache:
         if system_id in self._neighbors:
             return self._neighbors[system_id]
         neighbors = await self._fetch_neighbors(system_id)
+        # #177: simple size guard, not an LRU -- system identity never
+        # changes so there's no "staleness" to purge by age, only a
+        # pathological-growth backstop. Clearing (rather than evicting
+        # piecemeal) is safe: this is a pure cache, re-fetching from ESI
+        # is the only cost.
+        if len(self._neighbors) >= _MAX_IDENTITY_CACHE_SIZE:
+            logger.warning(
+                "UniverseCache: _neighbors exceeded %d entries -- clearing "
+                "(this should not happen in normal use)",
+                _MAX_IDENTITY_CACHE_SIZE,
+            )
+            self._neighbors.clear()
         self._neighbors[system_id] = neighbors
         return neighbors
 
@@ -637,6 +657,23 @@ class UniverseCache:
         except Exception as exc:
             logger.debug("ZKB kills failed for %d: %s", system_id, exc)
             return 0
+
+    def purge_expired_kill_counts(self) -> int:
+        """Drop _kill_count_cache entries past _KILL_COUNT_CACHE_TTL (#177).
+
+        The TTL check inside _zkb_kills_last_hour() only skips a stale
+        entry on read -- it never evicts one, so a system probed once
+        during a single route search and never queried again sits in the
+        cache indefinitely. Returns the number of entries removed.
+        """
+        now = time.time()
+        stale = [
+            sid for sid, (ts, _) in self._kill_count_cache.items()
+            if now - ts >= _KILL_COUNT_CACHE_TTL
+        ]
+        for sid in stale:
+            del self._kill_count_cache[sid]
+        return len(stale)
 
     async def get_security_status(self, system_id: int) -> float | None:
         """Return the system's ESI security_status (-1.0..1.0), cached

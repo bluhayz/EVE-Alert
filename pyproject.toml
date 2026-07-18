@@ -80,6 +80,18 @@ ocr = [
 build-windows = [
     "pyinstaller==6.11.0",
 ]
+# Optional Desktop Duplication API capture backend (#176, v7.2) --
+# typically 3-10x faster than mss at high capture rates. Windows-only;
+# WindowCapture falls back to mss with a log line when unavailable, so
+# this extra is opt-in, not required. pip install ".[capture-dx]"
+capture-dx = [
+    "dxcam>=0.0.5; sys_platform == 'win32'",
+]
+# tools/soak_test.py's RSS/thread/FD sampling (#177, v7.2) -- dev-only,
+# not needed to run the app itself. pip install ".[soak]"
+soak = [
+    "psutil>=5.9",
+]
 # Install macOS build tools: pip install ".[build-macos]"
 build-macos = [
     "pyinstaller==6.11.0",

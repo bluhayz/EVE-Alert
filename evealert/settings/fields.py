@@ -25,6 +25,10 @@ FIELDS: list = [
               "Alert on probes detected", "dscan_probes_var", True),
     FieldSpec("dscan.alert_new_signatures", "bool", "Detection", "D-Scan Monitor",
               "Alert when cosmic signature count increases (possible WH connection)", "dscan_new_sig_var", True),
+    # Vision pipeline performance pass (#175)
+    FieldSpec("detection.downscale", "float", "Detection", "Performance",
+              "Downscale factor (0.1-1.0, lower = faster but less precise; 1.0 = off)",
+              "detection_downscale_entry", 1.0),
     # --- Alerts & Sound tab --------------------------------------------------
     FieldSpec("notifications.auto_screenshot", "bool", "Alerts & Sound", "Alarm Options",
               "Auto-screenshot on alarm", "auto_screenshot_var", False),

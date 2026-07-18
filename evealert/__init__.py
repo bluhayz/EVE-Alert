@@ -1,4 +1,4 @@
 """Initialize the app"""
 
-__version__ = "7.1.1"
+__version__ = "7.2.0"
 __title__ = "EVE Alert"

@@ -86,6 +86,22 @@ class ZkillboardClient:
         self._cache.clear()
         self._system_id_cache.clear()
 
+    def purge_expired(self) -> int:
+        """Drop cache entries past _CACHE_TTL (#177 soak reliability).
+
+        Without this, a system looked up once and never again (e.g. a
+        one-off zKB check while passing through) sits in _cache forever
+        past its TTL -- the TTL check on read only skips a stale entry,
+        it never evicts it, so the entry just occupies memory
+        indefinitely until/unless the same system is queried again.
+        Returns the number of entries removed.
+        """
+        now = time.time()
+        stale = [k for k, (ts, _) in self._cache.items() if now - ts >= _CACHE_TTL]
+        for key in stale:
+            del self._cache[key]
+        return len(stale)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

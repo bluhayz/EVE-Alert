@@ -28,8 +28,30 @@ DEFAULT_SETTINGS: dict = {
     "alert_region_2": {"x": 0, "y": 0},
     "faction_region_1": {"x": 0, "y": 0},
     "faction_region_2": {"x": 0, "y": 0},
+    # #174: multi-client support (MVP). Empty by default -- every existing
+    # install keeps reading the legacy top-level alert_region_1/2 /
+    # faction_region_1/2 keys above exactly as before. A non-empty list's
+    # first entry becomes the primary region source instead (one-way
+    # migration: the top-level keys are then ignored, not kept in sync).
+    # Each entry: {name, character, alert_region_1, alert_region_2,
+    # faction_region_1, faction_region_2, enabled}. No Settings UI for
+    # editing this list yet -- add entries directly to settings.json.
+    "clients": [],
     "detectionscale": {"value": 90},
     "faction_scale": {"value": 90},
+    "detection": {
+        # #175: vision pipeline performance pass. downscale < 1.0 shrinks
+        # both the captured region and the templates before matching --
+        # faster, at the cost of losing fine-grained pixel detail (a small
+        # icon might stop matching reliably below ~0.5). 1.0 = no scaling.
+        "downscale": 1.0,
+        # #176: "mss" (default -- unchanged behavior for existing installs),
+        # "auto" (try dxcam, fall back to mss), or "dxcam" (force dxcam,
+        # same fallback). dxcam is an optional dependency ([capture-dx]
+        # extra) and a new, less-battle-tested capture path, so it's
+        # opt-in rather than the default even under "auto".
+        "capture_backend": "mss",
+    },
     "cooldown_timer": {"value": DEFAULT_COOLDOWN_TIMER},
     "volume": {"value": 100},
     "server": {

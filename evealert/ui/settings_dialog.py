@@ -271,6 +271,23 @@ class SettingsDialog(QDialog):
         form4.addRow("Log Level:", self._log_level)
         det.addWidget(box4)
 
+        # Capture backend (#176) -- shares the "Performance" section box
+        # with the registry-driven detection.downscale field (#175); the
+        # registry loop appends into this same _get_section() result.
+        form5 = self._get_section("Detection", "Performance")
+        self._capture_backend_combo = QComboBox()
+        self._capture_backend_combo.addItems(["mss", "auto", "dxcam"])
+        self._capture_backend_combo.setToolTip(
+            "mss: the original screenshotter, always available.\n"
+            "auto: try dxcam (faster, Windows-only, needs the optional\n"
+            "  dxcam package), fall back to mss if unavailable.\n"
+            "dxcam: force dxcam; falls back to mss with a log line if\n"
+            "  it can't be used. Coordinates are relative to the primary\n"
+            "  monitor -- if EVE runs on a secondary monitor and capture\n"
+            "  looks wrong, switch back to mss."
+        )
+        form5.addRow("Capture Backend:", self._capture_backend_combo)
+
     # ── Non-registry: Alerts & Sound tab ──────────────────────────────
 
     def _build_sound_sections(self) -> None:
@@ -690,6 +707,11 @@ class SettingsDialog(QDialog):
         # Log level
         self._log_level.setCurrentText(settings.get("log_level", "INFO"))
 
+        # Capture backend (#176)
+        self._capture_backend_combo.setCurrentText(
+            settings.get("detection", {}).get("capture_backend", "mss")
+        )
+
         # Alerts & Sound
         server = settings.get("server", {})
         self._system_name.setText(server.get("system", ""))
@@ -771,6 +793,11 @@ class SettingsDialog(QDialog):
         patch["detectionscale"] = {"value": self._enemy_threshold.value()}
         patch["faction_scale"] = {"value": self._faction_threshold.value()}
         patch["log_level"] = self._log_level.currentText()
+        # #176: shares patch["detection"] with the registry-driven
+        # downscale field below (both use setdefault, so order is safe).
+        patch.setdefault("detection", {})["capture_backend"] = (
+            self._capture_backend_combo.currentText()
+        )
 
         # Alerts & Sound
         patch["server"] = {

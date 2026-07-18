@@ -1,5 +1,56 @@
 # Changelog
 
+## [7.2.0] 2026-07-18
+
+### Added — v7.2: Multiboxing & Performance (#174, #175, #176, #177)
+
+Cuts steady-state vision CPU by ~94% on a static workload, adds an optional
+Desktop Duplication capture backend, ships an MVP of multi-client support for
+multiboxers, and closes out the long-session memory-growth audit.
+
+- **Vision pipeline performance pass (#175)**: `evealert/tools/vision.py`
+  gained a frame-change short-circuit (skip re-matching entirely when the
+  captured region is byte-identical to the previous poll — the common case
+  for a static Local roster), needle-normalization caching (dtype-cast +
+  `cv.normalize()` no longer redone ~10x/sec per template), and an optional
+  `detection.downscale` factor. Benchmark harness at `tools/bench_vision.py`
+  measured **3.49ms → 0.19ms per frame (94.5% reduction)** on a static
+  workload — comfortably past the ≥50% target. Deliberately did *not*
+  implement literal cross-template "stop at first match": it would silently
+  drop points from a second template matching the same frame, which the
+  existing per-enemy dedup (#100/#213) relies on for multi-hostile tracking.
+- **dxcam capture backend (#176)**: `windowscapture.py` gained a
+  `CaptureBackend` protocol with `MssBackend` (unchanged default) and
+  `DxcamBackend` (Windows Desktop Duplication API, optional `[capture-dx]`
+  extra) implementations, hot-swappable via `detection.capture_backend`
+  (`mss`/`auto`/`dxcam`, defaulting to `mss` — an unproven-in-this-app native
+  capture path shouldn't become every existing user's default overnight).
+  Clean fallback with a one-time log line when dxcam isn't installed.
+- **Multi-client support, MVP (#174)**: new `clients: [...]` settings list
+  (legacy single-region keys keep working with zero user action — a
+  non-empty list's first entry becomes the primary client, one-way
+  migration). Each additional client gets its own `WindowCapture`/`Vision`
+  pair and fully independent dedup/cooldown state, so one client's alarm
+  cooldown can never suppress another's. Alarms from extra clients are
+  prefixed (`[ClientName] Enemy Appears!`). Threat score/ESI/Discord
+  webhook-template/push notifications/OCR identity resolution stay
+  primary-client/global-only in this pass — no Config Mode client-selector
+  UI or status-chip row yet (follow-up). 3-client benchmark: aggregate cost
+  scales linearly (~3x for 3x clients), no cross-client interference.
+- **Long-session soak reliability (#177)**: audited and fixed the
+  named unbounded-growth candidates — `_seen_enemies` was already correctly
+  bounded (verified, no fix needed); added `purge_expired()`/
+  `purge_expired_kill_counts()`/`purge_expired_cache()` to the zKillboard,
+  universe kill-count, and constellation-heatmap TTL caches (previously:
+  TTL-checked on read but never evicted, so an entry looked up once and
+  never revisited sat in memory for the life of the process); added a size
+  guard to the permanent `_neighbors` identity cache. A new periodic
+  cache-maintenance task purges all three every 15 minutes. New
+  `tools/soak_test.py` drives the alarm-dispatch/dedup machinery with
+  synthetic sightings and samples RSS/thread/task counts to CSV — the
+  automatable slice of this issue; a genuine multi-hour RSS-slope
+  measurement still needs a human to run it for real.
+
 ## [7.1.1] 2026-07-18
 
 ### Fixed — flaky R2Z2 stale-sequence test under Python 3.12 (CI)

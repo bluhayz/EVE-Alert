@@ -29,6 +29,22 @@ _CACHE: dict[tuple, tuple[float, dict]] = {}
 _CACHE_TTL = 3600  # seconds
 
 
+def purge_expired_cache() -> int:
+    """Drop _CACHE entries past _CACHE_TTL (#177 soak reliability).
+
+    The TTL check inside get_constellation_heatmap() only skips a stale
+    entry on read -- it never evicts one, so a constellation looked up
+    once (e.g. checked before undocking, never revisited) sits in this
+    module-level cache indefinitely for the life of the process. Returns
+    the number of entries removed.
+    """
+    now = time.time()
+    stale = [key for key, (ts, _) in _CACHE.items() if now - ts >= _CACHE_TTL]
+    for key in stale:
+        del _CACHE[key]
+    return len(stale)
+
+
 @dataclass
 class HeatmapEntry:
     system: str

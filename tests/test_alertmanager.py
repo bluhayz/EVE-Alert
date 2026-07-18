@@ -83,6 +83,73 @@ class TestAlertAgent(unittest.TestCase):
         self.assertEqual(self.agent.volume, 1.0)  # 100% -> 1.0
         self.assertEqual(self.agent.cooldowntimer, 30)
 
+    def test_load_settings_capture_backend_defaults_to_mss(self):
+        """#176: detection.capture_backend defaults to 'mss' -- existing
+        installs must see zero behavior change unless they opt in."""
+        self.agent.load_settings()
+        self.assertEqual(self.agent.wincap._backend_name, "mss")
+
+    def test_load_settings_capture_backend_reads_explicit_value(self):
+        settings = dict(self.test_settings)
+        settings["detection"] = {"capture_backend": "dxcam"}
+        with open(self.settings_path, "w") as f:
+            json.dump(settings, f)
+        reset_settings_store(self.settings_path)
+
+        self.agent.load_settings()
+
+        self.assertEqual(self.agent.wincap._backend_name, "dxcam")
+
+    def test_load_settings_capture_backend_hot_swap_closes_old_backend(self):
+        """A settings reload while running must reconfigure the SAME
+        wincap instance (hot-reload), not silently keep the old backend."""
+        self.agent.load_settings()  # backend_name="mss" (default)
+        mock_backend = MagicMock()
+        self.agent.wincap._backend = mock_backend
+        self.agent.wincap._backend_name = "mss"
+
+        settings = dict(self.test_settings)
+        settings["detection"] = {"capture_backend": "dxcam"}
+        with open(self.settings_path, "w") as f:
+            json.dump(settings, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+
+        mock_backend.close.assert_called_once()
+        self.assertEqual(self.agent.wincap._backend_name, "dxcam")
+
+    def test_load_settings_detection_downscale_defaults_to_1_0(self):
+        """#175: detection.downscale defaults to 1.0 (off) when absent."""
+        self.agent.load_settings()
+        self.assertEqual(self.agent._detection_downscale, 1.0)
+
+    def test_load_settings_detection_downscale_reads_explicit_value(self):
+        settings = dict(self.test_settings)
+        settings["detection"] = {"downscale": 0.5}
+        with open(self.settings_path, "w") as f:
+            json.dump(settings, f)
+        reset_settings_store(self.settings_path)
+
+        self.agent.load_settings()
+
+        self.assertEqual(self.agent._detection_downscale, 0.5)
+
+    def test_load_settings_detection_downscale_clamped_to_valid_range(self):
+        settings = dict(self.test_settings)
+        settings["detection"] = {"downscale": 5.0}  # above max
+        with open(self.settings_path, "w") as f:
+            json.dump(settings, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+        self.assertEqual(self.agent._detection_downscale, 1.0)
+
+        settings["detection"] = {"downscale": 0.0}  # at/below min
+        with open(self.settings_path, "w") as f:
+            json.dump(settings, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+        self.assertEqual(self.agent._detection_downscale, 0.1)
+
     def test_load_settings_pilot_history_retention_defaults_to_180(self):
         """#214: intelligence.pilot_history_retention_days defaults to 180
         when not present in settings.json."""
@@ -2183,6 +2250,94 @@ class RouteCheckGateCampTests(unittest.IsolatedAsyncioTestCase):
 
         messages = self._logged_messages()
         self.assertTrue(any("no path found" in m for m in messages))
+
+
+class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
+    """#177: the periodic cache-maintenance task purges expired TTL-cache
+    entries from the universe/zKillboard/heatmap caches."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        from evealert.tools import threat_heatmap
+        from evealert.tools.universe import get_universe_cache
+        from evealert.tools.zkillboard import get_client
+
+        # These are process-wide singletons -- clear the synthetic entries
+        # this test class seeded so they don't leak into other tests.
+        get_universe_cache()._kill_count_cache.clear()
+        get_client()._cache.clear()
+        threat_heatmap._CACHE.clear()
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _run_one_cycle(self):
+        """Drive _cache_maintenance_task() through exactly one loop body
+        execution, same mocked-sleep pattern as GateCampMonitorTests."""
+        self.agent.running = True
+        call_count = {"n": 0}
+
+        async def fake_sleep(_):
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                self.agent.running = False
+
+        with patch("evealert.manager.alertmanager.asyncio.sleep", new=fake_sleep):
+            await self.agent._cache_maintenance_task()
+
+    async def test_purges_expired_entries_from_all_three_caches(self):
+        from evealert.tools import threat_heatmap
+        from evealert.tools.universe import get_universe_cache
+        from evealert.tools.zkillboard import get_client
+
+        stale = time.time() - 100_000
+        get_universe_cache()._kill_count_cache[30000142] = (stale, 5)
+        get_client()._cache["stale-system"] = (stale, None)
+        threat_heatmap._CACHE[("STALE", 7)] = (stale, {})
+
+        await self._run_one_cycle()
+
+        self.assertNotIn(30000142, get_universe_cache()._kill_count_cache)
+        self.assertNotIn("stale-system", get_client()._cache)
+        self.assertNotIn(("STALE", 7), threat_heatmap._CACHE)
+
+    async def test_fresh_entries_survive_a_cycle(self):
+        from evealert.tools import threat_heatmap
+        from evealert.tools.universe import get_universe_cache
+        from evealert.tools.zkillboard import get_client
+
+        now = time.time()
+        get_universe_cache()._kill_count_cache[30000142] = (now, 5)
+        get_client()._cache["fresh-system"] = (now, None)
+        threat_heatmap._CACHE[("FRESH", 7)] = (now, {})
+
+        await self._run_one_cycle()
+
+        self.assertIn(30000142, get_universe_cache()._kill_count_cache)
+        self.assertIn("fresh-system", get_client()._cache)
+        self.assertIn(("FRESH", 7), threat_heatmap._CACHE)
+
+    async def test_a_purge_failure_does_not_crash_the_loop(self):
+        with patch(
+            "evealert.tools.universe.get_universe_cache",
+            side_effect=RuntimeError("boom"),
+        ):
+            await self._run_one_cycle()  # must not raise
 
 
 if __name__ == "__main__":

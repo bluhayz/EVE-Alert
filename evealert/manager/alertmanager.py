@@ -54,6 +54,63 @@ class _EnemySighting(NamedTuple):
     last_alarm: float   # epoch of most-recent alarm trigger
     rearm_at: float     # epoch when re-alert is due (0 = never)
 
+
+class _ExtraClient:
+    """Runtime state for one ADDITIONAL EVE client beyond the primary
+    (#174 multi-client support, MVP scope).
+
+    The primary/first client continues to use AlertAgent's existing
+    singular self.x1/self.enemy/self.wincap/self.alert_vision/
+    self._seen_enemies attributes completely unchanged -- every existing
+    single-client install has zero behavior change. Additional clients
+    (settings["clients"][1:]) get their own independent WindowCapture +
+    Vision pair and dedup state here, so one client's cooldown/rearm
+    tracking can never suppress or interfere with another's.
+
+    Cooldown/trigger-count/currently-playing-sound state for extra
+    clients lives in AlertAgent's existing dicts, keyed by
+    (client_name, alarm_type) instead of a bare alarm_type string --
+    see play_sound()/alarm_detection()/reset_alarm().
+    """
+
+    def __init__(
+        self,
+        name: str,
+        character: str,
+        x1: int, y1: int, x2: int, y2: int,
+        x1_faction: int, y1_faction: int, x2_faction: int, y2_faction: int,
+        enabled: bool,
+        needle_paths: list,
+        needle_faction_paths: list,
+    ) -> None:
+        self.name = name
+        self.character = character
+        self.x1, self.y1, self.x2, self.y2 = x1, y1, x2, y2
+        self.x1_faction, self.y1_faction = x1_faction, y1_faction
+        self.x2_faction, self.y2_faction = x2_faction, y2_faction
+        self.enabled = enabled
+        self.wincap = WindowCapture()
+        self.vision = Vision(needle_paths)
+        self.vision_faction = Vision(needle_faction_paths)
+        self.enemy = False
+        self.faction = False
+        self.enemy_points: list = []
+        self.seen_enemies: dict = {}
+
+    def region_key(self) -> tuple:
+        """Identity+region fingerprint used to decide whether a settings
+        reload can reuse this client's runtime state (preserving dedup/
+        cooldown history) or must rebuild it from scratch."""
+        return (
+            self.name, self.x1, self.y1, self.x2, self.y2,
+            self.x1_faction, self.y1_faction, self.x2_faction, self.y2_faction,
+        )
+
+    def close(self) -> None:
+        self.wincap.close()
+        self.vision.clean_up()
+        self.vision_faction.clean_up()
+
 # Sound file paths (safe to resolve at import time — no directory listing)
 ALARM_SOUND = get_resource_path(f"{SOUND_FOLDER}/{ALARM_SOUND_FILE}")
 FACTION_SOUND = get_resource_path(f"{SOUND_FOLDER}/{FACTION_SOUND_FILE}")
@@ -147,6 +204,10 @@ class AlertAgent:
     # separate hostile reports.
     _INTEL_DEDUP_WINDOW_SECONDS = 30
 
+    # #177: how often the cache-maintenance task purges expired TTL-cache
+    # entries (zKB kill lookups, universe kill-count/heatmap caches).
+    _CACHE_MAINTENANCE_INTERVAL_SECONDS = 900  # 15 minutes
+
     def __init__(self, main: "MainMenu"):
         self.main = main
         # Bridge + store must be created first so the rest of __init__ can use them
@@ -163,6 +224,8 @@ class AlertAgent:
         # Detection settings
         self.detection = 90
         self.detection_faction = 90
+        # #175: vision pipeline downscale factor (1.0 = off)
+        self._detection_downscale = 1.0
 
         # Load template images with a user-facing error on failure
         try:
@@ -192,6 +255,12 @@ class AlertAgent:
         self._seen_enemies: dict = {}
         self._rearm_minutes: int = 0  # 0 = disabled
 
+        # #174: additional EVE clients beyond the primary (empty by
+        # default -- every existing single-client install stays exactly
+        # as it was). Populated by load_settings() from settings["clients"].
+        self._extra_clients: list = []
+        self._extra_client_tasks: list = []
+
         # #213: per-icon name resolution, throttled independently of the
         # main 0.1-0.2s poll loop so OCR doesn't run on every single cycle.
         self._last_identity_keys: frozenset = frozenset()
@@ -209,6 +278,7 @@ class AlertAgent:
         self._sov_task = None
         self._esi_standings_task = None
         self._gatecamp_task = None
+        self._cache_maintenance_task_handle = None
 
         # Alarm settings
         self.cooldown_timers: dict = {}
@@ -664,6 +734,18 @@ class AlertAgent:
             self.vision_faction_t = self.loop.create_task(self.vision_faction_thread())
             self.alert_t = self.loop.create_task(self.run())
 
+            # #174: one vision task pair per enabled extra client.
+            self._extra_client_tasks = []
+            for client in self._extra_clients:
+                if not client.enabled:
+                    continue
+                self._extra_client_tasks.append(
+                    self.loop.create_task(self._extra_client_vision_thread(client))
+                )
+                self._extra_client_tasks.append(
+                    self.loop.create_task(self._extra_client_vision_faction_thread(client))
+                )
+
             # Start intel log watcher(s) if configured -- one per channel (#171)
             if self._intel_log_enabled and self._intel_channels:
                 self._intel_watchers = self._build_intel_watchers()
@@ -763,6 +845,12 @@ class AlertAgent:
             # Peak hours monitor (#151)
             if self._peak_hours_warning:
                 self.loop.create_task(self._peak_hours_monitor())
+            # #177: periodic TTL-cache purge, always on (independent of
+            # any single feature toggle -- zKB-on-alarm alone populates
+            # these caches over a long session).
+            self._cache_maintenance_task_handle = self.loop.create_task(
+                self._cache_maintenance_task()
+            )
             # Notify plugins that detection has started
             try:
                 from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
@@ -791,11 +879,19 @@ class AlertAgent:
             self._sov_task,
             self._esi_standings_task,
             self._gatecamp_task,
+            self._cache_maintenance_task_handle,
+            *self._extra_client_tasks,
         ):
             if task is not None and not task.done():
                 task.cancel()
-        # Close the mss capture backend on the thread that created it (#190)
+        # Close the mss/dxcam capture backend(s) on the thread that created
+        # them (#190) -- extra clients' WindowCapture instances (#174) were
+        # ALSO created on this same alert thread (inside their vision
+        # tasks), so they must be closed here too, not from stop()'s caller
+        # thread.
         self.wincap.close()
+        for client in self._extra_clients:
+            client.wincap.close()
         self.loop.stop()
 
     def stop(self) -> None:
@@ -847,6 +943,7 @@ class AlertAgent:
             self._killmail_monitor = None
             self._r2z2_consumer = None
             self._intel_watchers = []
+            self._extra_client_tasks = []
             # NOTE: wincap.close() is intentionally NOT called here — it runs via
             # _shutdown_loop() on the alert thread to respect mss thread affinity.
             self.currently_playing_sounds.clear()
@@ -885,16 +982,45 @@ class AlertAgent:
                     self._ui(self.main.write_message, f"  - {error}", "red")
                 return
 
-            self.x1 = int(settings["alert_region_1"]["x"])
-            self.y1 = int(settings["alert_region_1"]["y"])
-            self.x2 = int(settings["alert_region_2"]["x"])
-            self.y2 = int(settings["alert_region_2"]["y"])
-            self.x1_faction = int(settings["faction_region_1"]["x"])
-            self.y1_faction = int(settings["faction_region_1"]["y"])
-            self.x2_faction = int(settings["faction_region_2"]["x"])
-            self.y2_faction = int(settings["faction_region_2"]["y"])
+            # #174: multi-client support (MVP). A non-empty settings["clients"]
+            # list makes clients[0] the primary region source -- still the
+            # SAME self.x1/y1/x2/y2 attributes every other part of the engine
+            # already reads, just sourced from the list instead of the
+            # top-level keys. clients[1:] become extra, independent clients
+            # (see _rebuild_extra_clients() below). An absent/empty list (the
+            # default, and every pre-#174 install) reads the legacy
+            # top-level alert_region_1/2 keys exactly as before -- one-way
+            # migration, zero behavior change until a user opts in.
+            clients_setting = settings.get("clients") or []
+            if clients_setting:
+                primary = clients_setting[0]
+                self.x1 = int(primary.get("alert_region_1", {}).get("x", 0))
+                self.y1 = int(primary.get("alert_region_1", {}).get("y", 0))
+                self.x2 = int(primary.get("alert_region_2", {}).get("x", 0))
+                self.y2 = int(primary.get("alert_region_2", {}).get("y", 0))
+                self.x1_faction = int(primary.get("faction_region_1", {}).get("x", 0))
+                self.y1_faction = int(primary.get("faction_region_1", {}).get("y", 0))
+                self.x2_faction = int(primary.get("faction_region_2", {}).get("x", 0))
+                self.y2_faction = int(primary.get("faction_region_2", {}).get("y", 0))
+            else:
+                self.x1 = int(settings["alert_region_1"]["x"])
+                self.y1 = int(settings["alert_region_1"]["y"])
+                self.x2 = int(settings["alert_region_2"]["x"])
+                self.y2 = int(settings["alert_region_2"]["y"])
+                self.x1_faction = int(settings["faction_region_1"]["x"])
+                self.y1_faction = int(settings["faction_region_1"]["y"])
+                self.x2_faction = int(settings["faction_region_2"]["x"])
+                self.y2_faction = int(settings["faction_region_2"]["y"])
             self.detection = int(settings["detectionscale"]["value"])
             self.detection_faction = int(settings["faction_scale"]["value"])
+            # #175: clamp to a sane range -- 0 or negative would make every
+            # cv.resize() call a no-op-or-crash rather than "off".
+            downscale = float(settings.get("detection", {}).get("downscale", 1.0))
+            self._detection_downscale = max(0.1, min(downscale, 1.0))
+            # #176: hot-swappable capture backend. set_backend() is a no-op
+            # when unchanged, so this is safe to call on every reload.
+            capture_backend = str(settings.get("detection", {}).get("capture_backend", "mss"))
+            self.wincap.set_backend(capture_backend)
             self.cooldowntimer = int(settings["cooldown_timer"]["value"])
             self.volume = settings.get("volume", {}).get("value", 100) / 100.0
             self.mute = settings["server"]["mute"]
@@ -1128,6 +1254,69 @@ class AlertAgent:
                     self.set_vision_faction()
                 self._ui(self.main.write_message, "Settings: Loaded.", "green")
 
+            # #174: extra clients (settings["clients"][1:]) get their own
+            # Vision instances built from the current template set. Runs
+            # on every load_settings() call (not gated by
+            # self._settings_store.changed like the alert_vision refresh
+            # above) so the very first call -- from __init__, where
+            # nothing has "changed" yet -- still picks up any clients
+            # already present in settings.json. _rebuild_extra_clients()
+            # is a cheap no-op when the desired config already matches
+            # what's running.
+            self._rebuild_extra_clients(clients_setting[1:], self._alert_files, self._faction_files)
+
+    def _rebuild_extra_clients(
+        self, client_configs: list, alert_files: list, faction_files: list
+    ) -> None:
+        """(Re)build self._extra_clients from settings["clients"][1:]
+        (#174). A no-op when the desired client list is identical to what's
+        already running (name + all region coords unchanged), so an
+        unrelated settings save doesn't reset every extra client's dedup/
+        cooldown history. Old clients are closed (releasing their
+        WindowCapture/Vision resources) before new ones are built.
+        """
+        desired: list[tuple] = []
+        for cfg in client_configs:
+            if not isinstance(cfg, dict):
+                continue
+            desired.append((
+                str(cfg.get("name", "")).strip() or "Client",
+                int(cfg.get("alert_region_1", {}).get("x", 0)),
+                int(cfg.get("alert_region_1", {}).get("y", 0)),
+                int(cfg.get("alert_region_2", {}).get("x", 0)),
+                int(cfg.get("alert_region_2", {}).get("y", 0)),
+                int(cfg.get("faction_region_1", {}).get("x", 0)),
+                int(cfg.get("faction_region_1", {}).get("y", 0)),
+                int(cfg.get("faction_region_2", {}).get("x", 0)),
+                int(cfg.get("faction_region_2", {}).get("y", 0)),
+            ))
+
+        current = [c.region_key() for c in self._extra_clients]
+        if desired == current:
+            # Region/identity unchanged -- still refresh `enabled` and
+            # `character` in place (cheap, no resource churn) in case only
+            # those changed.
+            for client, cfg in zip(self._extra_clients, client_configs):
+                client.enabled = bool(cfg.get("enabled", True))
+                client.character = str(cfg.get("character", ""))
+            return
+
+        for client in self._extra_clients:
+            client.close()
+
+        rebuilt = []
+        for (name, x1, y1, x2, y2, x1f, y1f, x2f, y2f), cfg in zip(desired, client_configs):
+            rebuilt.append(_ExtraClient(
+                name=name,
+                character=str(cfg.get("character", "")),
+                x1=x1, y1=y1, x2=x2, y2=y2,
+                x1_faction=x1f, y1_faction=y1f, x2_faction=x2f, y2_faction=y2f,
+                enabled=bool(cfg.get("enabled", True)),
+                needle_paths=alert_files,
+                needle_faction_paths=faction_files,
+            ))
+        self._extra_clients = rebuilt
+
     def set_vision(self) -> None:
         if self.is_running:
             self.alert_vision.debug_mode = not self.alert_vision.debug_mode
@@ -1171,7 +1360,8 @@ class AlertAgent:
             )
             if screenshot is not None:
                 enemy = self.alert_vision.find(
-                    screenshot, self.detection, self.image_thresholds
+                    screenshot, self.detection, self.image_thresholds,
+                    self._detection_downscale,
                 )
                 # Retain match centers for per-enemy dedup (#100). Set both
                 # together (no await between) so run() sees a consistent pair.
@@ -1194,12 +1384,56 @@ class AlertAgent:
             )
             if screenshot_faction is not None:
                 faction = self.alert_vision_faction.find_faction(
-                    screenshot_faction, self.detection_faction, self.image_thresholds
+                    screenshot_faction, self.detection_faction, self.image_thresholds,
+                    self._detection_downscale,
                 )
                 self.faction = bool(faction)
             else:
                 # Reset flag on capture failure so stale True doesn't loop alarms
                 self.faction = False
+            await asyncio.sleep(VISION_SLEEP_INTERVAL)
+
+    async def _extra_client_vision_thread(self, client: "_ExtraClient") -> None:
+        """#174: per-extra-client analog of vision_thread(). Reuses the
+        SAME global detection sensitivity/per-image-threshold/downscale
+        settings as the primary client -- the MVP doesn't support
+        per-client thresholds. Unlike the primary client's vision_thread(),
+        a capture failure here does NOT stop the whole engine (that would
+        mean one multiboxed window closing kills monitoring for every
+        other client) -- it just logs and retries next cycle.
+        """
+        while True:
+            screenshot, _ = client.wincap.get_screenshot_value(
+                client.y1, client.x1, client.x2, client.y2
+            )
+            if screenshot is not None:
+                enemy = client.vision.find(
+                    screenshot, self.detection, self.image_thresholds,
+                    self._detection_downscale,
+                )
+                client.enemy_points = list(enemy)
+                client.enemy = bool(enemy)
+            else:
+                client.enemy_points = []
+                client.enemy = False
+                logger.debug("Capture failed for extra client %r", client.name)
+            await asyncio.sleep(VISION_SLEEP_INTERVAL)
+
+    async def _extra_client_vision_faction_thread(self, client: "_ExtraClient") -> None:
+        """#174: per-extra-client analog of vision_faction_thread()."""
+        while True:
+            screenshot_faction, _ = client.wincap.get_screenshot_value(
+                client.y1_faction, client.x1_faction, client.x2_faction, client.y2_faction
+            )
+            if screenshot_faction is not None:
+                faction = client.vision_faction.find_faction(
+                    screenshot_faction, self.detection_faction, self.image_thresholds,
+                    self._detection_downscale,
+                )
+                client.faction = bool(faction)
+            else:
+                client.faction = False
+                logger.debug("Faction capture failed for extra client %r", client.name)
             await asyncio.sleep(VISION_SLEEP_INTERVAL)
 
     async def reset_alarm(self, alarm_type: str) -> None:
@@ -1309,10 +1543,79 @@ class AlertAgent:
         self._seen_enemies = new_seen
         return trigger
 
+    def _should_alarm_extra_client_enemy(self, client: "_ExtraClient") -> bool:
+        """#174: simplified per-extra-client analog of _should_alarm_enemy()
+        -- position-quantized dedup only (no OCR identity resolution;
+        that stays primary-client/global-only in this MVP, so extra
+        clients dedup by icon position exactly like the primary client
+        did before #213 added name-based identity)."""
+        now = time.time()
+        keys = {self._quantize_point(p) for p in (client.enemy_points or [])}
+        if not keys:
+            keys = {(-1, -1)}
+
+        rearm_delta = self._rearm_minutes * 60
+        trigger = False
+        for key in keys:
+            sighting = client.seen_enemies.get(key)
+            if sighting is None:
+                trigger = True
+            elif sighting.rearm_at > 0 and now >= sighting.rearm_at:
+                trigger = True
+
+        new_seen: dict = {}
+        for key in keys:
+            old = client.seen_enemies.get(key)
+            if old is None:
+                rearm_at = (now + rearm_delta) if rearm_delta > 0 else 0
+                new_seen[key] = _EnemySighting(
+                    first_seen=now, last_alarm=now if trigger else 0, rearm_at=rearm_at
+                )
+            else:
+                new_rearm_at = old.rearm_at
+                if new_rearm_at > 0 and now >= new_rearm_at:
+                    new_rearm_at = now + rearm_delta if rearm_delta > 0 else 0
+                new_seen[key] = _EnemySighting(
+                    first_seen=old.first_seen,
+                    last_alarm=now if trigger else old.last_alarm,
+                    rearm_at=new_rearm_at,
+                )
+        client.seen_enemies = new_seen
+        return trigger
+
+    def _reset_extra_client_alarm(self, client: "_ExtraClient", alarm_type: str) -> None:
+        """#174: lightweight per-extra-client analog of reset_alarm() --
+        only touches this client's own cooldown/trigger-count/dedup
+        state, never the primary client's or global subsystems (WH-drop,
+        OCR identity cache, escalation counter) that don't make sense
+        per-client in this MVP."""
+        key = (client.name, alarm_type)
+        if key in self.alarm_trigger_counts:
+            self.alarm_trigger_counts[key] = 0
+            self.cooldown_timers[key] = 0
+        if alarm_type == "Enemy":
+            client.seen_enemies = {}
+
     async def alarm_detection(
-        self, alarm_text: str, sound: str = ALARM_SOUND, alarm_type: str = "Enemy"
+        self,
+        alarm_text: str,
+        sound: str = ALARM_SOUND,
+        alarm_type: str = "Enemy",
+        client_name: str | None = None,
     ) -> None:
-        """Trigger an alarm: log message, statistics, sound, webhook."""
+        """Trigger an alarm: log message, statistics, sound, webhook.
+
+        *client_name* (#174): when set (an extra multi-client entry),
+        alarm_text is prefixed (`[ClientName] ...`) and sound cooldowns
+        are tracked independently (see play_sound()). Intel/threat-score/
+        Discord-webhook-template/push/screenshot/escalation/zKillboard
+        stay primary-client/global-only in this MVP -- system-level
+        context (current system, ESI augmentation) isn't meaningfully
+        per-client yet, matching this issue's own "threat score/intel
+        remain global" design note.
+        """
+        if client_name:
+            alarm_text = f"[{client_name}] {alarm_text}"
         self._ui(self.main.write_message, alarm_text, "red")
         self.statistics.add_alarm(alarm_type)
         save_lifetime_stats(self.statistics)
@@ -1328,7 +1631,11 @@ class AlertAgent:
             self.loop.create_task(
                 self._post_automation_webhook(alarm_text, alarm_type)
             )
-        await self.play_sound(sound, alarm_type)
+        await self.play_sound(sound, alarm_type, client_name)
+
+        if client_name is not None:
+            return  # #174: everything below is primary-client/global-only
+
         await self.send_webhook_message(alarm_type)
 
         # v3.5: push notifications (Telegram / Pushover / ntfy)
@@ -2484,6 +2791,39 @@ class AlertAgent:
         except Exception as exc:
             logger.debug("ESI location monitor error: %s", exc)
 
+    async def _cache_maintenance_task(self) -> None:
+        """#177: periodically purge expired entries from the TTL caches
+        that only ever check-and-skip a stale entry on read, never evict
+        it (zKB kill lookups, universe kill-count/heatmap caches). Left
+        unpurged, a long AFK session accumulates one stale entry per
+        distinct system/constellation ever looked up and never revisited
+        -- bounded by EVE's universe size in the worst case, but with no
+        cleanup at all otherwise. Runs independently of whether R2Z2/
+        gate-camp/route-checking are enabled, since zKillboard-on-alarm
+        lookups alone can populate these caches over a long session.
+        """
+        while self.running:
+            await asyncio.sleep(self._CACHE_MAINTENANCE_INTERVAL_SECONDS)
+            if not self.running:
+                break
+            try:
+                from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
+                from evealert.tools.zkillboard import get_client  # noqa: PLC0415
+                from evealert.tools.threat_heatmap import purge_expired_cache  # noqa: PLC0415
+
+                universe_purged = get_universe_cache().purge_expired_kill_counts()
+                zkb_purged = get_client().purge_expired()
+                heatmap_purged = purge_expired_cache()
+                total = universe_purged + zkb_purged + heatmap_purged
+                if total:
+                    logger.debug(
+                        "Cache maintenance: purged %d expired entries "
+                        "(universe=%d, zkb=%d, heatmap=%d)",
+                        total, universe_purged, zkb_purged, heatmap_purged,
+                    )
+            except Exception as exc:
+                logger.debug("Cache maintenance cycle failed: %s", exc)
+
     async def _peak_hours_monitor(self) -> None:
         """Warn the pilot 15 min before a historically dangerous hour (#151).
 
@@ -2764,8 +3104,24 @@ class AlertAgent:
         # 2. Per-type webhooks (enemy / faction) with optional min-count gate
         await self._send_typed_webhook(alarm_type, msg)
 
-    async def play_sound(self, sound: str, alarm_type: str) -> None:
-        """Play alarm sound with trigger limits and cooldown management."""
+    async def play_sound(
+        self, sound: str, alarm_type: str, client_name: str | None = None
+    ) -> None:
+        """Play alarm sound with trigger limits and cooldown management.
+
+        *client_name* (#174): when given (an extra multi-client entry),
+        trigger-count/cooldown/currently-playing state is keyed by
+        (client_name, alarm_type) instead of a bare alarm_type string, so
+        one client's cooldown can never suppress another's alarm. The
+        primary client passes None, keeping its dict keys byte-identical
+        to pre-#174 behavior.
+
+        Known MVP limitation: sounddevice's sd.play() uses a single
+        shared default output stream -- two alarms firing at nearly the
+        same instant from different clients can cut each other off rather
+        than mix. Cooldown/dedup/log/webhook dispatch are still correctly
+        independent per client regardless.
+        """
         if self.mute:
             return
 
@@ -2777,40 +3133,43 @@ class AlertAgent:
             )
             return
 
-        if alarm_type not in self.alarm_trigger_counts:
-            self.alarm_trigger_counts[alarm_type] = 0
-        if alarm_type not in self.cooldown_timers:
-            self.cooldown_timers[alarm_type] = 0
+        key = (client_name, alarm_type) if client_name else alarm_type
+        label = f"[{client_name}] {alarm_type}" if client_name else alarm_type
+
+        if key not in self.alarm_trigger_counts:
+            self.alarm_trigger_counts[key] = 0
+        if key not in self.cooldown_timers:
+            self.cooldown_timers[key] = 0
 
         current_time = time.time()
-        if current_time < self.cooldown_timers[alarm_type]:
+        if current_time < self.cooldown_timers[key]:
             self._ui(
                 self.main.write_message,
-                f"{alarm_type} Sound is in cooldown period.",
+                f"{label} Sound is in cooldown period.",
                 "red",
             )
             return
 
-        self.alarm_trigger_counts[alarm_type] += 1
+        self.alarm_trigger_counts[key] += 1
 
-        if self.alarm_trigger_counts[alarm_type] > self.max_sound_triggers:
+        if self.alarm_trigger_counts[key] > self.max_sound_triggers:
             # Pick the cooldown limit for this alarm type
             cooldown_limit = (
                 self._cooldown_enemy
                 if alarm_type == "Enemy"
                 else self._cooldown_faction
             )
-            self.cooldown_timers[alarm_type] = current_time + cooldown_limit
-            self.alarm_trigger_counts[alarm_type] = 0
+            self.cooldown_timers[key] = current_time + cooldown_limit
+            self.alarm_trigger_counts[key] = 0
             self._ui(
                 self.main.write_message,
-                f"{alarm_type} Sound is now in cooldown for {cooldown_limit} seconds.",
+                f"{label} Sound is now in cooldown for {cooldown_limit} seconds.",
                 "red",
             )
             return
 
-        if alarm_type not in self.currently_playing_sounds:
-            self.currently_playing_sounds[alarm_type] = True
+        if key not in self.currently_playing_sounds:
+            self.currently_playing_sounds[key] = True
             try:
                 data, samplerate = sf.read(sound, dtype="int16")
 
@@ -2826,14 +3185,14 @@ class AlertAgent:
                 sd.play(data_with_volume, samplerate)
                 await loop.run_in_executor(None, sd.wait)
             except Exception as e:
-                if self.alarm_trigger_counts.get(alarm_type, 0) <= 1:
+                if self.alarm_trigger_counts.get(key, 0) <= 1:
                     self._ui(
                         self.main.open_error_window,
                         "Error Playing Sound. Check Logs for more information.",
                     )
                 logger.exception("Error Playing Sound: %s", e)
             finally:
-                self.currently_playing_sounds.pop(alarm_type, None)
+                self.currently_playing_sounds.pop(key, None)
 
     def _resolve_enemy_identities(self) -> dict:
         """Resolve each currently-detected enemy icon to a pilot name via OCR
@@ -3012,6 +3371,27 @@ class AlertAgent:
                         await self.alarm_detection(
                             self._build_enemy_alarm_text(), self._alarm_sound, "Enemy"
                         )
+
+                # #174: extra clients -- independent dedup/cooldown/rearm
+                # state, no OCR identity resolution or ESI/threat-score
+                # augmentation (primary-client/global-only in this MVP).
+                for client in self._extra_clients:
+                    if not client.enabled:
+                        continue
+                    if client.faction:
+                        self.alarm_detected = True
+                        await self.alarm_detection(
+                            "Faction Spawn!", self._faction_sound, "Faction", client.name
+                        )
+                    if client.enemy:
+                        self.alarm_detected = True
+                        if self._should_alarm_extra_client_enemy(client):
+                            count = len(client.enemy_points) or 1
+                            plural = "s" if count != 1 else ""
+                            text = f"Enemy Appears! ({count} hostile{plural})"
+                            await self.alarm_detection(
+                                text, self._alarm_sound, "Enemy", client.name
+                            )
             except Exception as e:
                 # Log the full traceback so we can diagnose the root cause.
                 logger.error("Alert System Error: %s", e, exc_info=True)
@@ -3032,6 +3412,11 @@ class AlertAgent:
                 await self.reset_alarm("Faction")
             if not self.enemy:
                 await self.reset_alarm("Enemy")
+            for client in self._extra_clients:
+                if not client.faction:
+                    self._reset_extra_client_alarm(client, "Faction")
+                if not client.enemy:
+                    self._reset_extra_client_alarm(client, "Enemy")
 
             await asyncio.sleep(
                 random.uniform(MAIN_CHECK_SLEEP_MIN, MAIN_CHECK_SLEEP_MAX)

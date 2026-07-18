@@ -229,6 +229,157 @@ class TestVision(unittest.TestCase):
         self.assertIsInstance(points, list)
 
 
+class TestVisionPerformancePass(unittest.TestCase):
+    """#175: frame-change short-circuit, needle-normalization caching,
+    early-exit hit tracking, and downscale mode."""
+
+    def setUp(self):
+        self.test_needle_path = Path("tests/fixtures/perf_needle.png")
+        self.test_needle_path.parent.mkdir(parents=True, exist_ok=True)
+        needle_img = np.zeros((30, 30, 3), dtype=np.uint8)
+        needle_img[5:25, 5:25] = (0, 0, 200)
+        needle_img[10:20, 10:20] = (80, 50, 240)
+        needle_img[13:17, 13:17] = (200, 100, 50)
+        cv.imwrite(str(self.test_needle_path), needle_img)
+        self.vision = Vision([str(self.test_needle_path)])
+        self.needle_img = needle_img
+
+    def tearDown(self):
+        if self.test_needle_path.exists():
+            self.test_needle_path.unlink()
+        if self.test_needle_path.parent.exists() and not list(
+            self.test_needle_path.parent.iterdir()
+        ):
+            self.test_needle_path.parent.rmdir()
+        self.vision.clean_up()
+
+    def _haystack_with_match(self):
+        h, w = self.needle_img.shape[:2]
+        haystack = np.full((200, 200, 3), 200, dtype=np.uint8)
+        haystack[50 : 50 + h, 50 : 50 + w] = self.needle_img
+        return haystack
+
+    # -- frame-change short-circuit -------------------------------------
+
+    def test_identical_consecutive_frames_skip_rematch(self):
+        haystack = self._haystack_with_match()
+        with patch("cv2.matchTemplate", wraps=cv.matchTemplate) as mock_match:
+            first = self.vision.find(haystack, threshold=70)
+            self.assertGreater(mock_match.call_count, 0)
+            calls_after_first = mock_match.call_count
+            second = self.vision.find(haystack, threshold=70)
+        # Same frame, same params -> matchTemplate not called again.
+        self.assertEqual(mock_match.call_count, calls_after_first)
+        self.assertEqual(first, second)
+
+    def test_changed_frame_triggers_rematch(self):
+        haystack = self._haystack_with_match()
+        self.vision.find(haystack, threshold=70)
+        changed = haystack.copy()
+        changed[0, 0] = (1, 2, 3)  # single-pixel change -> different hash
+        with patch("cv2.matchTemplate", wraps=cv.matchTemplate) as mock_match:
+            self.vision.find(changed, threshold=70)
+        self.assertGreater(mock_match.call_count, 0)
+
+    def test_threshold_change_on_identical_frame_is_not_served_stale(self):
+        """Regression: the frame-cache key must include detection params,
+        not just the frame hash -- otherwise a live sensitivity-slider
+        change while Local is static would silently keep returning the
+        result computed under the OLD threshold."""
+        haystack = self._haystack_with_match()
+        # Max threshold (100 -> 1.0 exactly) -> no match: the exact-pixel
+        # paste correlates at ~0.9999997, just under a perfect 1.0.
+        no_match = self.vision.find(haystack, threshold=100)
+        # Same frame, much lower threshold -> should match now, not reuse
+        # the cached "no match" result from the threshold=100 call.
+        match = self.vision.find(haystack, threshold=50)
+        self.assertEqual(no_match, [])
+        self.assertGreater(len(match), 0)
+
+    def test_per_image_threshold_change_on_identical_frame_is_not_stale(self):
+        haystack = self._haystack_with_match()
+        fname = self.test_needle_path.name
+        no_match = self.vision.find(
+            haystack, threshold=50, per_image_thresholds={fname: 100}
+        )
+        match = self.vision.find(
+            haystack, threshold=50, per_image_thresholds={fname: 10}
+        )
+        self.assertEqual(no_match, [])
+        self.assertGreater(len(match), 0)
+
+    def test_debug_mode_always_rematches(self):
+        """The live calibration preview must never serve a stale cached
+        frame -- always re-run so the debug window reflects reality."""
+        haystack = self._haystack_with_match()
+        self.vision.debug_mode = True
+        with patch("cv2.imshow"), patch("cv2.waitKey"):
+            self.vision.find(haystack, threshold=70)
+            with patch("cv2.matchTemplate", wraps=cv.matchTemplate) as mock_match:
+                self.vision.find(haystack, threshold=70)
+        self.assertGreater(mock_match.call_count, 0)
+
+    # -- needle-normalization cache ---------------------------------------
+
+    def test_needle_normalization_cached_across_calls(self):
+        haystack = self._haystack_with_match()
+        self.vision.find(haystack, threshold=70)
+        cached_after_first = self.vision._needle_norm_cache[0]
+        self.assertIsNotNone(cached_after_first)
+
+        changed = haystack.copy()
+        changed[0, 0] = (1, 2, 3)
+        self.vision.find(changed, threshold=70)
+        cached_after_second = self.vision._needle_norm_cache[0]
+        # Same needle, same downscale (1.0), same haystack dtype -> the
+        # cached normalized needle array is reused, not recomputed.
+        self.assertIs(cached_after_first[1], cached_after_second[1])
+
+    # -- hit-count tracking -------------------------------------------------
+
+    def test_needle_hit_counts_track_matches(self):
+        haystack = self._haystack_with_match()
+        self.vision.find(haystack, threshold=70)
+        counts = self.vision.get_needle_hit_counts()
+        self.assertEqual(counts.get(0, 0), 1)
+
+    def test_needle_hit_counts_do_not_increment_on_no_match(self):
+        haystack = np.full((200, 200, 3), 200, dtype=np.uint8)  # no needle pasted in
+        self.vision.find(haystack, threshold=99)
+        self.assertEqual(self.vision.get_needle_hit_counts(), {})
+
+    # -- downscale mode -------------------------------------------------
+
+    def test_downscale_still_detects_match(self):
+        haystack = self._haystack_with_match()
+        points = self.vision.find(haystack, threshold=60, downscale=0.5)
+        self.assertGreater(len(points), 0)
+
+    def test_downscale_points_are_in_original_coordinate_space(self):
+        """Detected points must be scaled back up to the ORIGINAL region's
+        coordinates -- OCR row correlation (#213) and per-enemy dedup
+        quantization both key off these, in un-downscaled pixel space."""
+        haystack = self._haystack_with_match()
+        full_res_points = self.vision.find(haystack, threshold=60, downscale=1.0)
+        self.vision._frame_cache.clear()
+        downscaled_points = self.vision.find(haystack, threshold=60, downscale=0.5)
+        self.assertTrue(full_res_points)
+        self.assertTrue(downscaled_points)
+        # Allow some slack for downscale/upscale rounding, but the match
+        # must land in roughly the same place, not the shrunken one.
+        fx, fy = full_res_points[0]
+        dx, dy = downscaled_points[0]
+        self.assertLess(abs(fx - dx), 10)
+        self.assertLess(abs(fy - dy), 10)
+
+    def test_downscale_default_is_full_resolution(self):
+        """downscale defaults to 1.0 (no scaling) -- existing callers that
+        don't pass it see unchanged behavior."""
+        haystack = self._haystack_with_match()
+        points = self.vision.find(haystack, threshold=70)
+        self.assertGreater(len(points), 0)
+
+
 class TestVisionRobustness(unittest.TestCase):
     """Regression tests for issues #111, #112, #113."""
 

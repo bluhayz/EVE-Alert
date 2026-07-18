@@ -31,6 +31,7 @@ class _StopAgent(AlertAgent):
         self._sov_task = mock.MagicMock()
         self._esi_standings_task = mock.MagicMock()
         self._gatecamp_task = mock.MagicMock()
+        self._cache_maintenance_task_handle = mock.MagicMock()
         for t in (
             self.vision_t,
             self.vision_faction_t,
@@ -39,6 +40,7 @@ class _StopAgent(AlertAgent):
             self._sov_task,
             self._esi_standings_task,
             self._gatecamp_task,
+            self._cache_maintenance_task_handle,
         ):
             t.done.return_value = False
         # Class-based monitors
@@ -48,6 +50,8 @@ class _StopAgent(AlertAgent):
         self._killmail_monitor = mock.MagicMock()
         self._intel_watchers = [mock.MagicMock()]
         self._r2z2_consumer = None
+        self._extra_clients = []
+        self._extra_client_tasks = []
         self._ui = mock.MagicMock()
 
 
@@ -97,6 +101,7 @@ class StopLifecycleTests(unittest.TestCase):
             self.agent._sov_task,
             self.agent._esi_standings_task,
             self.agent._gatecamp_task,
+            self.agent._cache_maintenance_task_handle,
         ]
         self.agent._shutdown_loop()
         for t in tasks:

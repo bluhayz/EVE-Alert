@@ -94,6 +94,52 @@ class TestCaching(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class TestPurgeExpired(unittest.TestCase):
+    """#177: purge_expired() must evict entries the TTL check would
+    already treat as stale on read, not just skip them -- otherwise a
+    system looked up once and never revisited sits in memory forever."""
+
+    def test_purge_removes_expired_entries(self):
+        from evealert.tools.zkillboard import ZkillboardClient, _CACHE_TTL
+
+        client = ZkillboardClient()
+        client._cache["stale"] = (time.time() - _CACHE_TTL - 1, [])
+
+        removed = client.purge_expired()
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn("stale", client._cache)
+
+    def test_purge_keeps_fresh_entries(self):
+        from evealert.tools.zkillboard import ZkillboardClient
+
+        client = ZkillboardClient()
+        client._cache["fresh"] = (time.time(), [])
+
+        removed = client.purge_expired()
+
+        self.assertEqual(removed, 0)
+        self.assertIn("fresh", client._cache)
+
+    def test_purge_leaves_system_id_cache_untouched(self):
+        """System name->ID mappings never expire (names don't change) --
+        purge_expired() must only ever touch the TTL'd kills cache."""
+        from evealert.tools.zkillboard import ZkillboardClient, _CACHE_TTL
+
+        client = ZkillboardClient()
+        client._cache["stale"] = (time.time() - _CACHE_TTL - 1, [])
+        client._system_id_cache["jita"] = 30000142
+
+        client.purge_expired()
+
+        self.assertEqual(client._system_id_cache["jita"], 30000142)
+
+    def test_purge_returns_zero_on_empty_cache(self):
+        from evealert.tools.zkillboard import ZkillboardClient
+
+        self.assertEqual(ZkillboardClient().purge_expired(), 0)
+
+
 class TestGetRecentKills(unittest.TestCase):
     def test_returns_none_when_system_not_found(self):
         import asyncio

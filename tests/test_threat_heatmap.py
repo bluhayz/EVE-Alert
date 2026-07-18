@@ -44,5 +44,39 @@ class BuildEntryTests(unittest.TestCase):
         self.assertEqual(entry.peak_hour_utc, 15)
 
 
+class PurgeExpiredCacheTests(unittest.TestCase):
+    """#177: purge_expired_cache() must evict entries the TTL check would
+    already treat as stale on read, not just skip them -- otherwise a
+    constellation checked once and never revisited sits in this
+    module-level cache for the life of the process."""
+
+    def setUp(self):
+        from evealert.tools import threat_heatmap  # noqa: PLC0415
+        self._module = threat_heatmap
+        self._module._CACHE.clear()  # isolate from other tests' pollution
+
+    def tearDown(self):
+        self._module._CACHE.clear()
+
+    def test_purge_removes_expired_entries(self):
+        import time  # noqa: PLC0415
+        self._module._CACHE[("STALE", 7)] = (
+            time.time() - self._module._CACHE_TTL - 1, {}
+        )
+        removed = self._module.purge_expired_cache()
+        self.assertEqual(removed, 1)
+        self.assertNotIn(("STALE", 7), self._module._CACHE)
+
+    def test_purge_keeps_fresh_entries(self):
+        import time  # noqa: PLC0415
+        self._module._CACHE[("FRESH", 7)] = (time.time(), {})
+        removed = self._module.purge_expired_cache()
+        self.assertEqual(removed, 0)
+        self.assertIn(("FRESH", 7), self._module._CACHE)
+
+    def test_purge_returns_zero_on_empty_cache(self):
+        self.assertEqual(self._module.purge_expired_cache(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

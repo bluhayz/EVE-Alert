@@ -66,12 +66,19 @@ class StopRestartTests(unittest.TestCase):
             self.fail(f"stop() raised {exc!r}")
 
     def test_wincap_sct_is_none_after_stop(self):
-        """wincap._sct must be None after stop() so restart can create a fresh instance."""
+        """wincap's capture backend must be released after stop() so
+        restart creates a fresh instance (#176: the mss handle now lives
+        inside the backend object, not directly on WindowCapture)."""
         agent = _make_agent(self.temp_dir)
+        # Force the (default mss) backend to actually materialize, same as
+        # a real capture call would, so this test exercises real teardown
+        # rather than a no-op close() on a never-touched WindowCapture.
+        agent.wincap._get_backend()
+        self.assertIsNotNone(agent.wincap._backend)
         # Directly simulate the alert-thread close path by calling wincap.close()
         # (the real call now happens via _shutdown_loop on the alert thread)
         agent.wincap.close()
-        self.assertIsNone(agent.wincap._sct)
+        self.assertIsNone(agent.wincap._backend)
 
     def test_stop_without_prior_start_is_idempotent(self):
         """stop() on a never-started agent must not raise."""
