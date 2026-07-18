@@ -1,5 +1,35 @@
 # Changelog
 
+## [7.3.0] 2026-07-18
+
+### Added — Combat Intelligence Data Foundation (#237-#240)
+
+Builds the data layer for enemy-pilot analytics: what a hostile flies,
+where they hunt, and who's worth watching. First half of the Enemy Combat
+Analytics epic — v7.4 builds the dossier/hunting-ground analytics on top
+of this.
+
+- **Combat activity store (#237)**: new `combat_activity_store.py`
+  captures killmail-derived per-pilot activity (ship flown, system,
+  gang size, role) via two paths — the R2Z2 live-kill stream for any
+  currently-tracked pilot, and a one-time zKillboard backfill on a
+  pilot's first Enemy alarm each session so a dossier isn't empty on
+  first encounter.
+- **Sighting enrichment (#238)**: `pilot_history_store` migrates to
+  schema v2 (nullable `character_id`, composite indexes) in place;
+  local sightings now prefer the ship actually visible on D-scan over
+  zKB's historical guess, and intel-sourced sightings validate their
+  parsed system against the universe cache before recording.
+- **Analytics rollup layer (#239)**: new `intel_rollups.py`
+  precomputes per-pilot and per-system dossier data so a future alarm-
+  path read is a single small-row lookup, not a full history scan — with
+  a genuinely non-blocking read path and a maintenance-task sweep that
+  only touches pilots with new activity.
+- **Hostile watchlists (#240)**: named pilot/corporation/alliance lists
+  (new Watchlist Manager dialog) that get tracked anywhere in New Eden
+  via the live-kill feed, tag Enemy alarms `[WATCHLIST]`, and add a
+  threat-score signal.
+
 ## [7.2.3] 2026-07-18
 
 ### Fixed — 11 bugs from the full-codebase code review (#226-#236)
