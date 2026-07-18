@@ -154,6 +154,22 @@ def _format_intel_age(seconds: float) -> str:
     return f"{minutes // 60}h"
 
 
+def _peak_hours_sleep_seconds(minutes_to_next: int) -> int:
+    """How long _peak_hours_monitor should sleep before its next check,
+    given *minutes_to_next* (minutes remaining until the top of the
+    hour). Wakes 15 minutes before the hour turns over, then sleeps
+    until the hour actually rolls over rather than re-checking every
+    minute (#151 fix: the previous `max((minutes_to_next - 15) * 60,
+    60)` floored at 60s even once *inside* the 15-minute warning window,
+    producing a tight 60s re-check loop -- and, before the dedup fix in
+    the same commit, a repeated log line every minute -- for the entire
+    15 minutes before the hour turned over).
+    """
+    if minutes_to_next > 15:
+        return (minutes_to_next - 15) * 60
+    return max(minutes_to_next * 60, 60)
+
+
 def _normalize_intel_line(line: str) -> str:
     """#171: normalize a raw intel-channel line for cross-channel dedup.
 
@@ -456,6 +472,11 @@ class AlertAgent:
         # "Danger window:" line only fires on the OFF->ON transition, not
         # every hourly check while it stays open.
         self._last_danger_window_active = False
+        # #151 fix: which upcoming hour (0-23) the zKB-heatmap-backed
+        # "PEAK HOURS APPROACHING" warning was last fired for, so it only
+        # fires once per approaching hour rather than on every wakeup
+        # inside the 15-minute warning window (see _peak_hours_monitor).
+        self._peak_hours_warned_for: int | None = None
 
         # v4.1: OCR pilot-name detection (#98)
         self._ocr_enabled = False
@@ -1150,6 +1171,8 @@ class AlertAgent:
             self.alarm_trigger_counts.clear()
             self.cooldown_timers.clear()
             self._combat_backfilled_character_ids.clear()
+            self._last_danger_window_active = False
+            self._peak_hours_warned_for = None
             self.alert_vision.debug_mode = False
             self.alert_vision_faction.debug_mode_faction = False
             self._ui(self.main.update_alert_button)
@@ -3324,7 +3347,16 @@ class AlertAgent:
                 next_hour = (now_utc.hour + 1) % 24
                 next_hour_kills = combined[next_hour]
 
-                if avg_per_hour > 0 and (next_hour_kills / avg_per_hour) >= self._peak_threshold_multiplier:
+                if (
+                    avg_per_hour > 0
+                    and (next_hour_kills / avg_per_hour) >= self._peak_threshold_multiplier
+                    # #151 fix: only fire once for a given upcoming hour --
+                    # without this, once inside the 15-minute warning
+                    # window (see the sleep-cadence fix below) this used
+                    # to re-fire on every wakeup until the hour actually
+                    # turned over, spamming the same message every minute.
+                    and self._peak_hours_warned_for != next_hour
+                ):
                     self._ui(
                         self.main.write_message,
                         f"\u26a0 PEAK HOURS APPROACHING: hostile activity at {next_hour:02d}:00 UTC "
@@ -3333,11 +3365,16 @@ class AlertAgent:
                         "Consider docking up.",
                         "yellow",
                     )
+                    self._peak_hours_warned_for = next_hour
 
-                # Sleep until 15 min before the next hour turn
+                # Sleep until 15 min before the next hour turn -- once
+                # already inside that 15-minute window, sleep until the
+                # hour actually rolls over instead of spinning every 60s
+                # (#151 fix: the old `max(..., 60)` floor meant a tight
+                # 60s re-check loop, and thus a repeat log line every
+                # minute, for the entire 15 minutes before the hour).
                 minutes_to_next = 60 - now_utc.minute
-                sleep_secs = max((minutes_to_next - 15) * 60, 60)
-                await asyncio.sleep(sleep_secs)
+                await asyncio.sleep(_peak_hours_sleep_seconds(minutes_to_next))
             except Exception as exc:
                 logger.debug("Peak hours monitor error: %s", exc)
                 await asyncio.sleep(3600)

@@ -3616,6 +3616,125 @@ class PeakHoursMonitorDangerWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self._danger_window_calls()), 0)
 
 
+class PeakHoursZkbWarningDedupTests(unittest.IsolatedAsyncioTestCase):
+    """#151 regression: the zKB-heatmap-backed "PEAK HOURS APPROACHING"
+    line used to re-fire on every wakeup once inside its 15-minute
+    warning window (a real user hit this live: the same message firing
+    every ~60 seconds for 15+ minutes). Must fire at most once per
+    upcoming hour."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        os.environ["EVEALERT_COMBAT_ACTIVITY_PATH"] = str(Path(self.temp_dir) / "combat_activity.db")
+        with open(settings_path, "w") as f:
+            json.dump({"server": {"system": "J5A-IX"}}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        # Neutralize the #242 local-data danger-window check (already
+        # covered by PeakHoursMonitorDangerWindowTests) so these tests
+        # isolate the zKB-heatmap-backed path.
+        self._danger_patch = patch(
+            "evealert.tools.hunting_grounds.system_danger_windows",
+            new=AsyncMock(side_effect=RuntimeError("not under test")),
+        )
+        self._danger_patch.start()
+        # A uniform histogram (every hour identical) guarantees the
+        # ratio check triggers for whichever hour happens to be "next"
+        # when the test actually runs, without needing to mock
+        # datetime.now() -- avg_per_hour always equals next_hour_kills.
+        from evealert.tools.threat_heatmap import HeatmapEntry
+
+        uniform_entry = HeatmapEntry(
+            system="J5A-IX", kills_24h=240, kills_7d=1680,
+            peak_hour_utc=0, kill_histogram=[10] * 24,
+        )
+        self.agent._peak_threshold_multiplier = 1.0
+        self._heatmap_patch = patch(
+            "evealert.tools.threat_heatmap.get_constellation_heatmap",
+            new=AsyncMock(return_value={"J5A-IX": uniform_entry}),
+        )
+        self._heatmap_patch.start()
+
+    def tearDown(self):
+        import shutil
+
+        self._heatmap_patch.stop()
+        self._danger_patch.stop()
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        os.environ.pop("EVEALERT_COMBAT_ACTIVITY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def _run_n_cycles(self, n):
+        self.agent.running = True
+        call_count = {"n": 0}
+
+        async def fake_sleep(_):
+            call_count["n"] += 1
+            if call_count["n"] >= n:
+                self.agent.running = False
+
+        with patch("evealert.manager.alertmanager.asyncio.sleep", new=fake_sleep):
+            await self.agent._peak_hours_monitor()
+
+    def _peak_hours_calls(self):
+        return [
+            c for c in self.mock_main.write_message.call_args_list
+            if "PEAK HOURS APPROACHING" in c.args[0]
+        ]
+
+    async def test_fires_on_first_wakeup(self):
+        await self._run_n_cycles(1)
+        self.assertEqual(len(self._peak_hours_calls()), 1)
+        self.assertIsNotNone(self.agent._peak_hours_warned_for)
+
+    async def test_does_not_refire_across_repeated_wakeups(self):
+        """The exact bug reported live: firing every ~60s while inside
+        the warning window."""
+        await self._run_n_cycles(5)
+        self.assertEqual(len(self._peak_hours_calls()), 1)
+
+    async def test_resets_on_stop(self):
+        await self._run_n_cycles(1)
+        self.assertIsNotNone(self.agent._peak_hours_warned_for)
+        with patch("evealert.manager.alertmanager.AlertAgent._shutdown_loop"):
+            self.agent.stop()
+        self.assertIsNone(self.agent._peak_hours_warned_for)
+
+
+class PeakHoursSleepSecondsTests(unittest.TestCase):
+    """#151 fix: once inside the 15-minute pre-hour warning window, sleep
+    until the hour actually rolls over instead of a tight 60s loop."""
+
+    def test_well_before_window_wakes_15_min_before_hour(self):
+        from evealert.manager.alertmanager import _peak_hours_sleep_seconds
+
+        self.assertEqual(_peak_hours_sleep_seconds(50), 35 * 60)
+
+    def test_just_outside_window_boundary(self):
+        from evealert.manager.alertmanager import _peak_hours_sleep_seconds
+
+        self.assertEqual(_peak_hours_sleep_seconds(16), 60)
+
+    def test_inside_window_sleeps_until_hour_turns_over(self):
+        from evealert.manager.alertmanager import _peak_hours_sleep_seconds
+
+        self.assertEqual(_peak_hours_sleep_seconds(15), 15 * 60)
+        self.assertEqual(_peak_hours_sleep_seconds(8), 8 * 60)
+
+    def test_never_sleeps_less_than_60_seconds(self):
+        from evealert.manager.alertmanager import _peak_hours_sleep_seconds
+
+        self.assertEqual(_peak_hours_sleep_seconds(1), 60)
+        self.assertEqual(_peak_hours_sleep_seconds(0), 60)
+
+
 class LocationMonitorDuplicateSystemInfoTests(unittest.IsolatedAsyncioTestCase):
     """#223: _location_monitor() must not re-fire _display_system_info()
     on the FIRST ESI-detected system -- start() already displayed it
