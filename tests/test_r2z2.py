@@ -285,12 +285,23 @@ class ConsumerRunLoopTests(unittest.IsolatedAsyncioTestCase):
         threshold must resync to the live tail rather than waiting
         forever on an expired sequence."""
         consumer = R2Z2Consumer(sequence=100)
-        call_times = iter([0.0, 0.0, 400.0])  # 3rd check exceeds the 300s threshold
+        # A live "current time" the mocked time.time() reads, advanced by
+        # _kill_route as HTTP calls arrive rather than by a fixed-length
+        # popped list -- a finite list is fragile here because unrelated
+        # library internals (httpx/anyio) may also read the globally
+        # patched time.time() a different number of times depending on
+        # the Python/library version, desyncing a call-count-indexed list
+        # (observed flaky across Python 3.12 vs 3.13). A live value that
+        # any number of extra reads simply re-reads unchanged has no such
+        # failure mode.
+        clock = {"t": 0.0}
+        call_count = {"n": 0}
 
         def _kill_route(request):
-            try:
-                next(call_times)
-            except StopIteration:
+            call_count["n"] += 1
+            if call_count["n"] == 3:
+                clock["t"] = 400.0  # exceeds the 300s staleness threshold
+            elif call_count["n"] >= 4:
                 consumer.stop()
             return Response(404)
 
@@ -300,10 +311,8 @@ class ConsumerRunLoopTests(unittest.IsolatedAsyncioTestCase):
             )
             respx.get(url__regex=r".*/ephemeral/\d+\.json").mock(side_effect=_kill_route)
 
-            times = [0.0, 0.0, 400.0, 400.0]
             with patch(
-                "evealert.tools.r2z2.time.time",
-                side_effect=lambda: times.pop(0) if times else 400.0,
+                "evealert.tools.r2z2.time.time", side_effect=lambda: clock["t"]
             ):
                 await consumer.run()
 

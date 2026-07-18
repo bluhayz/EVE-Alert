@@ -1,5 +1,24 @@
 # Changelog
 
+## [7.1.1] 2026-07-18
+
+### Fixed — flaky R2Z2 stale-sequence test under Python 3.12 (CI)
+
+- `test_r2z2.py::ConsumerRunLoopTests::test_stale_sequence_resyncs_to_live_after_threshold`
+  simulated elapsed time by patching the global `time.time()` with a
+  finite, call-count-indexed list. That's fragile: other library
+  internals (httpx/anyio) also read the globally patched clock, and the
+  number of incidental reads differs between Python 3.12 and 3.13 —
+  passed consistently in local dev (3.13) but failed on CI's
+  `windows-latest` / Python 3.12 runner, blocking the v7.1.0 release
+  build (`build-windows`/`release` jobs never ran since they depend on
+  the test job passing). Rewritten to advance a live, unboundedly-
+  re-readable clock value as HTTP calls arrive rather than an
+  exact-count-indexed list, so incidental extra reads no longer desync
+  the simulated timeline. No application code changed — v7.1.1 exists
+  solely to get a green CI run publishing the Windows build; see 7.1.0
+  below for the actual feature set.
+
 ## [7.1.0] 2026-07-17
 
 ### Added — v7.1: Real-Time Intel Platform (#169, #170, #171, #172, #173, #191)
