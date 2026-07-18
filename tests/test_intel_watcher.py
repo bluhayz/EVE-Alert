@@ -71,6 +71,99 @@ class TestFindIntelLog(unittest.TestCase):
         self.assertIsNotNone(result)
 
 
+class TestDiscoverChannels(unittest.TestCase):
+    """#191: discover_channels() -- channel names derived from log filenames."""
+
+    def test_matches_the_acceptance_criterion_example(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "Intel_20240501_153022.txt").write_text("x")
+            (d / "Local_D7-ZAC_20240501_090000.txt").write_text("x")
+            (d / "Alliance_20240501_090000.txt").write_text("x")
+
+            result = discover_channels(d)
+
+        self.assertEqual(result, ["Alliance", "Intel", "Local_D7-ZAC"])
+
+    def test_multi_underscore_channel_name_kept_intact(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "Local_D7-ZAC_20240501_090000.txt").write_text("x")
+            result = discover_channels(d)
+        self.assertEqual(result, ["Local_D7-ZAC"])
+
+    def test_mixed_case_variants_deduplicate_to_one_entry(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "Intel_20240501_100000.txt").write_text("x")
+            (d / "Intel_20240502_090000.txt").write_text("x")
+            (d / "intel_20240503_080000.txt").write_text("x")
+
+            result = discover_channels(d)
+
+        self.assertEqual(len(result), 1)
+        # "Intel" appears twice, "intel" once -- most-common casing wins.
+        self.assertEqual(result[0], "Intel")
+
+    def test_empty_directory_returns_empty_list(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = discover_channels(Path(tmpdir))
+        self.assertEqual(result, [])
+
+    def test_nonexistent_directory_returns_empty_list_not_error(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        result = discover_channels(Path("/nonexistent/path/xyz"))
+        self.assertEqual(result, [])
+
+    def test_non_log_files_ignored(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "Intel_20240501_090000.txt").write_text("x")
+            (d / "readme.md").write_text("not a log")
+            (d / "screenshot.jpg").write_text("not a log")
+
+            result = discover_channels(d)
+
+        self.assertEqual(result, ["Intel"])
+
+    def test_files_without_date_time_suffix_ignored(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "Intel_20240501_090000.txt").write_text("x")
+            (d / "readme.txt").write_text("no date suffix")
+            (d / "Intel.txt").write_text("no date suffix either")
+
+            result = discover_channels(d)
+
+        self.assertEqual(result, ["Intel"])
+
+    def test_results_are_sorted_alphabetically(self):
+        from evealert.tools.intel_watcher import discover_channels
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            d = Path(tmpdir)
+            (d / "Zeta_20240501_090000.txt").write_text("x")
+            (d / "Alpha_20240501_090000.txt").write_text("x")
+            (d / "Mid_20240501_090000.txt").write_text("x")
+
+            result = discover_channels(d)
+
+        self.assertEqual(result, ["Alpha", "Mid", "Zeta"])
+
+
 class TestIntelWatcherTailOnce(unittest.TestCase):
     def test_callback_called_for_new_lines(self):
         from evealert.tools.intel_watcher import IntelWatcher
@@ -129,6 +222,139 @@ class TestIntelWatcherTailOnce(unittest.TestCase):
         watcher._file_pos = 0
         # Should not raise
         watcher._tail_once()
+
+
+class TestIntelWatcherChannelTagging(unittest.TestCase):
+    """#171: IntelWatcher tags each parsed IntelReport with its channel."""
+
+    def test_report_gets_channel_name_default_from_pattern(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        reports = []
+        watcher = IntelWatcher(
+            channel_pattern="Intel", callback=lambda _: None,
+            on_intel=reports.append,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text(
+                "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr\n"
+            )
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()
+
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(reports[0].channel, "Intel")
+
+    def test_report_uses_explicit_channel_name_when_given(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        reports = []
+        watcher = IntelWatcher(
+            channel_pattern="Alliance", channel_name="NC-INT",
+            callback=lambda _: None, on_intel=reports.append,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Alliance_test.txt"
+            log.write_text(
+                "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr\n"
+            )
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()
+
+        self.assertEqual(reports[0].channel, "NC-INT")
+
+
+class TestIntelWatcherDedup(unittest.TestCase):
+    """#171: an injected is_duplicate check gates both callbacks."""
+
+    def test_duplicate_line_skips_both_callbacks(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        reports = []
+        watcher = IntelWatcher(
+            channel_pattern="Intel", callback=received.append,
+            on_intel=reports.append, is_duplicate=lambda line: True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text(
+                "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr\n"
+            )
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()
+
+        self.assertEqual(received, [])
+        self.assertEqual(reports, [])
+
+    def test_non_duplicate_line_still_fires_both_callbacks(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        reports = []
+        watcher = IntelWatcher(
+            channel_pattern="Intel", callback=received.append,
+            on_intel=reports.append, is_duplicate=lambda line: False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text(
+                "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr\n"
+            )
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(len(reports), 1)
+
+    def test_is_duplicate_exception_does_not_block_the_line(self):
+        """A failing dedup check must never suppress real intel."""
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+
+        def _raises(line):
+            raise RuntimeError("boom")
+
+        watcher = IntelWatcher(
+            channel_pattern="Intel", callback=received.append,
+            is_duplicate=_raises,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text("hello\n")
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()
+
+        self.assertEqual(received, ["hello"])
+
+    def test_default_none_is_duplicate_treats_everything_as_unique(self):
+        """Backward compat: omitting is_duplicate (existing callers)
+        behaves exactly like pre-#171 -- nothing is ever skipped."""
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        watcher = IntelWatcher(channel_pattern="Intel", callback=received.append)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text("line one\nline one\n")  # even literal repeats
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()
+
+        self.assertEqual(received, ["line one", "line one"])
 
 
 class TestIntelWatcherStop(unittest.TestCase):

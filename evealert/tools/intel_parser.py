@@ -211,6 +211,7 @@ class IntelReport:
     ships: list[str] = field(default_factory=list)
     jump_distance: int | None = None   # filled in asynchronously
     mentioned_pilots: list[str] = field(default_factory=list)  # hostile names in body (#197)
+    channel: str | None = None  # which intel channel this came from (#171); set by IntelWatcher
 
 
 # ------------------------------------------------------------------

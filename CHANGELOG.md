@@ -1,5 +1,60 @@
 # Changelog
 
+## [7.1.0] 2026-07-17
+
+### Added — v7.1: Real-Time Intel Platform (#169, #170, #171, #172, #173, #191)
+
+Replaces the old 60s+ zKillboard polling loop with a push-style live-kill
+feed, adds gate-camp detection and a route-avoidance advisor on top of it,
+and rounds out the intel pipeline with multi-channel dedup and a standings
+manager.
+
+- **Live kill feed (#169)**: new `evealert/tools/r2z2.py`. zKillboard's
+  RedisQ (this issue's original spec) was sunset 2026-05-31 before
+  implementation — verified against the live API and built against its
+  documented replacement, R2Z2, instead (sequence-based HTTP polling: GET
+  `sequence.json` once, then `{sequence}.json` repeatedly; 200 = kill +
+  advance, 404 = wait and retry the same sequence). Filtered to kills
+  within `r2z2.watch_jumps` of the configured system or matching
+  `r2z2.alliance_watchlist` before buffering, so the rolling kill buffer
+  never grows with every kill in New Eden. Live kills log as
+  `LIVE KILL: <ship> destroyed in <system> (Nj away) — <N> attackers`,
+  trigger the alarm sound within `r2z2.alarm_jumps`, and feed the
+  composite threat score's `adjacent_kills` signal. Supersedes the
+  Adjacent System Monitor's polling loop when enabled (`r2z2.enabled`);
+  the last processed sequence persists across restarts. 24 new tests in
+  `test_r2z2.py`.
+- **Gate-camp detection (#170)**: new `evealert/tools/gatecamp.py`, fed by
+  the R2Z2 kill buffer. Clusters kills by (system, gate/station/structure)
+  within a rolling 30-minute window; ≥3 kills with ≥2 distinct victim
+  corporations and ≥60% repeating-attacker overlap is a confirmed camp,
+  2 kills with overlap is a possible camp. Confirmed camps within
+  `adjacent.max_jumps` log a `GATE CAMP: ...` warning (once per camp per
+  hour). `universe.route_threat()` now marks legs with an active camp as
+  danger regardless of the raw zKB kill count, and the F4 status readout
+  mentions active camps. 13 new tests in `test_gatecamp.py`.
+- **Route-avoidance advisor (#172)**: `universe.py` gains
+  `suggest_safer_route()`, a weighted-Dijkstra alternative to the existing
+  shortest-path `route_threat()` — edge weight is 1 + penalty from recent
+  kills (now cached, 5-min TTL), active gate camps, and low/null-sec
+  status, capped at 30 hops and 50 zKB probes per suggestion. Returns both
+  the shortest and suggested routes so the log can show
+  `Shortest: 8j (2 dangerous) — Suggested: 10j (0 dangerous)`. Wired into
+  a new "Route Check" section in Settings (origin/destination fields,
+  results post to the main log). 20 new tests across
+  `test_route_avoidance.py` and `test_route_threat_gatecamp.py`.
+- **Multi-channel intel watcher (#171, #191)**: `intelligence.intel_channels`
+  (list) replaces the single `intel_log_channel` string (old configs
+  migrate transparently); one `IntelWatcher` runs per channel, tagging
+  each log line (`[NC-INT] ...`) and de-duplicating the same paste landing
+  in multiple channels within 30s. Settings gains a "Scan for Channels"
+  button that discovers channels from the EVE chatlog directory
+  automatically, with a checkbox list and manual-add fallback.
+- **Standings manager (#173)**: new `evealert/ui/standings_manager.py` —
+  a dedicated dialog for manual ally/hostile overrides (add/edit/remove,
+  JSON import/export) alongside a read-only view of ESI-synced personal
+  standings ("Sync Now"), replacing ad-hoc threat-tier editing.
+
 ## [7.0.0] 2026-07-17
 
 ### Added — v7.0: Pilot Intelligence & Persistence (#214, #215, #216, #217, #218)

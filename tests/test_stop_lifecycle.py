@@ -30,6 +30,7 @@ class _StopAgent(AlertAgent):
         self._thera_task = mock.MagicMock()
         self._sov_task = mock.MagicMock()
         self._esi_standings_task = mock.MagicMock()
+        self._gatecamp_task = mock.MagicMock()
         for t in (
             self.vision_t,
             self.vision_faction_t,
@@ -37,6 +38,7 @@ class _StopAgent(AlertAgent):
             self._thera_task,
             self._sov_task,
             self._esi_standings_task,
+            self._gatecamp_task,
         ):
             t.done.return_value = False
         # Class-based monitors
@@ -44,7 +46,8 @@ class _StopAgent(AlertAgent):
         self._neighbor_monitor = mock.MagicMock()
         self._dscan_watcher = mock.MagicMock()
         self._killmail_monitor = mock.MagicMock()
-        self._intel_watcher = mock.MagicMock()
+        self._intel_watchers = [mock.MagicMock()]
+        self._r2z2_consumer = None
         self._ui = mock.MagicMock()
 
 
@@ -70,9 +73,11 @@ class StopLifecycleTests(unittest.TestCase):
     def test_class_monitors_stopped(self):
         web = self.agent._web_server
         neighbor = self.agent._neighbor_monitor
+        intel_watcher = self.agent._intel_watchers[0]
         self.agent.stop()
         web.stop.assert_called_once()
         neighbor.stop.assert_called_once()
+        intel_watcher.stop.assert_called_once()
 
     def test_shutdown_scheduled_on_loop_thread(self):
         self.agent.stop()
@@ -91,6 +96,7 @@ class StopLifecycleTests(unittest.TestCase):
             self.agent._thera_task,
             self.agent._sov_task,
             self.agent._esi_standings_task,
+            self.agent._gatecamp_task,
         ]
         self.agent._shutdown_loop()
         for t in tasks:

@@ -46,7 +46,9 @@ DEFAULT_SETTINGS: dict = {
         "zkillboard_enabled": False,
         "zkillboard_cooldown": 300,
         "intel_log_enabled": False,
-        "intel_log_channel": "",
+        "intel_log_channel": "",  # legacy single-channel key; migrated by AlertAgent.load_settings() (#171)
+        "intel_channels": [],
+        "intel_log_dir": "",  # empty = auto-detect via get_eve_chatlog_dir() (#191)
         "peak_hours_warning": True,
         "peak_threshold_multiplier": 1.5,
         "intel_threat_check_enabled": False,
@@ -68,6 +70,18 @@ DEFAULT_SETTINGS: dict = {
     "adjacent": {
         "enabled": False, "max_jumps": 3, "poll_interval": 120,
         "min_kills": 1, "destination_system": "",
+    },
+    "r2z2": {
+        # Live killmail stream (#169, v7.1) -- supersedes "adjacent"'s
+        # polling loop when enabled (see AlertAgent.start()).
+        "enabled": False,
+        "alarm_jumps": 2,
+        "watch_jumps": 5,
+        "alliance_watchlist": [],
+        # Persisted sequence position so a restart resumes near the live
+        # tail instead of re-fetching a fresh one (R2Z2Consumer resyncs
+        # on its own if this is stale -- see _STALE_SEQUENCE_THRESHOLD_SECONDS).
+        "last_sequence": None,
     },
     "dscan": {"enabled": False, "alert_red": True, "alert_orange": False,
               "alert_probes": True, "alert_new_signatures": True},

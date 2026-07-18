@@ -49,8 +49,9 @@ FIELDS: list = [
               "Enable Zkillboard lookup on alarm", "zkillboard_var", False),
     FieldSpec("intelligence.intel_log_enabled", "bool", "Intel & ESI", "Intelligence",
               "Watch EVE intel chat log", "intel_log_var", False),
-    FieldSpec("intelligence.intel_log_channel", "str", "Intel & ESI", "Intelligence",
-              "Intel Channel", "intel_channel_entry", ""),
+    # Channel selection moved to the "Intel Channels" section (#191) --
+    # directory browse + Scan for Channels + checkbox list, replacing the
+    # single free-text channel-name field.
     # Peak hours warning (#151)
     FieldSpec("intelligence.peak_hours_warning", "bool", "Intel & ESI", "Intelligence",
               "Warn before historically dangerous hour (constellation heatmap)", "peak_hours_var", True),
@@ -92,6 +93,15 @@ FIELDS: list = [
               "Poll interval (s)", "adjacent_poll_entry", 120),
     FieldSpec("adjacent.destination_system", "str", "Intel & ESI", "Adjacent System Monitor",
               "Destination", "adjacent_dest_entry", ""),
+    # Live killmail stream via zKillboard's R2Z2 service (#169, v7.1) --
+    # supersedes Adjacent System Monitor's polling when enabled.
+    FieldSpec("r2z2.enabled", "bool", "Intel & ESI", "Live Kill Feed (R2Z2)",
+              "Enable live kill feed (preferred over Adjacent System Monitor polling)",
+              "r2z2_enabled_var", False),
+    FieldSpec("r2z2.alarm_jumps", "int", "Intel & ESI", "Live Kill Feed (R2Z2)",
+              "Alarm sound within N jumps", "r2z2_alarm_jumps_entry", 2),
+    FieldSpec("r2z2.watch_jumps", "int", "Intel & ESI", "Live Kill Feed (R2Z2)",
+              "Watch radius (jumps)", "r2z2_watch_jumps_entry", 5),
     FieldSpec("esi_oauth.client_id", "str", "Intel & ESI", "EVE SSO / ESI OAuth",
               "Client ID", "esi_client_id_entry", ""),
     FieldSpec("esi_oauth.standings_auto_classify", "bool", "Intel & ESI", "EVE SSO / ESI OAuth",

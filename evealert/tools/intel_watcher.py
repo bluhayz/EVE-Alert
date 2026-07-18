@@ -17,6 +17,8 @@ import asyncio
 import logging
 import os
 import platform
+import re
+from collections import Counter
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +30,11 @@ logger = logging.getLogger("alert.intel")
 _POLL_INTERVAL = 2.0
 # Maximum bytes to read per poll cycle (prevents runaway memory on huge appends)
 _MAX_READ = 65_536
+
+# EVE log filenames are '<ChannelName>_<YYYYMMDD>_<HHMMSS>.txt'. Anchored on
+# the trailing date/time suffix (not split on the first underscore) so
+# multi-word/hyphenated channel names like 'Local_D7-ZAC' stay intact (#191).
+_LOG_FILENAME_RE = re.compile(r"^(.*)_\d{8}_\d{6}\.txt$", re.IGNORECASE)
 
 
 def get_eve_chatlog_dir() -> Path | None:
@@ -58,6 +65,36 @@ def find_intel_log(chatlog_dir: Path, channel_pattern: str) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def discover_channels(chatlog_dir: Path) -> list[str]:
+    """Return the sorted, de-duplicated list of channel names present in
+    *chatlog_dir*, derived from log filenames (#191).
+
+    De-duplicates case-insensitively but preserves the most-frequently-seen
+    casing for each channel (ties broken by filename sort order, for
+    deterministic results). Files that aren't ".txt" or don't end in the
+    standard "_YYYYMMDD_HHMMSS.txt" suffix are ignored. Returns an empty
+    list for a missing/non-directory path -- never raises.
+    """
+    if not chatlog_dir.is_dir():
+        return []
+
+    casing_counts: dict[str, Counter] = {}
+    for entry in sorted(chatlog_dir.iterdir(), key=lambda p: p.name):
+        if not entry.is_file():
+            continue
+        m = _LOG_FILENAME_RE.match(entry.name)
+        if not m:
+            continue
+        channel = m.group(1)
+        if not channel:
+            continue
+        key = channel.lower()
+        casing_counts.setdefault(key, Counter())[channel] += 1
+
+    names = [counts.most_common(1)[0][0] for counts in casing_counts.values()]
+    return sorted(names)
+
+
 class IntelWatcher:
     """Async task that tails an EVE intel chat log and raises callbacks on new lines.
 
@@ -85,8 +122,14 @@ class IntelWatcher:
         chatlog_dir: Path | None = None,
         on_intel: Callable[[IntelReport], None] | None = None,
         parse_all: bool = True,
+        channel_name: str | None = None,
+        is_duplicate: Callable[[str], bool] | None = None,
     ) -> None:
         self.channel_pattern = channel_pattern.strip() or "Intel"
+        # #171: the human-readable channel label attached to each parsed
+        # IntelReport (report.channel) -- defaults to channel_pattern so
+        # single-channel callers don't need to pass this separately.
+        self.channel_name = (channel_name or self.channel_pattern).strip()
         self.callback = callback
         self._chatlog_dir = chatlog_dir or get_eve_chatlog_dir()
         self._running = False
@@ -95,6 +138,12 @@ class IntelWatcher:
         self._encoding: str | None = None  # detected once per file from the BOM
         self._on_intel: Callable[[IntelReport], None] | None = on_intel
         self._parse_all: bool = parse_all  # if False, skip clear-only reports
+        # #171: optional cross-instance dedup check (line) -> bool, shared
+        # across multiple IntelWatcher instances by the caller (e.g. the
+        # same paste posted in two channels within seconds of each other).
+        # None (default) means every line is treated as unique, matching
+        # pre-#171 behavior exactly.
+        self._is_duplicate = is_duplicate
 
     # ------------------------------------------------------------------
     # Public interface
@@ -208,16 +257,29 @@ class IntelWatcher:
 
         for line in chunk.splitlines():
             line = line.strip()
-            if line:
+            if not line:
+                continue
+            # #171: cross-channel dedup -- the same paste often hits
+            # multiple watched channels within seconds; skip the whole
+            # line (both callbacks) if the caller's shared check says a
+            # different channel already saw it recently. A failing check
+            # must never block real intel, so it's treated as "not a dup."
+            if self._is_duplicate is not None:
                 try:
-                    self.callback(line)
+                    if self._is_duplicate(line):
+                        continue
                 except Exception:
                     pass
-                if self._on_intel is not None:
-                    try:
-                        report = parse_line(line)
-                        if report is not None:
-                            if self._parse_all or not report.is_clear:
-                                self._on_intel(report)
-                    except Exception:
-                        pass
+            try:
+                self.callback(line)
+            except Exception:
+                pass
+            if self._on_intel is not None:
+                try:
+                    report = parse_line(line)
+                    if report is not None:
+                        report.channel = self.channel_name
+                        if self._parse_all or not report.is_clear:
+                            self._on_intel(report)
+                except Exception:
+                    pass

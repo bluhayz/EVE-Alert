@@ -97,6 +97,24 @@ def _format_intel_age(seconds: float) -> str:
     return f"{minutes // 60}h"
 
 
+def _normalize_intel_line(line: str) -> str:
+    """#171: normalize a raw intel-channel line for cross-channel dedup.
+
+    Strips the EVE chat-log timestamp (varies even for a genuinely
+    copy-pasted duplicate posted a moment later in another channel) and
+    compares on (reporting pilot, message body) instead. Falls back to
+    the raw stripped/lowercased line when it doesn't match the standard
+    chat-log header format.
+    """
+    from evealert.tools.intel_parser import _strip_header  # noqa: PLC0415
+
+    parsed = _strip_header(line)
+    if parsed is None:
+        return line.strip().lower()
+    pilot, message = parsed
+    return f"{pilot.strip().lower()}|{message.strip().lower()}"
+
+
 class AlertAgent:
     """Alert Agent for EVE Online local chat monitoring.
 
@@ -123,6 +141,11 @@ class AlertAgent:
     # the same pilot — ships change and reports age, so this is a hard
     # cutoff rather than a decaying weight.
     _INTEL_CORRELATION_WINDOW_SECONDS = 600  # 10 minutes
+
+    # #171: a paste posted in multiple watched intel channels within this
+    # many seconds of itself is treated as one duplicated event, not N
+    # separate hostile reports.
+    _INTEL_DEDUP_WINDOW_SECONDS = 30
 
     def __init__(self, main: "MainMenu"):
         self.main = main
@@ -185,6 +208,7 @@ class AlertAgent:
         self._thera_task = None
         self._sov_task = None
         self._esi_standings_task = None
+        self._gatecamp_task = None
 
         # Alarm settings
         self.cooldown_timers: dict = {}
@@ -220,8 +244,12 @@ class AlertAgent:
         self._zkillboard_cooldown = 300
         self._zkillboard_next_lookup: float = 0.0
         self._intel_log_enabled = False
-        self._intel_log_channel = ""
-        self._intel_watcher = None  # IntelWatcher instance
+        self._intel_log_channel = ""  # legacy single-channel setting, read-only (#171)
+        self._intel_channels: list[str] = []  # #171: one IntelWatcher per entry
+        self._intel_log_dir: str = ""  # #191: empty = auto-detect via get_eve_chatlog_dir()
+        self._intel_watchers: list = []  # IntelWatcher instances, replaces the old singular _intel_watcher
+        # #171: cross-channel duplicate-paste dedup (normalized line -> last-seen epoch)
+        self._recent_intel_lines: dict = {}
         self._intel_threat_check_enabled = False  # #198
         self._intel_threat_radius = 5             # #198
         # #212: rolling buffer of recent intel-channel reports so a
@@ -270,6 +298,20 @@ class AlertAgent:
         self._adjacent_min_kills = 1
         self._adjacent_destination = ""
         self._neighbor_monitor = None
+
+        # v7.1 (#169): live killmail stream (R2Z2, RedisQ's replacement) --
+        # preferred over the adjacent-system poller when enabled.
+        self._r2z2_enabled = False
+        self._r2z2_alarm_jumps = 2
+        self._r2z2_watch_jumps = 5
+        self._r2z2_alliance_watchlist: set = set()
+        self._r2z2_last_sequence: int | None = None
+        self._r2z2_consumer = None
+
+        # v7.1 (#170): gate-camp detection from the R2Z2 kill buffer.
+        # (system_id, location_id) -> last-warned timestamp, so a
+        # standing camp doesn't re-alarm every monitor cycle.
+        self._gatecamp_last_warned: dict = {}
 
         # v3.3: D-scan monitor
         self._dscan_enabled = False
@@ -441,6 +483,176 @@ class AlertAgent:
         except Exception as exc:
             logger.debug("Pilot history prune failed: %s", exc)
 
+    def _build_intel_watchers(self) -> list:
+        """#171: construct one IntelWatcher per entry in self._intel_channels.
+
+        Extracted from start() so the per-channel wiring (channel tagging,
+        shared cross-channel dedup) is directly unit-testable without
+        needing a running event loop.
+        """
+        from pathlib import Path  # noqa: PLC0415
+
+        from evealert.tools.intel_watcher import (  # pylint: disable=import-outside-toplevel
+            IntelWatcher,
+            get_eve_chatlog_dir,
+        )
+
+        # #191: an explicit directory override takes precedence; empty
+        # means fall back to auto-detection, same as pre-#191 behavior.
+        chatlog_dir = Path(self._intel_log_dir) if self._intel_log_dir else get_eve_chatlog_dir()
+
+        watchers = []
+        for channel in self._intel_channels:
+            watcher = IntelWatcher(
+                channel_pattern=channel,
+                channel_name=channel,
+                chatlog_dir=chatlog_dir,
+                # Bind `channel` at lambda-definition time (default arg),
+                # not call time, so each watcher's callback reports ITS
+                # OWN channel rather than whichever channel the loop
+                # variable last held.
+                callback=lambda line, ch=channel: self._on_intel_line(
+                    line, channel=ch
+                ),
+                on_intel=self._on_intel_report,
+                is_duplicate=self._is_duplicate_intel_line,
+            )
+            watchers.append(watcher)
+        return watchers
+
+    async def _start_r2z2_consumer(self, system_name: str) -> None:
+        """#169: resolve the configured system to an ID and start the R2Z2
+        live-kill consumer. Split out of start() (which runs synchronously
+        before the loop is pumping) because system-name resolution needs
+        an HTTP call."""
+        try:
+            from evealert.tools.r2z2 import R2Z2Consumer  # noqa: PLC0415
+            from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
+
+            origin_id = await get_universe_cache().get_system_id(system_name)
+            if origin_id is None:
+                logger.warning(
+                    "R2Z2: could not resolve system %r to an ID -- consumer not started",
+                    system_name,
+                )
+                return
+            self._r2z2_consumer = R2Z2Consumer(
+                origin_system_id=origin_id,
+                watch_jumps=self._r2z2_watch_jumps,
+                alliance_watchlist=self._r2z2_alliance_watchlist,
+                on_kill=self._on_r2z2_kill,
+                sequence=self._r2z2_last_sequence,
+            )
+            self.loop.create_task(self._r2z2_consumer.run())
+            # #170: gate-camp clustering rides on the same live-kill buffer.
+            self._gatecamp_task = self.loop.create_task(
+                self._gatecamp_monitor(origin_id)
+            )
+        except Exception as exc:
+            logger.debug("R2Z2 consumer failed to start: %s", exc)
+
+    async def _gatecamp_monitor(self, origin_id: int) -> None:
+        """#170: periodically check the R2Z2 kill buffer for gate-camp
+        clustering and warn once per camp per hour when a full-confidence
+        camp is within adjacent.max_jumps. Reuses the existing "adjacent"
+        settings (poll_interval, max_jumps) rather than introducing a
+        separate config block -- this is an analysis layer on top of the
+        same live-kill feed, not a second data source."""
+        from evealert.tools.gatecamp import get_active_camps, resolve_camp_names  # noqa: PLC0415
+        from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
+
+        cache = get_universe_cache()
+        try:
+            while self.running and self._r2z2_consumer is not None:
+                await asyncio.sleep(self._adjacent_poll_interval)
+                if not self.running or self._r2z2_consumer is None:
+                    break
+                try:
+                    camps = [
+                        c for c in get_active_camps(self._r2z2_consumer)
+                        if c.confidence == "camp"
+                    ]
+                    if not camps:
+                        continue
+                    nearby = await cache.get_systems_within_jumps(
+                        origin_id, self._adjacent_max_jumps
+                    )
+                    now = time.time()
+                    for camp in camps:
+                        jump_dist = nearby.get(camp.system_id)
+                        if jump_dist is None:
+                            continue
+                        key = (camp.system_id, camp.location_id)
+                        if now - self._gatecamp_last_warned.get(key, 0.0) < 3600:
+                            continue
+                        self._gatecamp_last_warned[key] = now
+                        await resolve_camp_names([camp])
+                        label = camp.gate_name or camp.system_name or f"system {camp.system_id}"
+                        self._ui(
+                            self.main.write_message,
+                            f"GATE CAMP: {label} ({jump_dist}j away) — "
+                            f"{camp.kill_count} kills, "
+                            f"{int(camp.last_kill_age_seconds)}s since last",
+                            "red",
+                        )
+                except Exception as exc:
+                    logger.debug("Gate-camp monitor cycle failed: %s", exc)
+        except Exception as exc:
+            logger.debug("Gate-camp monitor init error: %s", exc)
+
+    def _on_r2z2_kill(self, killmail, jump_dist: int | None) -> None:
+        """R2Z2Consumer.on_kill callback (#169) -- called synchronously from
+        the consumer's poll loop on the alert asyncio thread. Ship-name and
+        system-name resolution need HTTP calls, so hand off to a task
+        rather than blocking the poll loop."""
+        self._r2z2_last_sequence = (
+            self._r2z2_consumer.last_sequence if self._r2z2_consumer else None
+        )
+        self.loop.create_task(self._report_r2z2_kill(killmail, jump_dist))
+
+    async def _report_r2z2_kill(self, killmail, jump_dist: int | None) -> None:
+        """Log a `LIVE KILL: ...` line for a matched R2Z2 kill and, when it
+        happened within the configured alarm radius, trigger the alarm
+        sound (reusing the Enemy alarm's cooldown machinery)."""
+        try:
+            from evealert.tools.r2z2 import resolve_ship_name  # noqa: PLC0415
+            from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
+            from evealert.tools.http_common import DEFAULT_HEADERS  # noqa: PLC0415
+            import httpx  # noqa: PLC0415
+
+            cache = get_universe_cache()
+            system_name = await cache.get_system_name(killmail.solar_system_id)
+            system_label = system_name or f"system {killmail.solar_system_id}"
+            async with httpx.AsyncClient(timeout=8.0, headers=DEFAULT_HEADERS) as client:
+                ship_name = await resolve_ship_name(client, killmail.victim_ship_type_id)
+            ship_label = ship_name or "Unknown ship"
+
+            jump_note = f"({jump_dist}j away)" if jump_dist is not None else "(watchlist)"
+            msg = (
+                f"LIVE KILL: {ship_label} destroyed in {system_label} {jump_note} "
+                f"— {killmail.attacker_count} attackers"
+            )
+            self._ui(self.main.write_message, msg, "yellow")
+
+            if jump_dist is not None and jump_dist <= self._r2z2_alarm_jumps:
+                await self.play_sound(ALARM_SOUND, "Enemy")
+        except Exception as exc:
+            logger.debug("R2Z2 kill report failed: %s", exc)
+
+    def _get_adjacent_kill_count(self) -> int:
+        """Recent-kill count for the threat score's adjacent_kills signal.
+
+        Prefers the R2Z2 live consumer's buffer (#169, seconds-fresh)
+        over NeighborMonitor's poll-cycle count when R2Z2 is active --
+        it's the same poll_interval window either way, just fed from a
+        push stream instead of a periodic zKB list poll.
+        """
+        if self._r2z2_consumer is not None:
+            return self._r2z2_consumer.kill_count_since(self._adjacent_poll_interval)
+        if self._neighbor_monitor and hasattr(self._neighbor_monitor, "last_kill_count"):
+            return self._neighbor_monitor.last_kill_count
+        return 0
+
     def start(self) -> bool:
         """Start the detection engine in this (daemon) thread."""
         self.loop = asyncio.new_event_loop()
@@ -452,18 +664,11 @@ class AlertAgent:
             self.vision_faction_t = self.loop.create_task(self.vision_faction_thread())
             self.alert_t = self.loop.create_task(self.run())
 
-            # Start intel log watcher if configured
-            if self._intel_log_enabled and self._intel_log_channel:
-                from evealert.tools.intel_watcher import (  # pylint: disable=import-outside-toplevel
-                    IntelWatcher,
-                )
-
-                self._intel_watcher = IntelWatcher(
-                    channel_pattern=self._intel_log_channel,
-                    callback=self._on_intel_line,
-                    on_intel=self._on_intel_report,
-                )
-                self.loop.create_task(self._intel_watcher.run())
+            # Start intel log watcher(s) if configured -- one per channel (#171)
+            if self._intel_log_enabled and self._intel_channels:
+                self._intel_watchers = self._build_intel_watchers()
+                for watcher in self._intel_watchers:
+                    self.loop.create_task(watcher.run())
 
             self.running = True
             self._ui(self.main.write_message, "System: EVE Alert started.", "green")
@@ -471,8 +676,15 @@ class AlertAgent:
             self.loop.create_task(self._check_for_update())
             # v3.2: pipe/pocket classification + sovereignty display (one-shot at start)
             self.loop.create_task(self._display_system_info())
-            # v3.2: adjacent system kill monitor
-            if self._adjacent_enabled:
+            # v7.1 (#169): live kill feed (R2Z2) supersedes the adjacent-system
+            # poller when enabled -- push delivery within seconds vs. a
+            # 60s+ poll loop. NeighborMonitor becomes optional/legacy.
+            if self._r2z2_enabled:
+                system_name = self._settings_store.get("server.system", "").strip()
+                if system_name and system_name != "Enter a System Name":
+                    self.loop.create_task(self._start_r2z2_consumer(system_name))
+            elif self._adjacent_enabled:
+                # v3.2: adjacent system kill monitor
                 system_name = self._settings_store.get("server.system", "").strip()
                 if system_name and system_name != "Enter a System Name":
                     from evealert.tools.neighbor_monitor import (  # pylint: disable=import-outside-toplevel
@@ -578,6 +790,7 @@ class AlertAgent:
             self._thera_task,
             self._sov_task,
             self._esi_standings_task,
+            self._gatecamp_task,
         ):
             if task is not None and not task.done():
                 task.cancel()
@@ -596,10 +809,23 @@ class AlertAgent:
             self._neighbor_monitor,
             self._dscan_watcher,
             self._killmail_monitor,
-            self._intel_watcher,
+            self._r2z2_consumer,
+            *self._intel_watchers,
         ):
             if monitor is not None:
                 monitor.stop()
+        # Persist the R2Z2 sequence position (#169) so a restart resumes
+        # near the live tail instead of re-fetching a fresh one. Read-merge-
+        # write against the shared SettingsStore cache -- never seeded from
+        # DEFAULT_SETTINGS (#108).
+        if self._r2z2_consumer is not None:
+            try:
+                self._settings_store.set(
+                    "r2z2.last_sequence", self._r2z2_consumer.last_sequence
+                )
+                self._settings_store.save()
+            except Exception as exc:
+                logger.debug("R2Z2: failed to persist last_sequence: %s", exc)
         # Cancel raw asyncio tasks and stop the loop on the loop's own thread.
         # wincap.close() is deferred to _shutdown_loop() so it executes on the
         # alert thread that owns the mss OS handles (#190).
@@ -619,7 +845,8 @@ class AlertAgent:
             self._neighbor_monitor = None
             self._dscan_watcher = None
             self._killmail_monitor = None
-            self._intel_watcher = None
+            self._r2z2_consumer = None
+            self._intel_watchers = []
             # NOTE: wincap.close() is intentionally NOT called here — it runs via
             # _shutdown_loop() on the alert thread to respect mss thread affinity.
             self.currently_playing_sounds.clear()
@@ -694,6 +921,19 @@ class AlertAgent:
             self._zkillboard_cooldown = int(intel.get("zkillboard_cooldown", 300))
             self._intel_log_enabled = bool(intel.get("intel_log_enabled", False))
             self._intel_log_channel = str(intel.get("intel_log_channel", ""))
+            # Multi-channel intel watcher (#171): intel_channels is the new
+            # canonical list-valued key. Old configs that only have the
+            # legacy single-channel string migrate transparently into a
+            # one-element list rather than losing their configured channel.
+            raw_channels = intel.get("intel_channels")
+            if not raw_channels:
+                legacy = self._intel_log_channel.strip()
+                raw_channels = [legacy] if legacy else []
+            self._intel_channels = [
+                str(c).strip() for c in raw_channels if str(c).strip()
+            ]
+            # Chatlog directory override (#191) -- empty means auto-detect
+            self._intel_log_dir = str(intel.get("intel_log_dir", "")).strip()
             # Peak hours warning (#151)
             self._peak_hours_warning = bool(intel.get("peak_hours_warning", True))
             self._peak_threshold_multiplier = float(intel.get("peak_threshold_multiplier", 1.5))
@@ -730,6 +970,17 @@ class AlertAgent:
             self._adjacent_poll_interval = int(adj.get("poll_interval", 120))
             self._adjacent_min_kills = int(adj.get("min_kills", 1))
             self._adjacent_destination = str(adj.get("destination_system", ""))
+
+            # Live killmail stream settings (#169, v7.1)
+            r2z2 = settings.get("r2z2", {})
+            self._r2z2_enabled = bool(r2z2.get("enabled", False))
+            self._r2z2_alarm_jumps = int(r2z2.get("alarm_jumps", 2))
+            self._r2z2_watch_jumps = int(r2z2.get("watch_jumps", 5))
+            self._r2z2_alliance_watchlist = {
+                int(a) for a in r2z2.get("alliance_watchlist", []) if str(a).strip()
+            }
+            raw_sequence = r2z2.get("last_sequence")
+            self._r2z2_last_sequence = int(raw_sequence) if raw_sequence is not None else None
 
             # D-scan monitor settings
             ds = settings.get("dscan", {})
@@ -1174,18 +1425,23 @@ class AlertAgent:
         except Exception as e:
             logger.error("Error sending %s webhook: %s", alarm_type, e)
 
-    def _on_intel_line(self, line: str) -> None:
+    def _on_intel_line(self, line: str, channel: str | None = None) -> None:
         """Called from IntelWatcher for each new chat-log line.
 
         Posts the line to the GUI log on the main Tkinter thread.
         Only lines that look like player chat (not system messages) are forwarded.
+
+        *channel* (#171): which watched channel this line came from, when
+        more than one is configured -- tagged onto the log line so a
+        multi-channel setup stays legible.
         """
         # EVE chat log system messages start with "  " (two spaces) or specific tokens
         stripped = line.strip()
         # Skip empty lines and EVE session-header lines (start with "--")
         if not stripped or stripped.startswith("-------"):
             return
-        self._ui(self.main.write_message, f"Intel: {stripped}", "cyan")
+        channel_tag = f"[{channel}] " if channel else ""
+        self._ui(self.main.write_message, f"Intel: {channel_tag}{stripped}", "cyan")
         # Notify plugins
         try:
             from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
@@ -1206,6 +1462,9 @@ class AlertAgent:
         """
         try:
             self._intel_reports_recent.append((time.time(), report))
+            # #171: tag the channel this report came from when more than
+            # one is configured, e.g. "Intel[NC-INT]: 3 hostile(s) in ...".
+            channel_tag = f"[{report.channel}]" if getattr(report, "channel", None) else ""
             if report.is_clear:
                 # Dotlan link for the reported system, embedded on the
                 # system name (#210) rather than a separate visible URL.
@@ -1216,7 +1475,11 @@ class AlertAgent:
                         f"https://dotlan.net/system/{report.system.replace(' ', '_')}",
                     )
                 system_str = f"{system_display} " if report.system else ""
-                self._ui(self.main.write_message, f"Intel: {system_str}CLEAR", "green")
+                self._ui(
+                    self.main.write_message,
+                    f"Intel{channel_tag}: {system_str}CLEAR",
+                    "green",
+                )
             else:
                 count_str = f"{report.hostile_count}" if report.hostile_count else "?"
                 ship_str = f" [{', '.join(report.ships[:3])}]" if report.ships else ""
@@ -1240,7 +1503,7 @@ class AlertAgent:
 
                 self._ui(
                     self.main.write_message,
-                    f"Intel: {count_str} hostile(s) in {system_display}{ship_str}{reporter_str}",
+                    f"Intel{channel_tag}: {count_str} hostile(s) in {system_display}{ship_str}{reporter_str}",
                     "red",
                 )
                 # zkillboard links for each mentioned hostile pilot (#197),
@@ -1284,6 +1547,33 @@ class AlertAgent:
                     )
         except Exception as exc:
             logger.debug("_on_intel_report failed: %s", exc)
+
+    def _is_duplicate_intel_line(self, line: str) -> bool:
+        """#171: cross-channel dedup shared by every IntelWatcher instance
+        (passed in as each watcher's is_duplicate callback) -- the same
+        paste often hits multiple watched channels within seconds of
+        itself, and only the first should fire callbacks.
+
+        Normalizes on (reporting pilot, message body), stripping the raw
+        EVE chat-log timestamp -- which differs even for a copy-pasted
+        duplicate posted a moment later in another channel.
+        """
+        normalized = _normalize_intel_line(line)
+        now = time.time()
+        last_seen = self._recent_intel_lines.get(normalized)
+        is_dup = (
+            last_seen is not None
+            and (now - last_seen) < self._INTEL_DEDUP_WINDOW_SECONDS
+        )
+        self._recent_intel_lines[normalized] = now
+        # Opportunistic prune so this dict doesn't grow unbounded over a
+        # long session -- only entries outside the dedup window are dropped.
+        if len(self._recent_intel_lines) > 200:
+            cutoff = now - self._INTEL_DEDUP_WINDOW_SECONDS
+            self._recent_intel_lines = {
+                k: v for k, v in self._recent_intel_lines.items() if v >= cutoff
+            }
+        return is_dup
 
     def _find_recent_intel_report(self, pilot_name: str):
         """#212: return (IntelReport, age_seconds) for the most recent
@@ -1572,6 +1862,20 @@ class AlertAgent:
                         tier = t
                         break
 
+                # #173: a manual "blue" tier is a deliberate ally tag, kept
+                # in the same threat_tiers dict as red/orange/yellow. It's
+                # honored identically to an ESI-standings score >= +5.0
+                # (#147) -- same toggle, same [ALLY]-and-skip behavior --
+                # so KOS/threat counting for this pilot is suppressed
+                # regardless of which mechanism identified them as blue.
+                if tier == "blue" and self._standings_filter_blues:
+                    self._ui(
+                        self.main.write_message,
+                        f"    [ALLY] {display_name} — manual blue tier (filtered)",
+                        "green",
+                    )
+                    continue
+
                 # ── Build header line ────────────────────────────────
                 tier_prefix = {
                     "red": "⚠ [KOS-RED]",
@@ -1844,8 +2148,7 @@ class AlertAgent:
                 kos_tier=_kos_tier_label,
                 danger_ratio=_max_danger_ratio,
                 dscan_threat_class=top_class.value if top_class != ShipThreatClass.UNKNOWN else "",
-                adjacent_kills=self._neighbor_monitor.last_kill_count
-                    if self._neighbor_monitor and hasattr(self._neighbor_monitor, "last_kill_count") else 0,
+                adjacent_kills=self._get_adjacent_kill_count(),
                 is_cyno=ShipThreatClass.CYNO in self._dscan_last_classes,
                 history_frequency=_max_history_frequency,
                 history_is_regular_route=_any_history_regular_route,
@@ -2282,6 +2585,7 @@ class AlertAgent:
             from evealert.tools.universe import (  # pylint: disable=import-outside-toplevel
                 get_universe_cache,
             )
+            from evealert.tools.gatecamp import get_active_camps  # noqa: PLC0415
 
             cache = get_universe_cache()
             self._ui(
@@ -2299,8 +2603,16 @@ class AlertAgent:
                 )
                 return
 
-            legs = await cache.route_threat(origin_id, dest_id)
-            if legs is None:
+            # #170: mark legs with an active gate camp as danger regardless
+            # of the (hourly-cached) raw zKB kill count -- a fresh camp can
+            # outpace that cache. Both confidence tiers count as "active".
+            camped_system_ids = {c.system_id for c in get_active_camps(self._r2z2_consumer)}
+            # #172: suggest_safer_route() computes the shortest path AND a
+            # threat-weighted alternative in one search -- render both.
+            suggestion = await cache.suggest_safer_route(
+                origin_id, dest_id, camped_system_ids=camped_system_ids
+            )
+            if suggestion is None:
                 self._ui(
                     self.main.write_message,
                     f"Route: no path found to {destination}.",
@@ -2308,27 +2620,36 @@ class AlertAgent:
                 )
                 return
 
-            hop_count = len(legs)
-            danger_hops = [l for l in legs if l.threat_level == "danger"]
-            caution_hops = [l for l in legs if l.threat_level == "caution"]
-            self._ui(
-                self.main.write_message,
-                f"Route to {destination}: {hop_count} hop(s) — "
-                f"{len(danger_hops)} danger / {len(caution_hops)} caution",
-                "cyan",
-            )
-            for leg in legs:
-                if leg.threat_level != "safe":
-                    icon = "⚠" if leg.threat_level == "danger" else "!"
-                    self._ui(
-                        self.main.write_message,
-                        f"  {icon} {leg.system_name} ({leg.jumps_from_origin}j) "
-                        f"— {leg.kills_last_hour} kill(s)/hr [{leg.threat_level}]",
-                        "red" if leg.threat_level == "danger" else "yellow",
-                    )
+            self._render_route_legs(destination, "Shortest", suggestion.shortest)
+            if suggestion.detoured:
+                self._render_route_legs(destination, "Suggested", suggestion.suggested)
         except Exception as exc:
             logger.debug("Route check error: %s", exc)
             self._ui(self.main.write_message, f"Route check failed: {exc}", "red")
+
+    def _render_route_legs(self, destination: str, label: str, legs: list) -> None:
+        """Render one route_threat()/suggest_safer_route() leg list to the
+        log pane (#170/#172) -- shared by the "Shortest" and "Suggested"
+        route renderings in _run_route_check()."""
+        hop_count = len(legs)
+        danger_hops = [leg for leg in legs if leg.threat_level == "danger"]
+        caution_hops = [leg for leg in legs if leg.threat_level == "caution"]
+        self._ui(
+            self.main.write_message,
+            f"{label} route to {destination}: {hop_count} hop(s) — "
+            f"{len(danger_hops)} danger / {len(caution_hops)} caution",
+            "cyan",
+        )
+        for leg in legs:
+            if leg.threat_level != "safe":
+                icon = "⚠" if leg.threat_level == "danger" else "!"
+                camp_tag = " [CAMP]" if leg.has_camp else ""
+                self._ui(
+                    self.main.write_message,
+                    f"  {icon} {leg.system_name} ({leg.jumps_from_origin}j) "
+                    f"— {leg.kills_last_hour} kill(s)/hr [{leg.threat_level}]{camp_tag}",
+                    "red" if leg.threat_level == "danger" else "yellow",
+                )
 
     async def _check_for_update(self) -> None:
         """Non-blocking startup version check against GitHub Releases."""

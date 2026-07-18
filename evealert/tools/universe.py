@@ -8,9 +8,12 @@ Results are cached with appropriate TTLs to avoid hammering the API.
 """
 
 import asyncio
+import heapq
+import itertools
 import logging
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import NamedTuple
 
 try:
@@ -32,6 +35,16 @@ _HTTP_TIMEOUT = 8.0
 # Cache TTLs
 _NAME_CACHE_TTL = 86400  # system names never change — cache for 24 h
 _SOV_CACHE_TTL = 300  # sovereignty refreshes every 5 min
+_KILL_COUNT_CACHE_TTL = 300  # #172: zKB etiquette -- reuse kill counts for 5 min
+
+# #172: route-avoidance search tuning
+_ROUTE_SEARCH_MAX_HOPS = 30
+_ROUTE_SEARCH_MAX_ZKB_CALLS = 50  # cap total zKB probes per suggestion
+_KILL_PENALTY_PER_KILL = 0.5
+_KILL_PENALTY_CAP_KILLS = 10  # kills beyond this add no further penalty
+_LOWSEC_PENALTY = 1.0
+_NULLSEC_PENALTY = 2.0
+_CAMP_PENALTY = 5.0  # soft dependency on #170 -- caller supplies camped_system_ids
 
 
 async def resolve_ids(names: list[str]) -> dict:
@@ -60,6 +73,31 @@ async def resolve_ids(names: list[str]) -> dict:
             return resp.json()
     except Exception as exc:
         logger.debug("ESI /universe/ids/ failed for %r: %s", names, exc)
+        return {}
+
+
+async def resolve_names(ids: list[int]) -> dict[int, str]:
+    """Resolve a list of entity IDs to names via ``POST /universe/names/``
+    (#173) -- the inverse of resolve_ids(). Returns {id: name}; IDs ESI
+    doesn't recognize (or that fail to resolve) are simply absent from the
+    result rather than raising.
+    """
+    if not _HTTPX_AVAILABLE or not ids:
+        return {}
+    url = f"{_ESI_BASE}/latest/universe/names/"
+    try:
+        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
+            resp = await client.post(
+                url,
+                json=list(ids),
+                params={"datasource": "tranquility"},
+                headers=DEFAULT_HEADERS,
+            )
+            resp.raise_for_status()
+            entries = resp.json()
+            return {e["id"]: e["name"] for e in entries if "id" in e and "name" in e}
+    except Exception as exc:
+        logger.debug("ESI /universe/names/ failed for %r: %s", ids, exc)
         return {}
 
 
@@ -95,6 +133,18 @@ class RouteLeg(NamedTuple):
     jumps_from_origin: int
     kills_last_hour: int
     threat_level: str  # "safe" | "caution" | "danger"
+    has_camp: bool = False  # #170: active gate camp detected in this system
+
+
+@dataclass
+class RouteSuggestion:
+    """#172: shortest vs. threat-weighted route, both fully annotated so
+    the UI can render 'Shortest: 8j (2 dangerous) — Suggested: 10j (0
+    dangerous)' with per-leg detail for both."""
+
+    shortest: list[RouteLeg]
+    suggested: list[RouteLeg]
+    detoured: bool  # True when suggested actually differs from shortest
 
 
 class UniverseCache:
@@ -113,6 +163,11 @@ class UniverseCache:
         self._sov_cache: tuple[dict, float] = ({}, 0.0)
         # alliance/corp name cache
         self._entity_names: dict[int, str] = {}
+        # system_id → security_status (-1.0..1.0), never changes -- cache forever
+        self._security_status: dict[int, float] = {}
+        # system_id → (fetched_at, kill_count) -- #172: 5-min TTL so route
+        # search (which probes many systems) doesn't hammer zKB
+        self._kill_count_cache: dict[int, tuple[float, int]] = {}
 
     # ------------------------------------------------------------------
     # System ID / name resolution
@@ -246,22 +301,53 @@ class UniverseCache:
     # ------------------------------------------------------------------
 
     async def route_threat(
-        self, origin_id: int, destination_id: int, max_hops: int = 15
+        self,
+        origin_id: int,
+        destination_id: int,
+        max_hops: int = 15,
+        camped_system_ids: set[int] | None = None,
     ) -> list[RouteLeg] | None:
         """Compute shortest path from origin to destination and check kill activity.
 
         Returns an ordered list of RouteLeg objects (one per hop, excluding
         the origin), or None if no path is found within max_hops.
+
+        *camped_system_ids* (#170): systems with an active gate camp
+        (evealert.tools.gatecamp.get_active_camps()) are always marked
+        "danger" and has_camp=True regardless of the raw zKB kill count --
+        a fresh camp can outpace the hourly kill-count cache.
         """
         path = await self._bfs_path(origin_id, destination_id, max_hops)
         if not path:
             return None
+        return await self._annotate_path(path, camped_system_ids or set())
 
+    async def _annotate_path(
+        self,
+        path: list[int],
+        camped_system_ids: set[int],
+        kill_probe=None,
+    ) -> list[RouteLeg]:
+        """Shared per-leg annotation (name, kill count, threat tier, camp
+        flag) used by both route_threat() and suggest_safer_route() so the
+        two share one definition of what "danger" means.
+
+        *kill_probe*, when given, replaces the direct _zkb_kills_last_hour
+        call -- suggest_safer_route() passes a budget-and-memoization-aware
+        probe shared with its own weighted search so the whole call stays
+        within the zKB etiquette cap regardless of how many separate
+        phases end up asking about the same system. route_threat() leaves
+        this None and keeps its original uncapped-per-leg behavior.
+        """
+        probe = kill_probe or self._zkb_kills_last_hour
         legs: list[RouteLeg] = []
         for depth, sys_id in enumerate(path[1:], start=1):
             name = await self.get_system_name(sys_id) or str(sys_id)
-            kills = await self._zkb_kills_last_hour(sys_id)
-            if kills == 0:
+            kills = await probe(sys_id)
+            has_camp = sys_id in camped_system_ids
+            if has_camp:
+                threat = "danger"
+            elif kills == 0:
                 threat = "safe"
             elif kills <= 2:
                 threat = "caution"
@@ -274,9 +360,136 @@ class UniverseCache:
                     jumps_from_origin=depth,
                     kills_last_hour=kills,
                     threat_level=threat,
+                    has_camp=has_camp,
                 )
             )
         return legs
+
+    # ------------------------------------------------------------------
+    # Route-avoidance advisor (#172)
+    # ------------------------------------------------------------------
+
+    async def suggest_safer_route(
+        self,
+        origin_id: int,
+        destination_id: int,
+        *,
+        max_hops: int = _ROUTE_SEARCH_MAX_HOPS,
+        camped_system_ids: set[int] | None = None,
+    ) -> RouteSuggestion | None:
+        """Weighted-Dijkstra alternative to route_threat()'s plain-BFS
+        shortest path: prefers systems with fewer kills, no active gate
+        camp, and higher security status, even at the cost of extra jumps.
+
+        Returns both the shortest and suggested routes (identical, with
+        detoured=False, when the shortest path is already the safest one
+        found) so the UI can show "Shortest: Nj — Suggested: Mj" either way.
+        """
+        shortest_path = await self._bfs_path(origin_id, destination_id, max_hops)
+        if not shortest_path:
+            return None
+
+        camped = camped_system_ids or set()
+        # Shared across the weighted search AND both annotation passes
+        # below, so the zKB etiquette cap (_ROUTE_SEARCH_MAX_ZKB_CALLS)
+        # applies to the whole suggestion, not just the search phase --
+        # otherwise annotating a long shortest-path route that the search
+        # didn't fully explore could re-blow the budget on its own.
+        kill_lookup: dict[int, int] = {}
+        zkb_calls_remaining = [_ROUTE_SEARCH_MAX_ZKB_CALLS]
+
+        async def probe_kills(system_id: int) -> int:
+            if system_id in kill_lookup:
+                return kill_lookup[system_id]
+            if zkb_calls_remaining[0] > 0:
+                count = await self._zkb_kills_last_hour(system_id)
+                zkb_calls_remaining[0] -= 1
+            else:
+                count = 0
+            kill_lookup[system_id] = count
+            return count
+
+        weighted_path = await self._weighted_path(
+            origin_id, destination_id, max_hops, camped, probe_kills
+        )
+        if not weighted_path:
+            weighted_path = shortest_path
+
+        shortest_legs = await self._annotate_path(shortest_path, camped, probe_kills)
+        detoured = weighted_path != shortest_path
+        suggested_legs = (
+            await self._annotate_path(weighted_path, camped, probe_kills)
+            if detoured else shortest_legs
+        )
+        return RouteSuggestion(
+            shortest=shortest_legs, suggested=suggested_legs, detoured=detoured
+        )
+
+    async def _weighted_path(
+        self,
+        origin_id: int,
+        destination_id: int,
+        max_hops: int,
+        camped_system_ids: set[int],
+        probe_kills,
+    ) -> list[int] | None:
+        """Dijkstra over the jump graph; edge weight for entering a system
+        is 1 + penalty(system), where penalty comes from recent kills (via
+        the shared, budget-capped probe_kills callback), an active gate
+        camp, and low/null-sec status. Weights are memoized per system for
+        this search: Dijkstra relaxes the same neighbor from multiple
+        predecessors before it's finalized, and without memoizing that
+        would recompute (and re-probe) the same system many times."""
+        weight_cache: dict[int, float] = {}
+
+        async def entry_weight(system_id: int) -> float:
+            if system_id in weight_cache:
+                return weight_cache[system_id]
+            penalty = _CAMP_PENALTY if system_id in camped_system_ids else 0.0
+            kills = await probe_kills(system_id)
+            penalty += min(kills, _KILL_PENALTY_CAP_KILLS) * _KILL_PENALTY_PER_KILL
+            sec = await self.get_security_status(system_id)
+            if sec is not None:
+                if sec < 0.0:
+                    penalty += _NULLSEC_PENALTY
+                elif sec < 0.5:
+                    penalty += _LOWSEC_PENALTY
+            weight = 1.0 + penalty
+            weight_cache[system_id] = weight
+            return weight
+
+        counter = itertools.count()
+        # heap items: (cumulative_weight, tie_breaker, hop_count, system_id)
+        heap = [(0.0, next(counter), 0, origin_id)]
+        best_weight: dict[int, float] = {origin_id: 0.0}
+        prev: dict[int, int] = {}
+        visited: set[int] = set()
+
+        while heap:
+            weight, _, hops, current = heapq.heappop(heap)
+            if current in visited:
+                continue
+            visited.add(current)
+            if current == destination_id:
+                break
+            if hops >= max_hops:
+                continue
+            for neighbor in await self.get_neighbors(current):
+                if neighbor in visited:
+                    continue
+                new_weight = weight + await entry_weight(neighbor)
+                if new_weight < best_weight.get(neighbor, float("inf")):
+                    best_weight[neighbor] = new_weight
+                    prev[neighbor] = current
+                    heapq.heappush(heap, (new_weight, next(counter), hops + 1, neighbor))
+
+        if destination_id != origin_id and destination_id not in prev:
+            return None
+        path = [destination_id]
+        while path[-1] != origin_id:
+            path.append(prev[path[-1]])
+        path.reverse()
+        return path
 
     async def _bfs_path(
         self, origin: int, destination: int, max_hops: int
@@ -398,7 +611,15 @@ class UniverseCache:
             return None
 
     async def _zkb_kills_last_hour(self, system_id: int) -> int:
-        """Return the number of kills in *system_id* in the last 3600 seconds."""
+        """Return the number of kills in *system_id* in the last 3600 seconds.
+
+        Cached for _KILL_COUNT_CACHE_TTL (#172: suggest_safer_route() probes
+        many systems per search -- zKB etiquette requires reusing counts
+        rather than re-fetching every candidate on every hop expansion).
+        """
+        cached = self._kill_count_cache.get(system_id)
+        if cached is not None and time.time() - cached[0] < _KILL_COUNT_CACHE_TTL:
+            return cached[1]
         if not _HTTPX_AVAILABLE:
             return 0
         url = f"{_ZKB_BASE}/kills/solarSystemID/{system_id}/pastSeconds/3600/"
@@ -410,10 +631,34 @@ class UniverseCache:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
-                return len(clean_zkb_entries(data))
+                count = len(clean_zkb_entries(data))
+                self._kill_count_cache[system_id] = (time.time(), count)
+                return count
         except Exception as exc:
             logger.debug("ZKB kills failed for %d: %s", system_id, exc)
             return 0
+
+    async def get_security_status(self, system_id: int) -> float | None:
+        """Return the system's ESI security_status (-1.0..1.0), cached
+        forever (it never changes) -- used by suggest_safer_route()'s
+        low/null-sec penalty (#172)."""
+        if system_id in self._security_status:
+            return self._security_status[system_id]
+        if not _HTTPX_AVAILABLE:
+            return None
+        url = f"{_ESI_BASE}/v4/universe/systems/{system_id}/"
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                sec = resp.json().get("security_status")
+                if sec is not None:
+                    sec = float(sec)
+                    self._security_status[system_id] = sec
+                return sec
+        except Exception as exc:
+            logger.debug("ESI security status fetch failed for %d: %s", system_id, exc)
+            return None
 
 
 # Module-level singleton

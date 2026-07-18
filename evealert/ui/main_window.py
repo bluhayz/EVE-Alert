@@ -559,8 +559,21 @@ class MainWindow(QMainWindow):
                 top_class = max(dscan_classes,
                                 key=lambda c: ShipThreatClass(c).urgency,
                                 default=ShipThreatClass.UNKNOWN)
-            nm = getattr(alert, "_neighbor_monitor", None)
-            adj_kills = int(getattr(nm, "last_kill_count", 0)) if nm else 0
+            # #169: prefer the R2Z2 live consumer's buffer over
+            # NeighborMonitor's poll-cycle count when R2Z2 is active.
+            get_adj = getattr(alert, "_get_adjacent_kill_count", None)
+            adj_kills = int(get_adj()) if callable(get_adj) else 0
+
+            # #170: mention active (full-confidence) gate camps, if any.
+            active_camp_count = 0
+            try:
+                from evealert.tools.gatecamp import get_active_camps  # noqa: PLC0415
+                r2z2_consumer = getattr(alert, "_r2z2_consumer", None)
+                active_camp_count = sum(
+                    1 for c in get_active_camps(r2z2_consumer) if c.confidence == "camp"
+                )
+            except Exception:
+                pass
 
             assessment = compute_threat_score(
                 local_hostile_count=local_count,
@@ -569,7 +582,7 @@ class MainWindow(QMainWindow):
                 is_cyno=ShipThreatClass.CYNO in dscan_classes,
             )
 
-            if assessment.score == 0 and local_count == 0:
+            if assessment.score == 0 and local_count == 0 and not active_camp_count:
                 phrase = "All clear. No hostiles in local."
             else:
                 parts = []
@@ -579,6 +592,10 @@ class MainWindow(QMainWindow):
                     parts.append(f"{top_class.value.replace('_', ' ')} on D-scan")
                 if adj_kills:
                     parts.append(f"{adj_kills} kill{'s' if adj_kills != 1 else ''} in adjacent system")
+                if active_camp_count:
+                    parts.append(
+                        f"{active_camp_count} active gate camp{'s' if active_camp_count != 1 else ''} nearby"
+                    )
                 reason_str = "; ".join(parts) if parts else "threat detected"
                 phrase = f"{assessment.label}. {reason_str}. Threat score {assessment.score} out of 10."
 

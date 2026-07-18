@@ -1,5 +1,6 @@
 """Unit tests for AlertManager core functionality."""
 
+import asyncio
 import json
 import os
 import tempfile
@@ -1309,6 +1310,336 @@ class PilotHistorySummaryDisplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("(", threat_line)
 
 
+class ManualBlueTierTests(unittest.IsolatedAsyncioTestCase):
+    """#173: a manual "blue" threat_tiers entry suppresses KOS/threat
+    counting for that pilot, identically to an ESI-standings score >= +5
+    (#147), gated behind the same _standings_filter_blues toggle."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._correlate_intel_enabled = False
+        self.agent._pilot_history_enabled = False
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def _run_with_esi_stub(self, name="Bad Guy"):
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = name
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[info])
+            mock_client.get_zkillboard_profile = AsyncMock(return_value=None)
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check([name])
+            return mock_kos
+
+    async def test_manual_blue_tier_suppresses_kos_check_when_filter_enabled(self):
+        self.agent._threat_tiers = {"Bad Guy": "blue"}
+        self.agent._standings_filter_blues = True
+
+        mock_kos = await self._run_with_esi_stub("Bad Guy")
+
+        mock_kos.check.assert_not_called()
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("[ALLY]" in m and "Bad Guy" in m for m in messages),
+            f"Expected an [ALLY] filtered line, got: {messages}",
+        )
+        # The pilot's own header/ZKB/KOS lines must not appear -- only the
+        # [ALLY] line represents them.
+        self.assertFalse(any("[KOS" in m for m in messages))
+
+    async def test_manual_blue_tier_ignored_when_filter_disabled(self):
+        """The same manual-blue tag with the toggle OFF must not suppress
+        anything -- matching #147's existing standings-based behavior."""
+        self.agent._threat_tiers = {"Bad Guy": "blue"}
+        self.agent._standings_filter_blues = False
+
+        mock_kos = await self._run_with_esi_stub("Bad Guy")
+
+        mock_kos.check.assert_awaited_once()
+        messages = self._logged_messages()
+        self.assertFalse(any("[ALLY]" in m for m in messages))
+
+    async def test_red_tier_unaffected_by_blue_handling(self):
+        self.agent._threat_tiers = {"Bad Guy": "red"}
+        self.agent._standings_filter_blues = True
+
+        mock_kos = await self._run_with_esi_stub("Bad Guy")
+
+        mock_kos.check.assert_awaited_once()
+        messages = self._logged_messages()
+        self.assertFalse(any("[ALLY]" in m for m in messages))
+        self.assertTrue(any("[KOS-RED]" in m for m in messages))
+
+
+class MultiChannelIntelTests(unittest.TestCase):
+    """#171: multi-channel intel watcher -- settings migration, per-channel
+    IntelWatcher construction, cross-channel dedup, and channel-tagged
+    log rendering."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_settings(self, intelligence: dict) -> None:
+        # Non-degenerate regions -- load_settings() validates and
+        # early-returns (skipping the intelligence section entirely)
+        # when x1 == x2, per the region-validation check in
+        # ConfigValidator.validate_settings_dict().
+        with open(self.settings_path, "w") as f:
+            json.dump({
+                "alert_region_1": {"x": 100, "y": 100},
+                "alert_region_2": {"x": 300, "y": 300},
+                "faction_region_1": {"x": 400, "y": 100},
+                "faction_region_2": {"x": 600, "y": 300},
+                "intelligence": intelligence,
+            }, f)
+        reset_settings_store(self.settings_path)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    # -- settings migration -------------------------------------------
+
+    def test_legacy_single_channel_migrates_to_a_one_element_list(self):
+        self._write_settings({"intel_log_channel": "Intel"})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._intel_channels, ["Intel"])
+
+    def test_new_intel_channels_key_used_when_present(self):
+        self._write_settings({"intel_channels": ["Intel", "Alliance"]})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._intel_channels, ["Intel", "Alliance"])
+
+    def test_new_key_takes_precedence_over_legacy_key(self):
+        self._write_settings({
+            "intel_log_channel": "Intel",
+            "intel_channels": ["Alliance", "NC-INT"],
+        })
+        self.agent.load_settings()
+        self.assertEqual(self.agent._intel_channels, ["Alliance", "NC-INT"])
+
+    def test_neither_key_set_yields_empty_list(self):
+        self._write_settings({})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._intel_channels, [])
+
+    # -- per-channel watcher construction -------------------------------
+
+    def test_build_intel_watchers_creates_one_per_channel(self):
+        self.agent._intel_channels = ["Intel", "Alliance"]
+        watchers = self.agent._build_intel_watchers()
+        self.assertEqual(len(watchers), 2)
+        self.assertEqual(watchers[0].channel_pattern, "Intel")
+        self.assertEqual(watchers[1].channel_pattern, "Alliance")
+
+    def test_build_intel_watchers_uses_explicit_log_dir_override(self):
+        """#191: an explicit intel_log_dir setting is passed straight
+        through to every watcher, bypassing auto-detection entirely."""
+        self.agent._intel_channels = ["Intel"]
+        self.agent._intel_log_dir = str(Path(self.temp_dir))
+        watchers = self.agent._build_intel_watchers()
+        self.assertEqual(watchers[0]._chatlog_dir, Path(self.temp_dir))
+
+    def test_build_intel_watchers_falls_back_to_auto_detect_when_dir_empty(self):
+        self.agent._intel_channels = ["Intel"]
+        self.agent._intel_log_dir = ""
+        with patch(
+            "evealert.tools.intel_watcher.get_eve_chatlog_dir",
+            return_value=Path("/auto/detected/dir"),
+        ) as mock_detect:
+            watchers = self.agent._build_intel_watchers()
+        mock_detect.assert_called_once()
+        self.assertEqual(watchers[0]._chatlog_dir, Path("/auto/detected/dir"))
+
+    def test_load_settings_reads_intel_log_dir(self):
+        self._write_settings({"intel_log_dir": "/custom/eve/logs"})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._intel_log_dir, "/custom/eve/logs")
+
+    def test_load_settings_intel_log_dir_defaults_to_empty(self):
+        self._write_settings({})
+        self.agent.load_settings()
+        self.assertEqual(self.agent._intel_log_dir, "")
+
+    def test_each_watcher_callback_reports_its_own_channel(self):
+        """Regression guard: a naive `lambda line: ...channel=channel`
+        closure over the loop variable would have every watcher report
+        the LAST channel in the list, not its own."""
+        self.agent._intel_channels = ["Intel", "Alliance", "NC-INT"]
+        watchers = self.agent._build_intel_watchers()
+
+        seen = []
+        with patch.object(
+            self.agent, "_on_intel_line", side_effect=lambda line, channel=None: seen.append((line, channel))
+        ):
+            for w in watchers:
+                w.callback(f"line for {w.channel_pattern}")
+
+        self.assertEqual(
+            seen,
+            [
+                ("line for Intel", "Intel"),
+                ("line for Alliance", "Alliance"),
+                ("line for NC-INT", "NC-INT"),
+            ],
+        )
+
+    def test_two_channels_tail_concurrently_from_separate_files(self):
+        """Acceptance criterion: two configured channels both tail
+        concurrently -- verified with two real temp log files."""
+        self.agent._intel_channels = ["Intel", "Alliance"]
+
+        reports = []
+        with patch.object(
+            self.agent, "_on_intel_report", side_effect=lambda r: reports.append(r)
+        ):
+            # Built inside the patch context: on_intel=self._on_intel_report
+            # is resolved to a bound method AT CONSTRUCTION TIME, so
+            # patching the attribute afterward wouldn't affect watchers
+            # that already captured the original (unpatched) method.
+            watchers = self.agent._build_intel_watchers()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                for watcher, system in zip(watchers, ["Jita", "Amarr"]):
+                    log = Path(tmpdir) / f"{watcher.channel_pattern}_test.txt"
+                    log.write_text(f"[ 2024.05.01 15:30:22 ] bluhayz > {system} clr\n")
+                    watcher._log_path = log
+                    watcher._file_pos = 0
+                    watcher._tail_once()
+
+        self.assertEqual(len(reports), 2)
+        self.assertEqual({r.channel for r in reports}, {"Intel", "Alliance"})
+
+    # -- cross-channel dedup ---------------------------------------------
+
+    def test_is_duplicate_intel_line_true_within_window(self):
+        line = "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr"
+        self.assertFalse(self.agent._is_duplicate_intel_line(line))
+        # Same (pilot, message) posted moments later in another channel.
+        line_again = "[ 2024.05.01 15:30:24 ] bluhayz > D7-ZAC clr"
+        self.assertTrue(self.agent._is_duplicate_intel_line(line_again))
+
+    def test_is_duplicate_intel_line_false_outside_window(self):
+        line = "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr"
+        with patch("evealert.manager.alertmanager.time.time", return_value=1000.0):
+            self.assertFalse(self.agent._is_duplicate_intel_line(line))
+        with patch(
+            "evealert.manager.alertmanager.time.time", return_value=1000.0 + 31
+        ):
+            self.assertFalse(self.agent._is_duplicate_intel_line(line))
+
+    def test_different_pilot_same_message_not_a_duplicate(self):
+        line_a = "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr"
+        line_b = "[ 2024.05.01 15:30:22 ] someoneelse > D7-ZAC clr"
+        self.assertFalse(self.agent._is_duplicate_intel_line(line_a))
+        self.assertFalse(self.agent._is_duplicate_intel_line(line_b))
+
+    def test_build_intel_watchers_share_the_same_dedup_check(self):
+        """A duplicate paste across two channel watchers must only fire
+        callbacks once total, not once per watcher."""
+        self.agent._intel_channels = ["Intel", "Alliance"]
+
+        reports = []
+        with patch.object(
+            self.agent, "_on_intel_report", side_effect=lambda r: reports.append(r)
+        ):
+            watchers = self.agent._build_intel_watchers()
+            with tempfile.TemporaryDirectory() as tmpdir:
+                line = "[ 2024.05.01 15:30:22 ] bluhayz > D7-ZAC clr\n"
+                for watcher in watchers:
+                    log = Path(tmpdir) / f"{watcher.channel_pattern}_test.txt"
+                    log.write_text(line)
+                    watcher._log_path = log
+                    watcher._file_pos = 0
+                    watcher._tail_once()
+
+        self.assertEqual(len(reports), 1)
+
+    # -- channel-tagged rendering -----------------------------------------
+
+    def test_on_intel_report_tags_channel_when_present(self):
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        report.channel = "NC-INT"
+        self.agent._on_intel_report(report)
+        messages = self._logged_messages()
+        self.assertTrue(
+            any(m.startswith("Intel[NC-INT]:") for m in messages),
+            f"Expected a channel-tagged Intel line, got: {messages}",
+        )
+
+    def test_on_intel_report_no_tag_when_channel_absent(self):
+        report = _make_intel_report(mentioned_pilots=["MickFun"])
+        self.assertIsNone(report.channel)
+        self.agent._on_intel_report(report)
+        messages = self._logged_messages()
+        self.assertTrue(any(m.startswith("Intel:") for m in messages))
+        self.assertFalse(any(m.startswith("Intel[") for m in messages))
+
+    def test_on_intel_line_tags_channel_when_given(self):
+        self.agent._on_intel_line("D7-ZAC clr", channel="Intel")
+        messages = self._logged_messages()
+        self.assertTrue(any(m.startswith("Intel: [Intel] ") for m in messages))
+
+    def test_on_intel_line_no_tag_when_channel_omitted(self):
+        self.agent._on_intel_line("D7-ZAC clr")
+        messages = self._logged_messages()
+        self.assertTrue(any(m == "Intel: D7-ZAC clr" for m in messages))
+
+
 class PruneOnStartupTests(unittest.TestCase):
     """#214: the persistent pilot-history store is pruned once per app
     start (AlertAgent.__init__), not on every load_settings() reload."""
@@ -1367,6 +1698,491 @@ class PruneOnStartupTests(unittest.TestCase):
             side_effect=OSError("disk full"),
         ), patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
             AlertAgent(self.mock_main)  # must not raise
+
+
+class R2Z2SettingsTests(unittest.TestCase):
+    """#169: r2z2 settings block -- defaults, explicit values, watchlist
+    parsing, and last_sequence persistence round-tripping."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_settings(self, r2z2: dict) -> None:
+        # Non-degenerate regions -- load_settings() validates and
+        # early-returns (skipping everything past region checks) when
+        # x1 == x2, per ConfigValidator.validate_settings_dict().
+        with open(self.settings_path, "w") as f:
+            json.dump({
+                "alert_region_1": {"x": 100, "y": 100},
+                "alert_region_2": {"x": 300, "y": 300},
+                "faction_region_1": {"x": 400, "y": 100},
+                "faction_region_2": {"x": 600, "y": 300},
+                "r2z2": r2z2,
+            }, f)
+        reset_settings_store(self.settings_path)
+
+    def test_defaults_when_no_r2z2_block(self):
+        self._write_settings({})
+        self.agent.load_settings()
+        self.assertFalse(self.agent._r2z2_enabled)
+        self.assertEqual(self.agent._r2z2_alarm_jumps, 2)
+        self.assertEqual(self.agent._r2z2_watch_jumps, 5)
+        self.assertEqual(self.agent._r2z2_alliance_watchlist, set())
+        self.assertIsNone(self.agent._r2z2_last_sequence)
+
+    def test_explicit_values_loaded(self):
+        self._write_settings({
+            "enabled": True,
+            "alarm_jumps": 3,
+            "watch_jumps": 7,
+            "alliance_watchlist": [99000001, 99000002],
+            "last_sequence": 123456,
+        })
+        self.agent.load_settings()
+        self.assertTrue(self.agent._r2z2_enabled)
+        self.assertEqual(self.agent._r2z2_alarm_jumps, 3)
+        self.assertEqual(self.agent._r2z2_watch_jumps, 7)
+        self.assertEqual(self.agent._r2z2_alliance_watchlist, {99000001, 99000002})
+        self.assertEqual(self.agent._r2z2_last_sequence, 123456)
+
+    def test_stop_persists_last_sequence_without_disturbing_other_settings(self):
+        """stop() must read-merge-write the sequence -- never seed a save
+        from DEFAULT_SETTINGS (#108 data-loss pattern)."""
+        self._write_settings({"enabled": True, "alliance_watchlist": [123]})
+        self.agent.load_settings()
+        self.agent._r2z2_consumer = MagicMock()
+        self.agent._r2z2_consumer.last_sequence = 999888
+        self.agent._r2z2_consumer.stop = MagicMock()
+
+        self.agent.stop()
+
+        with open(self.settings_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["r2z2"]["last_sequence"], 999888)
+        # The rest of the r2z2 block (and other sections) must survive the merge.
+        self.assertEqual(saved["r2z2"]["alliance_watchlist"], [123])
+        self.assertTrue(saved["r2z2"]["enabled"])
+
+    def test_stop_stops_and_clears_the_consumer(self):
+        self._write_settings({"enabled": True})
+        self.agent.load_settings()
+        consumer = MagicMock()
+        consumer.last_sequence = 1
+        self.agent._r2z2_consumer = consumer
+
+        self.agent.stop()
+
+        consumer.stop.assert_called_once()
+        self.assertIsNone(self.agent._r2z2_consumer)
+
+    def test_stop_without_a_consumer_does_not_touch_settings(self):
+        """No consumer means R2Z2 was never enabled/started -- stop() must
+        not write to settings.json at all (file stays exactly as written)."""
+        self._write_settings({"enabled": False})
+        self.agent.load_settings()
+        self.assertIsNone(self.agent._r2z2_consumer)
+        before = self.settings_path.read_text(encoding="utf-8")
+
+        self.agent.stop()  # must not raise
+
+        after = self.settings_path.read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+
+class R2Z2AdjacentKillCountTests(unittest.TestCase):
+    """#169: the threat score's adjacent_kills signal prefers the R2Z2
+    consumer's buffer over NeighborMonitor when R2Z2 is active."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._adjacent_poll_interval = 120
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_prefers_r2z2_consumer_when_present(self):
+        self.agent._r2z2_consumer = MagicMock()
+        self.agent._r2z2_consumer.kill_count_since = MagicMock(return_value=4)
+        self.agent._neighbor_monitor = MagicMock(last_kill_count=99)
+
+        self.assertEqual(self.agent._get_adjacent_kill_count(), 4)
+        self.agent._r2z2_consumer.kill_count_since.assert_called_once_with(120)
+
+    def test_falls_back_to_neighbor_monitor_when_no_consumer(self):
+        self.agent._r2z2_consumer = None
+        self.agent._neighbor_monitor = MagicMock(last_kill_count=7)
+
+        self.assertEqual(self.agent._get_adjacent_kill_count(), 7)
+
+    def test_returns_zero_when_neither_present(self):
+        self.agent._r2z2_consumer = None
+        self.agent._neighbor_monitor = None
+
+        self.assertEqual(self.agent._get_adjacent_kill_count(), 0)
+
+
+class R2Z2ConsumerWiringTests(unittest.IsolatedAsyncioTestCase):
+    """#169: engine wiring around R2Z2Consumer -- system resolution,
+    on_kill reporting (log line + alarm), and sequence tracking."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent.loop = asyncio.get_event_loop()
+        self.agent._r2z2_alarm_jumps = 2
+        self.agent._r2z2_watch_jumps = 5
+        self.agent._r2z2_alliance_watchlist = {99000001}
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    # -- _start_r2z2_consumer -------------------------------------------
+
+    async def test_starts_consumer_with_resolved_system_id(self):
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(return_value=30000142)
+        mock_consumer_instance = MagicMock()
+        mock_consumer_instance.run = AsyncMock(return_value=None)
+
+        with patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ), patch(
+            "evealert.tools.r2z2.R2Z2Consumer", return_value=mock_consumer_instance
+        ) as mock_cls:
+            await self.agent._start_r2z2_consumer("Jita")
+            await asyncio.sleep(0)  # let the scheduled create_task() run
+
+        mock_cls.assert_called_once_with(
+            origin_system_id=30000142,
+            watch_jumps=5,
+            alliance_watchlist={99000001},
+            on_kill=self.agent._on_r2z2_kill,
+            sequence=self.agent._r2z2_last_sequence,
+        )
+        self.assertIs(self.agent._r2z2_consumer, mock_consumer_instance)
+        mock_consumer_instance.run.assert_awaited_once()
+
+    async def test_unresolvable_system_does_not_start_a_consumer(self):
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(return_value=None)
+
+        with patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ), patch("evealert.tools.r2z2.R2Z2Consumer") as mock_cls:
+            await self.agent._start_r2z2_consumer("Not A Real System")
+
+        mock_cls.assert_not_called()
+        self.assertIsNone(self.agent._r2z2_consumer)
+
+    # -- _on_r2z2_kill / _report_r2z2_kill -------------------------------
+
+    async def _fire_kill(self, jump_dist):
+        from evealert.tools.r2z2 import LiveKillmail
+
+        killmail = LiveKillmail(
+            killmail_id=1, solar_system_id=30000142,
+            victim_ship_type_id=587, attacker_count=3, location_id=None,
+        )
+        self.agent._r2z2_consumer = MagicMock(last_sequence=42)
+        with patch(
+            "evealert.tools.r2z2.resolve_ship_name", new=AsyncMock(return_value="Rifter")
+        ), patch(
+            "evealert.tools.universe.get_universe_cache"
+        ) as mock_get_cache, patch.object(
+            self.agent, "play_sound", new=AsyncMock()
+        ) as mock_play:
+            mock_cache = MagicMock()
+            mock_cache.get_system_name = AsyncMock(return_value="Jita")
+            mock_get_cache.return_value = mock_cache
+
+            self.agent._on_r2z2_kill(killmail, jump_dist)
+            await asyncio.sleep(0.05)  # let the scheduled report task run
+
+        return mock_play
+
+    async def test_kill_within_alarm_jumps_logs_and_plays_alarm(self):
+        mock_play = await self._fire_kill(jump_dist=1)
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("LIVE KILL: Rifter destroyed in Jita" in m and "(1j away)" in m
+                and "3 attackers" in m for m in messages),
+            f"Expected a LIVE KILL line, got: {messages}",
+        )
+        mock_play.assert_awaited_once()
+        self.assertEqual(self.agent._r2z2_last_sequence, 42)
+
+    async def test_kill_outside_alarm_jumps_logs_without_alarm(self):
+        mock_play = await self._fire_kill(jump_dist=5)  # > alarm_jumps=2
+
+        messages = self._logged_messages()
+        self.assertTrue(any("(5j away)" in m for m in messages))
+        mock_play.assert_not_awaited()
+
+    async def test_watchlist_only_kill_labels_as_watchlist_not_jumps(self):
+        mock_play = await self._fire_kill(jump_dist=None)
+
+        messages = self._logged_messages()
+        self.assertTrue(any("(watchlist)" in m for m in messages))
+        mock_play.assert_not_awaited()
+
+
+def _mock_camp(system_id=30000144, location_id=999, confidence="camp",
+               kill_count=4, last_kill_age_seconds=30.0):
+    camp = MagicMock()
+    camp.system_id = system_id
+    camp.location_id = location_id
+    camp.confidence = confidence
+    camp.kill_count = kill_count
+    camp.last_kill_age_seconds = last_kill_age_seconds
+    camp.gate_name = None
+    camp.system_name = None
+    return camp
+
+
+class GateCampMonitorTests(unittest.IsolatedAsyncioTestCase):
+    """#170: the periodic gate-camp monitor -- warns once per full-
+    confidence camp per hour, only within adjacent.max_jumps."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._adjacent_max_jumps = 3
+        self.agent._r2z2_consumer = MagicMock()
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def _run_one_cycle(self, origin_id=30000142):
+        """Drive _gatecamp_monitor through exactly one loop body execution
+        by mocking asyncio.sleep to flip `running` off on its 2nd call
+        (1st call is the top-of-loop sleep before the body we want to
+        exercise; the 2nd is the top-of-next-iteration sleep, which we
+        intercept to stop the loop cleanly)."""
+        self.agent.running = True
+        call_count = {"n": 0}
+
+        async def fake_sleep(_):
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                self.agent.running = False
+
+        with patch("evealert.manager.alertmanager.asyncio.sleep", new=fake_sleep):
+            await self.agent._gatecamp_monitor(origin_id)
+
+    def _patch_camp_layer(self, camps, nearby):
+        mock_cache = MagicMock()
+        mock_cache.get_systems_within_jumps = AsyncMock(return_value=nearby)
+        return patch(
+            "evealert.tools.gatecamp.get_active_camps", return_value=camps
+        ), patch(
+            "evealert.tools.gatecamp.resolve_camp_names",
+            new=AsyncMock(side_effect=lambda cs: cs),
+        ), patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        )
+
+    async def test_warns_for_a_full_confidence_camp_within_radius(self):
+        camp = _mock_camp(confidence="camp")
+        p1, p2, p3 = self._patch_camp_layer([camp], {30000144: 2})
+        with p1, p2, p3:
+            await self._run_one_cycle()
+
+        messages = self._logged_messages()
+        self.assertTrue(
+            any("GATE CAMP" in m and "(2j away)" in m and "4 kills" in m for m in messages),
+            f"Expected a GATE CAMP line, got: {messages}",
+        )
+
+    async def test_possible_camp_does_not_warn(self):
+        camp = _mock_camp(confidence="possible_camp")
+        p1, p2, p3 = self._patch_camp_layer([camp], {30000144: 2})
+        with p1, p2, p3:
+            await self._run_one_cycle()
+
+        messages = self._logged_messages()
+        self.assertFalse(any("GATE CAMP" in m for m in messages))
+
+    async def test_camp_outside_adjacent_radius_does_not_warn(self):
+        camp = _mock_camp(confidence="camp")
+        p1, p2, p3 = self._patch_camp_layer([camp], {})  # not in the nearby map
+        with p1, p2, p3:
+            await self._run_one_cycle()
+
+        messages = self._logged_messages()
+        self.assertFalse(any("GATE CAMP" in m for m in messages))
+
+    async def test_cooldown_prevents_rewarning_within_an_hour(self):
+        camp = _mock_camp(confidence="camp")
+        p1, p2, p3 = self._patch_camp_layer([camp], {30000144: 2})
+        with p1, p2, p3:
+            await self._run_one_cycle()
+            await self._run_one_cycle()
+
+        messages = self._logged_messages()
+        camp_lines = [m for m in messages if "GATE CAMP" in m]
+        self.assertEqual(len(camp_lines), 1)
+
+
+class RouteCheckGateCampTests(unittest.IsolatedAsyncioTestCase):
+    """#170: _run_route_check() feeds active camp system IDs into
+    route_threat() and renders a [CAMP] marker for those legs."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._r2z2_consumer = MagicMock()
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _logged_messages(self) -> list[str]:
+        return [c.args[0] for c in self.mock_main.write_message.call_args_list]
+
+    async def test_camped_leg_renders_camp_marker(self):
+        from evealert.tools.universe import RouteLeg, RouteSuggestion
+
+        camp = _mock_camp(system_id=30000144)
+        camped_leg = RouteLeg(30000144, "SomeSystem", 1, 0, "danger", has_camp=True)
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(side_effect=lambda name: {
+            "Jita": 30000142, "Amarr": 30002187,
+        }.get(name))
+        mock_cache.suggest_safer_route = AsyncMock(return_value=RouteSuggestion(
+            shortest=[camped_leg], suggested=[camped_leg], detoured=False,
+        ))
+
+        with patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ), patch(
+            "evealert.tools.gatecamp.get_active_camps", return_value=[camp]
+        ):
+            await self.agent._run_route_check("Jita", "Amarr")
+
+        mock_cache.suggest_safer_route.assert_awaited_once_with(
+            30000142, 30002187, camped_system_ids={30000144}
+        )
+        messages = self._logged_messages()
+        self.assertTrue(any("[CAMP]" in m for m in messages))
+        # Not detoured -- only the Shortest line should render, not Suggested.
+        self.assertTrue(any("Shortest route" in m for m in messages))
+        self.assertFalse(any("Suggested route" in m for m in messages))
+
+    async def test_detoured_suggestion_renders_both_routes(self):
+        from evealert.tools.universe import RouteLeg, RouteSuggestion
+
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(side_effect=lambda name: {
+            "Jita": 30000142, "Amarr": 30002187,
+        }.get(name))
+        shortest = [RouteLeg(1, "Hot", 1, 20, "danger")]
+        suggested = [RouteLeg(2, "Quiet", 1, 0, "safe"), RouteLeg(3, "AlsoQuiet", 2, 0, "safe")]
+        mock_cache.suggest_safer_route = AsyncMock(return_value=RouteSuggestion(
+            shortest=shortest, suggested=suggested, detoured=True,
+        ))
+
+        with patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ), patch(
+            "evealert.tools.gatecamp.get_active_camps", return_value=[]
+        ):
+            await self.agent._run_route_check("Jita", "Amarr")
+
+        messages = self._logged_messages()
+        self.assertTrue(any("Shortest route to Amarr: 1 hop(s)" in m for m in messages))
+        self.assertTrue(any("Suggested route to Amarr: 2 hop(s)" in m for m in messages))
+
+    async def test_no_path_found_message(self):
+        mock_cache = MagicMock()
+        mock_cache.get_system_id = AsyncMock(side_effect=lambda name: {
+            "Jita": 30000142, "Amarr": 30002187,
+        }.get(name))
+        mock_cache.suggest_safer_route = AsyncMock(return_value=None)
+
+        with patch(
+            "evealert.tools.universe.get_universe_cache", return_value=mock_cache
+        ), patch(
+            "evealert.tools.gatecamp.get_active_camps", return_value=[]
+        ):
+            await self.agent._run_route_check("Jita", "Amarr")
+
+        messages = self._logged_messages()
+        self.assertTrue(any("no path found" in m for m in messages))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -53,6 +55,29 @@ class _LoginThread(QThread):
             self.finished.emit(ok, name)
         except Exception as exc:
             self.finished.emit(False, str(exc))
+
+
+class _RouteCheckThread(QThread):
+    """Runs AlertAgent._run_route_check() on a background thread (#172) --
+    results post to the main log pane via the agent's own thread-safe
+    _ui() bridge, so this thread only needs to signal completion/error."""
+
+    finished_ok = _Signal(str)  # error_message, "" on success
+
+    def __init__(self, agent, origin: str, destination: str):
+        super().__init__()
+        self._agent = agent
+        self._origin = origin
+        self._destination = destination
+
+    def run(self) -> None:
+        import asyncio  # noqa: PLC0415
+
+        try:
+            asyncio.run(self._agent._run_route_check(self._origin, self._destination))
+            self.finished_ok.emit("")
+        except Exception as exc:
+            self.finished_ok.emit(str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +125,13 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(700, 560)
         self.resize(760, 640)
         self._store = store
+        # #172: the running AlertAgent, if this dialog was opened from
+        # MainWindow -- lets "Check Route" reuse the engine's own
+        # _run_route_check() (gate-camp aware, results post to the main
+        # log). None in standalone/test construction; the button is
+        # disabled in that case.
+        self._agent = getattr(parent, "alert", None)
+        self._route_check_thread: "_RouteCheckThread | None" = None
         # registry controls: dotted-path → QWidget
         self._controls: dict[str, QWidget] = {}
         # tab layout containers: tab_name → QVBoxLayout
@@ -383,6 +415,187 @@ class SettingsDialog(QDialog):
         form3.addRow("Character IDs:", self._fleet_char_ids)
         intel.addWidget(box3)
 
+        # Intel channel discovery (#191): directory browse + scan + checkbox
+        # list, replacing the old single free-text channel-name field.
+        box4, form4 = _group("Intel Channels")
+        dir_row = QHBoxLayout()
+        self._intel_log_dir_entry = QLineEdit()
+        self._intel_log_dir_entry.setPlaceholderText("Auto-detected EVE chatlog directory")
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._browse_intel_log_dir)
+        dir_row.addWidget(self._intel_log_dir_entry, 1)
+        dir_row.addWidget(browse_btn)
+        form4.addRow("Chatlog Directory:", dir_row)
+
+        scan_row = QHBoxLayout()
+        scan_btn = QPushButton("Scan for Channels")
+        scan_btn.clicked.connect(self._scan_for_intel_channels)
+        scan_row.addWidget(scan_btn)
+        scan_row.addStretch()
+        form4.addRow("", scan_row)
+
+        self._intel_channels_empty_label = QLabel(
+            "No log files found here yet — launch EVE Online with logging "
+            "enabled, join the channels you want to monitor, then click "
+            "Scan again."
+        )
+        self._intel_channels_empty_label.setWordWrap(True)
+        self._intel_channels_empty_label.setProperty("class", "muted")
+        self._intel_channels_empty_label.setVisible(False)
+        form4.addRow("", self._intel_channels_empty_label)
+
+        self._intel_channels_list = QListWidget()
+        self._intel_channels_list.setMaximumHeight(150)
+        form4.addRow("Channels:", self._intel_channels_list)
+
+        add_row = QHBoxLayout()
+        self._intel_channel_add_entry = QLineEdit()
+        self._intel_channel_add_entry.setPlaceholderText(
+            "Add a channel not yet logged this session…"
+        )
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._add_manual_intel_channel)
+        add_row.addWidget(self._intel_channel_add_entry, 1)
+        add_row.addWidget(add_btn)
+        form4.addRow("", add_row)
+
+        intel.addWidget(box4)
+
+        # Standings manager (#173): threat_tiers manual overrides +
+        # ESI-synced personal standings, view/edit/import/export.
+        box5, form5 = _group("Standings")
+        standings_btn = QPushButton("Standings Manager…")
+        standings_btn.clicked.connect(self._open_standings_manager)
+        form5.addRow("Threat tiers & ESI standings:", standings_btn)
+        intel.addWidget(box5)
+
+        # R2Z2 live kill feed (#169) -- alliance watchlist is a non-registry
+        # comma-separated ID list; enabled/alarm_jumps/watch_jumps are
+        # registry-driven (see fields.py) and share this same section box
+        # (_get_section returns the box the registry loop later appends to).
+        form_r2z2 = self._get_section("Intel & ESI", "Live Kill Feed (R2Z2)")
+        self._r2z2_watchlist = QLineEdit()
+        self._r2z2_watchlist.setPlaceholderText("Alliance IDs, comma-separated")
+        form_r2z2.addRow("Alliance Watchlist:", self._r2z2_watchlist)
+
+        # Route check (#172): shortest vs. threat-weighted suggested route,
+        # gate-camp aware when R2Z2 is running. Results post to the main
+        # log pane (same _run_route_check() the engine already has).
+        box6, form6 = _group("Route Check")
+        self._route_origin_entry = QLineEdit()
+        self._route_origin_entry.setPlaceholderText("Origin system")
+        self._route_dest_entry = QLineEdit()
+        self._route_dest_entry.setPlaceholderText("Destination system")
+        form6.addRow("Origin:", self._route_origin_entry)
+        form6.addRow("Destination:", self._route_dest_entry)
+        check_row = QHBoxLayout()
+        self._route_check_btn = QPushButton("Check Route")
+        self._route_check_btn.clicked.connect(self._check_route)
+        self._route_check_status = QLabel(
+            "" if self._agent is not None else "Engine not available."
+        )
+        self._route_check_status.setProperty("class", "muted")
+        check_row.addWidget(self._route_check_btn)
+        check_row.addWidget(self._route_check_status, 1)
+        form6.addRow("", check_row)
+        if self._agent is None:
+            self._route_check_btn.setEnabled(False)
+        intel.addWidget(box6)
+
+    def _check_route(self) -> None:
+        origin = self._route_origin_entry.text().strip()
+        destination = self._route_dest_entry.text().strip()
+        if not origin or not destination:
+            self._route_check_status.setText("Enter both an origin and a destination.")
+            return
+        if self._agent is None:
+            self._route_check_status.setText("Engine not available.")
+            return
+        self._route_check_btn.setEnabled(False)
+        self._route_check_status.setText("Checking — see main log for results…")
+        self._route_check_thread = _RouteCheckThread(self._agent, origin, destination)
+        self._route_check_thread.finished_ok.connect(self._on_route_check_done)
+        self._route_check_thread.start()
+
+    def _on_route_check_done(self, error_message: str) -> None:
+        self._route_check_btn.setEnabled(True)
+        self._route_check_status.setText(
+            f"Failed: {error_message}" if error_message else "Done — see main log."
+        )
+
+    def _open_standings_manager(self) -> None:
+        from evealert.ui.standings_manager import StandingsManagerDialog  # noqa: PLC0415
+
+        dlg = StandingsManagerDialog(self, self._store)
+        dlg.exec()
+
+    def _browse_intel_log_dir(self) -> None:
+        from evealert.tools.intel_watcher import get_eve_chatlog_dir  # noqa: PLC0415
+
+        start_dir = self._intel_log_dir_entry.text().strip() or str(
+            get_eve_chatlog_dir() or ""
+        )
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select EVE Chatlog Directory", start_dir
+        )
+        if chosen:
+            self._intel_log_dir_entry.setText(chosen)
+
+    def _scan_for_intel_channels(self) -> None:
+        from pathlib import Path  # noqa: PLC0415
+
+        from evealert.tools.intel_watcher import (  # noqa: PLC0415
+            discover_channels,
+            get_eve_chatlog_dir,
+        )
+
+        dir_text = self._intel_log_dir_entry.text().strip()
+        chatlog_dir = Path(dir_text) if dir_text else get_eve_chatlog_dir()
+        if chatlog_dir is None:
+            self._intel_channels_empty_label.setVisible(True)
+            return
+
+        # Preserve the currently-checked set (including manually-added
+        # entries not backed by a log file yet) before rebuilding the list.
+        previously_checked = self._checked_intel_channels()
+
+        discovered = discover_channels(chatlog_dir)
+        self._intel_channels_empty_label.setVisible(not discovered)
+
+        self._intel_channels_list.clear()
+        for name in sorted(set(discovered) | previously_checked):
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked
+                if name in previously_checked
+                else Qt.CheckState.Unchecked
+            )
+            self._intel_channels_list.addItem(item)
+
+    def _add_manual_intel_channel(self) -> None:
+        name = self._intel_channel_add_entry.text().strip()
+        if not name:
+            return
+        self._intel_channel_add_entry.clear()
+        # Re-check an existing row (case-insensitive) instead of duplicating it.
+        for i in range(self._intel_channels_list.count()):
+            existing = self._intel_channels_list.item(i)
+            if existing.text().lower() == name.lower():
+                existing.setCheckState(Qt.CheckState.Checked)
+                return
+        item = QListWidgetItem(name)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self._intel_channels_list.addItem(item)
+
+    def _checked_intel_channels(self) -> set:
+        return {
+            self._intel_channels_list.item(i).text()
+            for i in range(self._intel_channels_list.count())
+            if self._intel_channels_list.item(i).checkState() == Qt.CheckState.Checked
+        }
+
     # ── Registry-driven controls ───────────────────────────────────────
 
     def _build_registry_controls(self) -> None:
@@ -512,6 +725,26 @@ class SettingsDialog(QDialog):
         self._kos_custom_urls.setText(", ".join(kos.get("custom_urls", [])))
         fleet = settings.get("fleet", {})
         self._fleet_char_ids.setText(", ".join(str(i) for i in fleet.get("tracked_character_ids", [])))
+        r2z2 = settings.get("r2z2", {})
+        self._r2z2_watchlist.setText(", ".join(str(i) for i in r2z2.get("alliance_watchlist", [])))
+
+        # Intel channels (#191): intel_channels is canonical; a legacy
+        # intel_log_channel-only config migrates into a one-item list so
+        # reopening Settings doesn't show it as unconfigured.
+        intel = settings.get("intelligence", {})
+        self._intel_log_dir_entry.setText(intel.get("intel_log_dir", ""))
+        configured_channels = intel.get("intel_channels") or (
+            [intel["intel_log_channel"]] if intel.get("intel_log_channel") else []
+        )
+        self._intel_channels_list.clear()
+        self._intel_channels_empty_label.setVisible(False)
+        for name in configured_channels:
+            if not name:
+                continue
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self._intel_channels_list.addItem(item)
 
         # Registry controls
         for spec in FIELDS:
@@ -569,6 +802,15 @@ class SettingsDialog(QDialog):
         patch.setdefault("kos", {})["custom_urls"] = custom_urls
         char_ids = [int(c.strip()) for c in self._fleet_char_ids.text().split(",") if c.strip().isdigit()]
         patch.setdefault("fleet", {})["tracked_character_ids"] = char_ids
+        watchlist_ids = [int(a.strip()) for a in self._r2z2_watchlist.text().split(",") if a.strip().isdigit()]
+        patch.setdefault("r2z2", {})["alliance_watchlist"] = watchlist_ids
+
+        # Intel channels (#191) -- only persist the directory as an
+        # override when the user actually set one; empty means "keep
+        # using auto-detection," matching intel_log_dir's default.
+        intel_patch = patch.setdefault("intelligence", {})
+        intel_patch["intel_log_dir"] = self._intel_log_dir_entry.text().strip()
+        intel_patch["intel_channels"] = sorted(self._checked_intel_channels())
 
         # Registry controls
         for spec in FIELDS:
