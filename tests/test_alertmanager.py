@@ -2427,5 +2427,257 @@ class LocationMonitorDuplicateSystemInfoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.agent._settings_store.get("server.system"), "Jita")
 
 
+class StabilizeEnemyIdentitiesTests(unittest.TestCase):
+    """#224: OCR misread tolerance -- the same on-screen pilot read
+    slightly differently between polls (classic l/t/I/1 confusion) must
+    not be treated as a brand-new pilot every time."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_first_sighting_at_a_position_is_trusted_immediately(self):
+        result = self.agent._stabilize_enemy_identities(
+            {(1, 1): "lilbitofgoop"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(result, {(1, 1): "lilbitofgoop"})
+        self.assertEqual(self.agent._enemy_identity_anchors[(1, 1)], "lilbitofgoop")
+
+    def test_exact_repeat_read_keeps_the_anchor(self):
+        self.agent._stabilize_enemy_identities({(1, 1): "lilbitofgoop"}, frozenset({(1, 1)}))
+        result = self.agent._stabilize_enemy_identities(
+            {(1, 1): "lilbitofgoop"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(result, {(1, 1): "lilbitofgoop"})
+
+    def test_fuzzy_close_misread_is_absorbed_into_the_anchor(self):
+        """The core fix: a near-miss OCR read must not change the
+        identity used downstream."""
+        self.agent._stabilize_enemy_identities({(1, 1): "lilbitofgoop"}, frozenset({(1, 1)}))
+        result = self.agent._stabilize_enemy_identities(
+            {(1, 1): "litbitofgoop"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(result, {(1, 1): "lilbitofgoop"})  # anchor, not the new read
+        self.assertEqual(self.agent._enemy_identity_anchors[(1, 1)], "lilbitofgoop")
+
+    def test_the_full_reported_misread_sequence_stabilizes_to_one_identity(self):
+        """Exact real-world sequence from #224's log excerpt."""
+        r1 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "lilbitofgoop"}, frozenset({(1, 1)})
+        )
+        r2 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "litbitofgoop"}, frozenset({(1, 1)})
+        )
+        r3 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "titbitofgoop"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(r1[(1, 1)], "lilbitofgoop")
+        self.assertEqual(r2[(1, 1)], "lilbitofgoop")
+        self.assertEqual(r3[(1, 1)], "lilbitofgoop")  # still the same anchor throughout
+
+    def test_dissimilar_name_requires_two_consecutive_reads_before_taking_over(self):
+        self.agent._stabilize_enemy_identities({(1, 1): "Bob McTest"}, frozenset({(1, 1)}))
+        # A completely different name appears once -- must not switch yet.
+        r2 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "Evil Corp Pilot"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(r2[(1, 1)], "Bob McTest")
+        # Same new name repeats -- now it takes over (genuine pilot swap).
+        r3 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "Evil Corp Pilot"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(r3[(1, 1)], "Evil Corp Pilot")
+        self.assertEqual(self.agent._enemy_identity_anchors[(1, 1)], "Evil Corp Pilot")
+
+    def test_dissimilar_name_that_does_not_repeat_never_takes_over(self):
+        self.agent._stabilize_enemy_identities({(1, 1): "Bob McTest"}, frozenset({(1, 1)}))
+        self.agent._stabilize_enemy_identities({(1, 1): "Evil Corp Pilot"}, frozenset({(1, 1)}))
+        # A THIRD, different-again name -- resets the challenger, anchor unmoved.
+        r3 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "Some Rando"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(r3[(1, 1)], "Bob McTest")
+        self.assertEqual(self.agent._enemy_identity_anchors[(1, 1)], "Bob McTest")
+
+    def test_position_leaving_screen_clears_its_anchor(self):
+        self.agent._stabilize_enemy_identities({(1, 1): "Bob McTest"}, frozenset({(1, 1)}))
+        self.agent._stabilize_enemy_identities({}, frozenset())  # icon gone
+        self.assertNotIn((1, 1), self.agent._enemy_identity_anchors)
+
+    def test_position_reused_by_a_new_pilot_after_leaving_is_trusted_immediately(self):
+        self.agent._stabilize_enemy_identities({(1, 1): "Bob McTest"}, frozenset({(1, 1)}))
+        self.agent._stabilize_enemy_identities({}, frozenset())  # old pilot left
+        result = self.agent._stabilize_enemy_identities(
+            {(1, 1): "Someone New"}, frozenset({(1, 1)})
+        )
+        self.assertEqual(result[(1, 1)], "Someone New")  # no stale anchor inherited
+
+    def test_two_positions_do_not_cross_contaminate(self):
+        r = self.agent._stabilize_enemy_identities(
+            {(1, 1): "lilbitofgoop", (2, 2): "Someone Else"},
+            frozenset({(1, 1), (2, 2)}),
+        )
+        self.assertEqual(r, {(1, 1): "lilbitofgoop", (2, 2): "Someone Else"})
+        r2 = self.agent._stabilize_enemy_identities(
+            {(1, 1): "litbitofgoop", (2, 2): "Someone Else"},
+            frozenset({(1, 1), (2, 2)}),
+        )
+        self.assertEqual(r2, {(1, 1): "lilbitofgoop", (2, 2): "Someone Else"})
+
+    def test_reset_alarm_clears_stabilization_state(self):
+        self.agent._stabilize_enemy_identities({(1, 1): "Bob McTest"}, frozenset({(1, 1)}))
+        self.agent._enemy_identity_challenger[(1, 1)] = ("X", 1)
+        asyncio.run(self.agent.reset_alarm("Enemy"))
+        self.assertEqual(self.agent._enemy_identity_anchors, {})
+        self.assertEqual(self.agent._enemy_identity_challenger, {})
+
+
+class ShouldAlarmEnemyOcrMisreadIntegrationTests(unittest.TestCase):
+    """#224 acceptance criterion: a synthetic sequence of near-identical
+    OCR reads at a stable position must produce exactly one alarm/history
+    trigger, not one per misread variant."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_stabilized_misread_sequence_triggers_alarm_exactly_once(self):
+        misreads = ["lilbitofgoop", "litbitofgoop", "titbitofgoop"]
+        triggers = []
+        for raw_name in misreads:
+            identities = self.agent._stabilize_enemy_identities(
+                {(1, 1): raw_name}, frozenset({(1, 1)})
+            )
+            self.agent._enemy_points = [(20, 20)]  # quantizes to (1, 1) w/ grid=20
+            triggers.append(self.agent._should_alarm_enemy(identities))
+
+        self.assertEqual(triggers, [True, False, False])
+
+    def test_unstabilized_raw_ocr_would_have_retriggered_every_time(self):
+        """Sanity check that the test harness actually exercises the bug:
+        without stabilization, each distinct raw string is a new key."""
+        misreads = ["lilbitofgoop", "litbitofgoop", "titbitofgoop"]
+        triggers = []
+        for raw_name in misreads:
+            self.agent._enemy_points = [(20, 20)]
+            triggers.append(
+                self.agent._should_alarm_enemy({(1, 1): raw_name})  # raw, unstabilized
+            )
+
+        self.assertEqual(triggers, [True, True, True])  # the bug, unfixed
+
+
+class PilotHistoryStabilizationAccumulationTests(unittest.IsolatedAsyncioTestCase):
+    """#224 acceptance criterion: sightings from a debounced/stabilized
+    identity accumulate under one pilot_history_store record, instead of
+    fragmenting across N near-duplicate OCR-misread "pilots"."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({"server": {"system": "J5A-IX"}}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+        self.agent._threat_tiers = {}
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+        self.agent._dscan_watcher = None
+        self.agent._wh_drop_detector = None
+        self.agent._wh_drop_enabled = False
+        self.agent._correlate_intel_enabled = False
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_misread_sequence_accumulates_under_one_pilot_record(self):
+        from evealert.tools.esi_standings import KillProfile
+        from evealert.tools.pilot_history_store import get_sightings
+
+        misreads = ["lilbitofgoop", "litbitofgoop", "titbitofgoop"]
+        info = MagicMock(
+            corporation_name="Evil Corp", alliance_name="Evil Alliance",
+            age_days=100, corp_history_count=2, security_status=0.0,
+            character_id=987654, corporation_id=456, alliance_id=789,
+        )
+        info.name = "lilbitofgoop"
+
+        for raw_name in misreads:
+            # Mirrors _resolve_enemy_identities: stabilize the raw OCR read
+            # for a stable on-screen position before it ever reaches the
+            # ESI/history pipeline via _last_ocr_names.
+            stabilized = self.agent._stabilize_enemy_identities(
+                {(1, 1): raw_name}, frozenset({(1, 1)})
+            )
+            resolved_name = stabilized[(1, 1)]
+
+            with patch(
+                "evealert.tools.esi_standings.get_esi_client"
+            ) as mock_get_client, patch(
+                "evealert.tools.kos_checker.get_kos_checker"
+            ) as mock_get_kos:
+                mock_client = AsyncMock()
+                mock_client.lookup_many = AsyncMock(return_value=[info])
+                mock_client.get_zkillboard_profile = AsyncMock(
+                    return_value=KillProfile(
+                        kills_total=5, losses_total=1, top_ship="Loki", danger_ratio=0.5
+                    )
+                )
+                mock_get_client.return_value = mock_client
+                mock_kos = MagicMock()
+                mock_kos.check = AsyncMock(return_value=None)
+                mock_get_kos.return_value = mock_kos
+
+                await self.agent.run_intel_check([resolved_name])
+
+        anchor_sightings = get_sightings("lilbitofgoop")
+        self.assertEqual(len(anchor_sightings), 3)
+        self.assertEqual(get_sightings("litbitofgoop"), [])
+        self.assertEqual(get_sightings("titbitofgoop"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

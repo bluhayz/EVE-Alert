@@ -437,6 +437,16 @@ class AlertAgent:
         self._ocr_region = (0, 0, 0, 0)
         self._last_ocr_names: list[str] = []   # names from last _build_enemy_alarm_text OCR
 
+        # #224: per-position OCR identity stabilization, this engagement.
+        # quantized_position -> confirmed/anchor pilot name.
+        self._enemy_identity_anchors: dict = {}
+        # quantized_position -> (candidate_name, consecutive_read_count)
+        # for a name that diverges from the anchor beyond fuzzy-match
+        # tolerance -- must repeat before it's trusted (debounce against
+        # a single wild misread while still letting a genuinely different
+        # pilot take over an old one's screen slot).
+        self._enemy_identity_challenger: dict = {}
+
         # v4.2: diagnostic verbose-logging mode
         self._diagnostics_enabled = False
 
@@ -1453,6 +1463,10 @@ class AlertAgent:
             self._last_identity_resolve_time = 0.0
             self._last_enemy_identities = {}
             self._last_ocr_log_message = ""
+            # #224: drop identity-stabilization state too — a new
+            # engagement starts with no anchors, same as #213's own cache.
+            self._enemy_identity_anchors = {}
+            self._enemy_identity_challenger = {}
 
         if self._webhook and alarm_type == "Enemy" and self.webhook_sent:
             try:
@@ -3198,6 +3212,66 @@ class AlertAgent:
             finally:
                 self.currently_playing_sounds.pop(key, None)
 
+    def _stabilize_enemy_identities(
+        self, raw_identities: dict, current_keys: frozenset
+    ) -> dict:
+        """#224: smooth over OCR noise so the same on-screen pilot doesn't
+        look like a brand-new one every time a read comes back slightly
+        different (classic l/t/I/1 confusion in condensed UI fonts).
+
+        A screen position with no existing anchor trusts its first OCR
+        read immediately — a genuinely new enemy must still alert right
+        away, this adds no delay to that path. Once a position HAS an
+        anchor:
+          - an identical read reconfirms it;
+          - a read within evealert.tools.ocr_local.names_are_likely_same_pilot's
+            fuzzy tolerance of the anchor is treated as noise and the
+            anchor is kept;
+          - anything else is treated as a genuinely different pilot only
+            after appearing on 2 CONSECUTIVE reads (debounce against one
+            wild misread, while still letting a real pilot swap take over
+            an old one's screen slot without getting stuck).
+
+        Anchors for positions no longer present this poll (icon left) are
+        dropped, so a coincidental later reuse of the same screen slot by
+        an unrelated pilot doesn't inherit a stale identity.
+        """
+        from evealert.tools.ocr_local import names_are_likely_same_pilot  # noqa: PLC0415
+
+        stabilized: dict = {}
+        for pos, raw_name in raw_identities.items():
+            anchor = self._enemy_identity_anchors.get(pos)
+            if anchor is None:
+                self._enemy_identity_anchors[pos] = raw_name
+                self._enemy_identity_challenger.pop(pos, None)
+                stabilized[pos] = raw_name
+                continue
+
+            if raw_name == anchor or names_are_likely_same_pilot(raw_name, anchor):
+                self._enemy_identity_challenger.pop(pos, None)
+                stabilized[pos] = anchor
+                continue
+
+            candidate, count = self._enemy_identity_challenger.get(pos, (None, 0))
+            count = count + 1 if candidate == raw_name else 1
+            if count >= 2:
+                self._enemy_identity_anchors[pos] = raw_name
+                self._enemy_identity_challenger.pop(pos, None)
+                stabilized[pos] = raw_name
+            else:
+                self._enemy_identity_challenger[pos] = (raw_name, count)
+                stabilized[pos] = anchor  # keep the anchor until confirmed
+
+        # Drop anchors for positions no longer on screen at all (not just
+        # ones OCR failed to read this poll -- current_keys is every
+        # currently-detected icon, raw_identities only the ones OCR
+        # resolved a name for).
+        for pos in set(self._enemy_identity_anchors) - current_keys:
+            del self._enemy_identity_anchors[pos]
+            self._enemy_identity_challenger.pop(pos, None)
+
+        return stabilized
+
     def _resolve_enemy_identities(self) -> dict:
         """Resolve each currently-detected enemy icon to a pilot name via OCR
         (#213), throttled so this doesn't run OCR on every 0.1–0.2 s poll.
@@ -3286,6 +3360,12 @@ class AlertAgent:
                 region, targets, row_tolerance,
             )
             identities, all_names = match_names_to_targets(region, targets, row_tolerance)
+            # #224: stabilize against OCR noise (l/t/I/1 confusion etc.)
+            # before this flows into dedup, the alarm headline, ESI hint
+            # names, and pilot-history recording -- otherwise each
+            # misread of the same on-screen pilot is treated as brand new
+            # everywhere downstream.
+            identities = self._stabilize_enemy_identities(identities, current_keys)
             self._last_enemy_identities = identities
             # Regression fix: _last_ocr_names feeds the alarm headline
             # (_build_enemy_alarm_text) AND the ESI hint-name list

@@ -11,9 +11,11 @@ from unittest import mock
 
 from evealert.tools import ocr_local
 from evealert.tools.ocr_local import (
+    _levenshtein_distance,
     is_ocr_available,
     is_tesseract_available,
     is_winrt_ocr_available,
+    names_are_likely_same_pilot,
     parse_eve_names,
     read_local_names,
     reset_availability_cache,
@@ -68,6 +70,71 @@ class ParseNamesTests(unittest.TestCase):
     def test_pure_icon_line_is_dropped(self):
         """A line that is nothing but icon characters after stripping is dropped."""
         self.assertEqual(parse_eve_names("\u25a0\u2605\u2b50\n"), [])
+
+
+# ---------------------------------------------------------------------------
+# _levenshtein_distance / names_are_likely_same_pilot (#224)
+# ---------------------------------------------------------------------------
+
+class LevenshteinDistanceTests(unittest.TestCase):
+    def test_identical_strings_zero_distance(self):
+        self.assertEqual(_levenshtein_distance("abc", "abc"), 0)
+
+    def test_empty_strings(self):
+        self.assertEqual(_levenshtein_distance("", ""), 0)
+        self.assertEqual(_levenshtein_distance("abc", ""), 3)
+        self.assertEqual(_levenshtein_distance("", "abc"), 3)
+
+    def test_single_substitution(self):
+        self.assertEqual(_levenshtein_distance("litbitofgoop", "titbitofgoop"), 1)
+
+    def test_single_insertion_deletion(self):
+        self.assertEqual(_levenshtein_distance("abc", "abcd"), 1)
+        self.assertEqual(_levenshtein_distance("abcd", "abc"), 1)
+
+    def test_completely_different_strings(self):
+        self.assertEqual(_levenshtein_distance("abc", "xyz"), 3)
+
+
+class NamesAreLikelySamePilotTests(unittest.TestCase):
+    """#224: OCR misread tolerance -- classic l/t/I/1 confusion in
+    condensed UI fonts must not make the same on-screen pilot look like
+    a brand-new one every poll, but two genuinely different pilots with
+    similar names must never be merged."""
+
+    def test_exact_match_is_always_true(self):
+        self.assertTrue(names_are_likely_same_pilot("Bob McTest", "Bob McTest"))
+
+    def test_the_actual_reported_ocr_misreads_all_match_pairwise(self):
+        # Real case from #224 -- one pilot read three different ways.
+        variants = ["lilbitofgoop", "litbitofgoop", "titbitofgoop"]
+        for a in variants:
+            for b in variants:
+                self.assertTrue(
+                    names_are_likely_same_pilot(a, b), f"{a!r} vs {b!r} should match"
+                )
+
+    def test_short_names_never_fuzzy_matched(self):
+        """A 1-edit difference on a short name is too likely to be two
+        genuinely different pilots -- require exact match below the
+        length floor."""
+        self.assertFalse(names_are_likely_same_pilot("Bob", "Rob"))
+        self.assertFalse(names_are_likely_same_pilot("Kai", "Kae"))
+
+    def test_clearly_different_longer_names_not_matched(self):
+        self.assertFalse(names_are_likely_same_pilot("John Smith", "Jane Smith"))
+        self.assertFalse(names_are_likely_same_pilot("Bob McTestington", "Evil Corp Pilot"))
+
+    def test_long_name_two_edit_budget(self):
+        # 12 chars, 2 substitutions -- within budget for names > 8 chars.
+        self.assertTrue(names_are_likely_same_pilot("lilbitofgoop", "titbitofgoop"))
+
+    def test_long_name_three_edits_exceeds_budget(self):
+        self.assertFalse(names_are_likely_same_pilot("lilbitofgoop", "xyzbitofgoop"))
+
+    def test_medium_length_name_one_edit_budget_only(self):
+        # 8 chars or fewer -> max_edits=1, so a 2-edit difference must fail.
+        self.assertFalse(names_are_likely_same_pilot("Roberto", "Xoberta"))
 
 
 # ---------------------------------------------------------------------------

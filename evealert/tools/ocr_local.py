@@ -393,6 +393,55 @@ def parse_eve_names(text: str) -> list[str]:
     return names
 
 
+def _levenshtein_distance(a: str, b: str) -> int:
+    """Standard edit-distance DP (case-sensitive, single-character
+    insert/delete/substitute cost 1). No third-party dependency needed
+    for the small strings (pilot names) this is used on."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev_row = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr_row = [i] + [0] * len(b)
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            curr_row[j] = min(
+                prev_row[j] + 1,       # deletion
+                curr_row[j - 1] + 1,   # insertion
+                prev_row[j - 1] + cost,  # substitution
+            )
+        prev_row = curr_row
+    return prev_row[-1]
+
+
+def names_are_likely_same_pilot(a: str, b: str) -> bool:
+    """#224: is *b* plausibly an OCR misread of *a* (or vice versa)?
+
+    Condensed EVE UI fonts make certain characters (l/t/I/1, O/0, rn/m,
+    …) genuinely ambiguous to OCR, so the SAME on-screen pilot name can
+    read slightly differently between polls. Used to stop those reads
+    from being treated as a brand-new pilot (repeat alarms, wasted ESI/
+    zKB lookups, fragmented pilot-sighting history).
+
+    Deliberately conservative: exact match only counts as identical
+    (callers should check that separately); everything else requires
+    both names to be reasonably long (short names are too likely to
+    collide by chance -- "Bob"/"Rob" is one edit but plausibly two
+    different pilots) and within a small edit-distance budget that
+    scales with length, so we don't accidentally merge two distinct
+    pilots who just happen to have similar names.
+    """
+    if a == b:
+        return True
+    if len(a) < 6 or len(b) < 6:
+        return False
+    max_edits = 1 if max(len(a), len(b)) <= 8 else 2
+    return _levenshtein_distance(a, b) <= max_edits
+
+
 def resolve_region(
     override: tuple[int, int, int, int],
     alert_region: tuple[int, int, int, int],
