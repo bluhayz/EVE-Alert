@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.2.1] 2026-07-18
+
+### Fixed — duplicate System/Sov info logged on startup (#223)
+
+- `_location_monitor()`'s first-detection branch fired the same
+  `create_task(self._display_system_info())` as its else branch, so the
+  one-shot `System: ... | Type: ...` / `Sov: ...` log lines appeared
+  twice within seconds of startup — once from `start()`'s own
+  unconditional call, once again on the first ESI-detected system.
+  Now only a genuine *later* system change re-triggers the display; the
+  lighter "System: auto-detected → X" line and the `server.system`
+  settings update still fire on every detection, including the first.
+
 ## [7.2.0] 2026-07-18
 
 ### Added — v7.2: Multiboxing & Performance (#174, #175, #176, #177)
