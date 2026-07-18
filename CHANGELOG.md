@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.4.1] 2026-07-18
+
+### Fixed — #151 peak-hours warning spam
+
+- **"PEAK HOURS APPROACHING" firing every ~60 seconds**: `_peak_hours_monitor()`
+  had no dedup for this zKB-heatmap-backed warning, and its sleep cadence
+  floored at 60 seconds once inside the 15-minute pre-hour warning window
+  — the combination meant the same log line re-fired every minute for
+  the entire 15 minutes before the hour turned over, live-reported by a
+  user. Fixed with a "warned for this hour already" dedup flag (mirroring
+  #242's danger-window transition tracking) and a corrected sleep
+  formula that waits out the rest of the window instead of re-checking
+  every 60s.
+
 ## [7.4.0] 2026-07-18
 
 ### Added — Enemy Analytics & Situational Awareness (#241-#244)
