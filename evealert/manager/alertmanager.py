@@ -395,6 +395,7 @@ class AlertAgent:
         # v3.4: KOS checker
         self._kos_cva_enabled = True
         self._kos_custom_urls: list = []
+        self._kos_local_list: dict = {}  # #235: from settings.kos_list
 
         # v3.5: push notifications + alarm options
         self._push_config: dict = {}
@@ -1130,6 +1131,16 @@ class AlertAgent:
             kos = settings.get("kos", {})
             self._kos_cva_enabled = bool(kos.get("cva_enabled", True))
             self._kos_custom_urls = list(kos.get("custom_urls", []))
+            # #235: kos_list was documented (KosChecker's own docstring:
+            # "Local hostile list (pilot/corp/alliance names in
+            # settings.json)") but never actually read anywhere -- entries
+            # a user added did nothing. Normalize to the {name_lower: tier}
+            # shape KosChecker._do_check() expects.
+            self._kos_local_list = {
+                str(name).strip().lower(): "manual"
+                for name in settings.get("kos_list", [])
+                if str(name).strip()
+            }
 
             # Push notifications + alarm options
             self._push_config = dict(settings.get("push", {}))
@@ -2397,6 +2408,7 @@ class AlertAgent:
                     kos_checker = get_kos_checker(
                         cva_enabled=self._kos_cva_enabled,
                         api_urls=self._kos_custom_urls,
+                        local_hostile_list=self._kos_local_list,
                     )
                     kos_result = await kos_checker.check(
                         display_name, corp_name, alliance_name
@@ -2828,16 +2840,27 @@ class AlertAgent:
                 from evealert.tools.universe import get_universe_cache  # noqa: PLC0415
                 from evealert.tools.zkillboard import get_client  # noqa: PLC0415
                 from evealert.tools.threat_heatmap import purge_expired_cache  # noqa: PLC0415
+                from evealert.tools.esi_standings import get_esi_client  # noqa: PLC0415
+                from evealert.tools.kos_checker import get_kos_checker  # noqa: PLC0415
 
                 universe_purged = get_universe_cache().purge_expired_kill_counts()
                 zkb_purged = get_client().purge_expired()
                 heatmap_purged = purge_expired_cache()
-                total = universe_purged + zkb_purged + heatmap_purged
+                # #229: EsiLookup/KosChecker are the largest per-pilot
+                # caches -- one entry per distinct hostile ever ESI/KOS
+                # checked -- and were missed by the original #177 sweep.
+                esi_purged = get_esi_client().purge_expired()
+                kos_purged = get_kos_checker().purge_expired()
+                total = (
+                    universe_purged + zkb_purged + heatmap_purged
+                    + esi_purged + kos_purged
+                )
                 if total:
                     logger.debug(
                         "Cache maintenance: purged %d expired entries "
-                        "(universe=%d, zkb=%d, heatmap=%d)",
+                        "(universe=%d, zkb=%d, heatmap=%d, esi=%d, kos=%d)",
                         total, universe_purged, zkb_purged, heatmap_purged,
+                        esi_purged, kos_purged,
                     )
             except Exception as exc:
                 logger.debug("Cache maintenance cycle failed: %s", exc)

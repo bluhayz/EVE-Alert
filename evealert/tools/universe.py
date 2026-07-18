@@ -35,6 +35,11 @@ _HTTP_TIMEOUT = 8.0
 # Cache TTLs
 _NAME_CACHE_TTL = 86400  # system names never change — cache for 24 h
 _SOV_CACHE_TTL = 300  # sovereignty refreshes every 5 min
+# #232: short retry backoff after a failed sov-map fetch -- long enough
+# that an ESI outage isn't hammered on every get_sovereignty() call, short
+# enough that a transient hiccup doesn't leave stale/empty sov data
+# cached for the full 5-minute TTL.
+_SOV_FAILURE_RETRY_SECONDS = 30
 _KILL_COUNT_CACHE_TTL = 300  # #172: zKB etiquette -- reuse kill counts for 5 min
 
 # #177: soak reliability -- system/neighbor identity never changes, so
@@ -44,6 +49,11 @@ _KILL_COUNT_CACHE_TTL = 300  # #172: zKB etiquette -- reuse kill counts for 5 mi
 # comfortably above normal usage and only protects against a pathological
 # case, not normal route-checking/multi-client activity.
 _MAX_IDENTITY_CACHE_SIZE = 10_000
+
+# #227: bounded concurrency for per-system stargate-destination fetches --
+# replaces the old stargate_ids[:8] truncation (which silently discarded
+# gates beyond the 8th instead of capping request concurrency).
+_MAX_CONCURRENT_STARGATE_FETCHES = 8
 
 # #172: route-avoidance search tuning
 _ROUTE_SEARCH_MAX_HOPS = 30
@@ -189,7 +199,9 @@ class UniverseCache:
         system_id = await self._search_system(name)
         if system_id:
             self._name_to_id[key] = system_id
-            self._id_to_name[system_id] = name
+            # #227: don't seed _id_to_name with the caller's (possibly
+            # lowercased/mistyped) casing -- get_system_name() fetches and
+            # caches the canonical ESI-returned name on first use instead.
         return system_id
 
     async def get_system_name(self, system_id: int) -> str | None:
@@ -211,6 +223,10 @@ class UniverseCache:
         if system_id in self._neighbors:
             return self._neighbors[system_id]
         neighbors = await self._fetch_neighbors(system_id)
+        if neighbors is None:
+            # #227: a transient ESI failure -- don't cache it as a
+            # permanent empty neighbor list; let the next call retry.
+            return []
         # #177: simple size guard, not an LRU -- system identity never
         # changes so there's no "staleness" to purge by age, only a
         # pathological-growth backstop. Clearing (rather than evicting
@@ -275,8 +291,19 @@ class UniverseCache:
         """
         sov_map, fetched_at = self._sov_cache
         if time.time() - fetched_at > _SOV_CACHE_TTL:
-            sov_map = await self._fetch_sov_map()
-            self._sov_cache = (sov_map, time.time())
+            fresh_map = await self._fetch_sov_map()
+            if fresh_map is not None:
+                sov_map = fresh_map
+                self._sov_cache = (sov_map, time.time())
+            else:
+                # #232: fetch failed -- keep serving the previous map
+                # (possibly stale, possibly {} if none has ever succeeded)
+                # rather than caching {} as a successful "no sov anywhere"
+                # result for the full TTL. Retry again soon, not on every
+                # single call, so an ESI outage isn't hammered.
+                self._sov_cache = (
+                    sov_map, time.time() - _SOV_CACHE_TTL + _SOV_FAILURE_RETRY_SECONDS
+                )
 
         entry = sov_map.get(system_id)
         if entry is None:
@@ -315,6 +342,22 @@ class UniverseCache:
             has_tcu=bool(entry.get("structures_plex")),
             faction_id=faction_id,
         )
+
+    async def get_route(
+        self, origin_id: int, destination_id: int, max_hops: int = _ROUTE_SEARCH_MAX_HOPS
+    ) -> list[int] | None:
+        """Return the shortest path from *origin_id* to *destination_id* as a
+        list of system IDs (inclusive of both ends), or None if no path is
+        found within *max_hops*.
+
+        #226: this public wrapper around _bfs_path() was missing entirely --
+        both _lookup_jump_distance() (alertmanager.py) and
+        pilot_history_analytics._is_plausible_transition() call
+        cache.get_route() and silently no-op/soft-fail via their surrounding
+        except-blocks when it raises AttributeError. Tests never caught it
+        because they mock get_route() into existence on a stand-in cache.
+        """
+        return await self._bfs_path(origin_id, destination_id, max_hops)
 
     # ------------------------------------------------------------------
     # Route threat assessment
@@ -559,10 +602,15 @@ class UniverseCache:
             logger.debug("ESI system fetch failed for %d: %s", system_id, exc)
             return None
 
-    async def _fetch_neighbors(self, system_id: int) -> list[int]:
-        """Resolve stargates → destination system IDs."""
+    async def _fetch_neighbors(self, system_id: int) -> list[int] | None:
+        """Resolve stargates → destination system IDs.
+
+        Returns None on a fetch failure -- get_neighbors() must not cache
+        that as a permanent empty neighbor list (#227). Returns [] only
+        when the system genuinely has zero stargates.
+        """
         if not _HTTPX_AVAILABLE:
-            return []
+            return None
         # Fetch system data to get stargate IDs if not already cached
         if system_id not in self._stargates:
             url = f"{_ESI_BASE}/v4/universe/systems/{system_id}/"
@@ -577,16 +625,30 @@ class UniverseCache:
                     self._stargates[system_id] = data.get("stargates", [])
             except Exception as exc:
                 logger.debug("ESI system fetch failed for %d: %s", system_id, exc)
-                return []
+                return None
 
         stargate_ids = self._stargates.get(system_id, [])
         if not stargate_ids:
             return []
 
-        # Resolve stargates concurrently (cap at 8 to avoid hammering API)
-        tasks = [self._fetch_stargate_dest(sg_id) for sg_id in stargate_ids[:8]]
+        # #227: resolve ALL stargates (previously truncated to the first 8,
+        # silently discarding the rest and permanently mis-recording the
+        # neighbor list for any system with more than 8 gates -- common at
+        # trade hubs). Concurrency is bounded via semaphore instead.
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_STARGATE_FETCHES)
+
+        async def _bounded_fetch(sg_id: int) -> int | None:
+            async with semaphore:
+                return await self._fetch_stargate_dest(sg_id)
+
+        tasks = [_bounded_fetch(sg_id) for sg_id in stargate_ids]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return [r for r in results if isinstance(r, int)]
+        resolved = [r for r in results if isinstance(r, int)]
+        if stargate_ids and not resolved:
+            # Every stargate fetch failed -- this is a fetch failure, not
+            # a genuinely gateless system. Don't cache it as one.
+            return None
+        return resolved
 
     async def _fetch_stargate_dest(self, stargate_id: int) -> int | None:
         url = f"{_ESI_BASE}/v2/universe/stargates/{stargate_id}/"
@@ -599,10 +661,12 @@ class UniverseCache:
             logger.debug("ESI stargate fetch failed for %d: %s", stargate_id, exc)
             return None
 
-    async def _fetch_sov_map(self) -> dict[int, dict]:
-        """Fetch bulk sovereignty map from ESI. Returns {system_id: sov_entry}."""
+    async def _fetch_sov_map(self) -> dict[int, dict] | None:
+        """Fetch bulk sovereignty map from ESI. Returns {system_id: sov_entry},
+        or None on a fetch failure (#232) -- get_sovereignty() must not cache
+        that as a genuinely-empty sov map for the full TTL."""
         if not _HTTPX_AVAILABLE:
-            return {}
+            return None
         url = f"{_ESI_BASE}/v1/sovereignty/map/"
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
@@ -612,7 +676,7 @@ class UniverseCache:
                 return {e["system_id"]: e for e in entries if "system_id" in e}
         except Exception as exc:
             logger.debug("ESI sov map fetch failed: %s", exc)
-            return {}
+            return None
 
     async def _get_entity_name(self, entity_type: str, entity_id: int) -> str | None:
         if entity_id in self._entity_names:

@@ -133,6 +133,100 @@ class GetTokenExpiryTests(unittest.IsolatedAsyncioTestCase):
         await auth.get_token()
         self.assertTrue(refreshed["called"])
 
+    async def test_expired_token_returns_none_when_refresh_does_not_renew_it(self):
+        """#231: a transient refresh failure leaves the old (still expired)
+        token in place -- get_token() must not hand back a token known to
+        be expired; every downstream ESI call would just 401."""
+        auth = self._auth()
+        stale = TokenInfo("old-expired", "refresh", time.time() - 5, 1, "P")
+        auth._token = stale
+
+        async def fake_refresh_that_fails():
+            pass  # simulates a network error being swallowed inside _refresh()
+
+        auth._refresh = fake_refresh_that_fails
+        token = await auth.get_token()
+        self.assertIsNone(token)
+
+    async def test_expired_token_returns_fresh_token_when_refresh_succeeds(self):
+        auth = self._auth()
+        auth._token = TokenInfo("old-expired", "refresh", time.time() - 5, 1, "P")
+
+        async def fake_refresh_that_succeeds():
+            auth._token = TokenInfo("new-access", "refresh", time.time() + 1200, 1, "P")
+
+        auth._refresh = fake_refresh_that_succeeds
+        token = await auth.get_token()
+        self.assertEqual(token, "new-access")
+
+
+class RefreshInvalidGrantTests(unittest.IsolatedAsyncioTestCase):
+    """#231: a revoked/expired refresh token (invalid_grant) must clear
+    the token and warn once -- not retry the dead token forever with a
+    generic DEBUG log every cycle."""
+
+    def setUp(self):
+        esi_auth.reset_refresh_invalid_grant_warning()
+
+    def tearDown(self):
+        esi_auth.reset_refresh_invalid_grant_warning()
+
+    def _auth_with_token(self):
+        with mock.patch.object(EsiAuth, "_load_token", lambda self: None):
+            auth = EsiAuth(client_id="x")
+        auth._token = TokenInfo("old", "dead-refresh", time.time() - 5, 1, "P")
+        return auth
+
+    def _client_with_400(self, error_code: str):
+        resp = mock.MagicMock()
+        resp.status_code = 400
+        resp.json.return_value = {"error": error_code}
+        client = mock.AsyncMock()
+        client.post = mock.AsyncMock(return_value=resp)
+        client.__aenter__ = mock.AsyncMock(return_value=client)
+        client.__aexit__ = mock.AsyncMock(return_value=False)
+        return client
+
+    async def test_invalid_grant_clears_token_and_warns_once(self):
+        auth = self._auth_with_token()
+        client = self._client_with_400("invalid_grant")
+
+        with mock.patch("httpx.AsyncClient", return_value=client), \
+             mock.patch.object(esi_auth.logger, "warning") as mock_warn, \
+             mock.patch.object(auth, "_save_token"):
+            await auth._refresh()
+            await auth._refresh()  # second failure must not warn again
+
+        self.assertIsNone(auth._token)
+        mock_warn.assert_called_once()
+        self.assertIn("revoked", mock_warn.call_args[0][0])
+
+    async def test_get_token_returns_none_after_invalid_grant(self):
+        auth = self._auth_with_token()
+        client = self._client_with_400("invalid_grant")
+
+        with mock.patch("httpx.AsyncClient", return_value=client):
+            token = await auth.get_token()
+
+        self.assertIsNone(token)
+        self.assertFalse(auth.is_authenticated)
+
+    async def test_other_400_error_does_not_clear_token(self):
+        """A 400 that isn't invalid_grant (or an unparseable body) must
+        not be treated as a permanent revocation."""
+        auth = self._auth_with_token()
+        client = self._client_with_400("some_other_error")
+
+        with mock.patch("httpx.AsyncClient", return_value=client):
+            await auth._refresh()
+
+        self.assertIsNotNone(auth._token)  # unchanged, not cleared
+
+    async def test_login_resets_invalid_grant_warning_flag(self):
+        esi_auth._refresh_invalid_grant_warning_shown = True
+        esi_auth.reset_refresh_invalid_grant_warning()
+        self.assertFalse(esi_auth._refresh_invalid_grant_warning_shown)
+
 
 class TokenRoundTripTests(unittest.TestCase):
     def test_save_then_load(self):

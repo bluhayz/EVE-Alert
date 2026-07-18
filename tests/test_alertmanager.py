@@ -652,6 +652,102 @@ class TestAugmentWithEsiKosDecoupling(unittest.IsolatedAsyncioTestCase):
         mock_augment.assert_awaited_once_with(hint_names=["Alice", "Bob"])
 
 
+class KosListWiringTests(unittest.IsolatedAsyncioTestCase):
+    """#235: settings.kos_list was documented (KosChecker's own docstring)
+    but never actually read anywhere -- entries a user added did nothing.
+    load_settings() must normalize it and pass it through to
+    get_kos_checker(); a matching entry must actually flag the pilot."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({
+                "kos_list": ["BadGuy Corp", "  Evil Alliance  ", ""],
+                "alert_region_1": {"x": 100, "y": 100},
+                "alert_region_2": {"x": 300, "y": 300},
+                "faction_region_1": {"x": 100, "y": 100},
+                "faction_region_2": {"x": 300, "y": 300},
+            }, f)
+        reset_settings_store(self.settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_load_settings_normalizes_kos_list(self):
+        self.assertEqual(
+            self.agent._kos_local_list,
+            {"badguy corp": "manual", "evil alliance": "manual"},
+        )
+        # Blank entries are dropped, not stored as an empty-string key.
+        self.assertNotIn("", self.agent._kos_local_list)
+
+    async def test_kos_checker_is_called_with_the_local_list(self):
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._threat_tiers = {}
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client, patch(
+            "evealert.tools.kos_checker.get_kos_checker"
+        ) as mock_get_kos:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[])
+            mock_get_client.return_value = mock_client
+            mock_kos = MagicMock()
+            mock_kos.check = AsyncMock(return_value=None)
+            mock_get_kos.return_value = mock_kos
+
+            await self.agent.run_intel_check(["BadGuy Corp"])
+
+        mock_get_kos.assert_called_once_with(
+            cva_enabled=False,
+            api_urls=[],
+            local_hostile_list={"badguy corp": "manual", "evil alliance": "manual"},
+        )
+
+    async def test_kos_list_entry_actually_flags_a_matching_pilot(self):
+        """End-to-end: no mocking of KosChecker itself -- a real local-list
+        hit must not require any network call."""
+        from evealert.tools import kos_checker as kos_checker_mod
+
+        kos_checker_mod._checker = None  # fresh singleton for this test
+        self.agent._kos_cva_enabled = False
+        self.agent._kos_custom_urls = []
+        self.agent._threat_tiers = {}
+        self.agent._fleet_composition_enabled = False
+        self.agent._esi_standings_classify = False
+
+        with patch(
+            "evealert.tools.esi_standings.get_esi_client"
+        ) as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.lookup_many = AsyncMock(return_value=[])
+            mock_get_client.return_value = mock_client
+
+            await self.agent.run_intel_check(["Some Pilot from Evil Alliance"])
+
+        kos_checker_mod._checker = None  # don't leak into other tests
+        messages = [c.args[0] for c in self.mock_main.write_message.call_args_list]
+        self.assertTrue(
+            any("KOS" in m for m in messages),
+            f"Expected a KOS log line from the local kos_list match, got: {messages}",
+        )
+
+
 class ResolveEnemyIdentitiesTests(unittest.TestCase):
     """#213: OCR-based per-icon identity resolution, throttled so it
     doesn't run on every 0.1-0.2s poll cycle."""
@@ -2253,8 +2349,9 @@ class RouteCheckGateCampTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
-    """#177: the periodic cache-maintenance task purges expired TTL-cache
-    entries from the universe/zKillboard/heatmap caches."""
+    """#177/#229: the periodic cache-maintenance task purges expired
+    TTL-cache entries from the universe/zKillboard/heatmap/ESI/KOS
+    caches."""
 
     def setUp(self):
         self.mock_main = MagicMock()
@@ -2273,6 +2370,8 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
         import shutil
 
         from evealert.tools import threat_heatmap
+        from evealert.tools.esi_standings import get_esi_client
+        from evealert.tools.kos_checker import get_kos_checker
         from evealert.tools.universe import get_universe_cache
         from evealert.tools.zkillboard import get_client
 
@@ -2281,6 +2380,9 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
         get_universe_cache()._kill_count_cache.clear()
         get_client()._cache.clear()
         threat_heatmap._CACHE.clear()
+        get_esi_client()._cache.clear()
+        get_esi_client()._zkb_cache.clear()
+        get_kos_checker()._cache.clear()
 
         os.environ.pop("EVEALERT_STATS_PATH", None)
         os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
@@ -2331,6 +2433,38 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(30000142, get_universe_cache()._kill_count_cache)
         self.assertIn("fresh-system", get_client()._cache)
         self.assertIn(("FRESH", 7), threat_heatmap._CACHE)
+
+    async def test_purges_expired_esi_and_kos_caches(self):
+        """#229: EsiLookup/KosChecker were missed by the original #177
+        sweep -- these are the largest per-pilot caches."""
+        from evealert.tools.esi_standings import get_esi_client
+        from evealert.tools.kos_checker import get_kos_checker
+
+        stale = time.time() - 100_000
+        get_esi_client()._cache["stale pilot"] = (stale, None)
+        get_esi_client()._zkb_cache[123456] = (stale, None)
+        get_kos_checker()._cache[("stale pilot", "", "")] = (stale, None)
+
+        await self._run_one_cycle()
+
+        self.assertNotIn("stale pilot", get_esi_client()._cache)
+        self.assertNotIn(123456, get_esi_client()._zkb_cache)
+        self.assertNotIn(("stale pilot", "", ""), get_kos_checker()._cache)
+
+    async def test_fresh_esi_and_kos_entries_survive_a_cycle(self):
+        from evealert.tools.esi_standings import get_esi_client
+        from evealert.tools.kos_checker import get_kos_checker
+
+        now = time.time()
+        get_esi_client()._cache["fresh pilot"] = (now, None)
+        get_esi_client()._zkb_cache[654321] = (now, None)
+        get_kos_checker()._cache[("fresh pilot", "", "")] = (now, None)
+
+        await self._run_one_cycle()
+
+        self.assertIn("fresh pilot", get_esi_client()._cache)
+        self.assertIn(654321, get_esi_client()._zkb_cache)
+        self.assertIn(("fresh pilot", "", ""), get_kos_checker()._cache)
 
     async def test_a_purge_failure_does_not_crash_the_loop(self):
         with patch(

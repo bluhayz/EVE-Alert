@@ -111,5 +111,37 @@ class NeverIndexedCharacterTests(unittest.TestCase):
         self.assertEqual(result.losses_total, 0)
 
 
+class PurgeExpiredTests(unittest.TestCase):
+    """#229: EsiLookup._cache/_zkb_cache only skip a stale entry on read --
+    purge_expired() must actually evict them, mirroring
+    ZkillboardClient.purge_expired() (#177)."""
+
+    def test_purge_removes_only_stale_entries(self):
+        import time as time_mod
+
+        from evealert.tools.esi_standings import EsiLookup, _CACHE_TTL
+
+        lookup = EsiLookup()
+        stale = time_mod.time() - _CACHE_TTL - 10
+        fresh = time_mod.time()
+        lookup._cache["stale pilot"] = (stale, None)
+        lookup._cache["fresh pilot"] = (fresh, None)
+        lookup._zkb_cache[111] = (stale, None)
+        lookup._zkb_cache[222] = (fresh, None)
+
+        removed = lookup.purge_expired()
+
+        self.assertEqual(removed, 2)
+        self.assertNotIn("stale pilot", lookup._cache)
+        self.assertIn("fresh pilot", lookup._cache)
+        self.assertNotIn(111, lookup._zkb_cache)
+        self.assertIn(222, lookup._zkb_cache)
+
+    def test_purge_on_empty_caches_returns_zero(self):
+        from evealert.tools.esi_standings import EsiLookup
+
+        self.assertEqual(EsiLookup().purge_expired(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

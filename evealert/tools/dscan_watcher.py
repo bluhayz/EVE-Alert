@@ -213,16 +213,24 @@ class DscanWatcher:
         logger.info("D-scan watcher started in %s", dscan_dir)
 
         while self._running:
-            new_path = self._latest_log(dscan_dir)
-            if new_path != self._log_path:
-                self._log_path = new_path
-                self._file_pos = new_path.stat().st_size if new_path else 0
-                self._encoding = None
-                self._visible.clear()
-                self._visible_types.clear()
+            # #234: a log file can be deleted/locked (rotation, antivirus,
+            # manual cleanup) between _latest_log()'s glob() and a stat()
+            # call here or inside _tail_once() -- previously an unhandled
+            # OSError would silently kill this task for the rest of the
+            # session (D-scan monitoring gone until an engine restart).
+            try:
+                new_path = self._latest_log(dscan_dir)
+                if new_path != self._log_path:
+                    self._log_path = new_path
+                    self._file_pos = new_path.stat().st_size if new_path else 0
+                    self._encoding = None
+                    self._visible.clear()
+                    self._visible_types.clear()
 
-            if self._log_path is not None:
-                self._tail_once()
+                if self._log_path is not None:
+                    self._tail_once()
+            except OSError as exc:
+                logger.debug("D-scan watcher poll error: %s", exc)
 
             await asyncio.sleep(_POLL_INTERVAL)
 
@@ -335,7 +343,7 @@ class DscanWatcher:
             self._visible |= current_scan
             self._visible_types |= current_types
 
-    def _parse_lines(self, text: str) -> tuple[set, bool, int]:
+    def _parse_lines(self, text: str) -> tuple[set, set, bool, int]:
         """Parse D-scan lines, classifying by the Type column (index 2) and
         falling back to the object name (index 0).
         Returns (current_scan set, probe_detected, sig_count)."""
@@ -400,7 +408,20 @@ class DscanWatcher:
 
     @staticmethod
     def _latest_log(dscan_dir: Path) -> Path | None:
-        files = list(dscan_dir.glob("*.txt"))
-        if not files:
-            return None
-        return max(files, key=lambda p: p.stat().st_mtime)
+        """Return the most-recently-modified *.txt file in *dscan_dir*.
+
+        #234: a file returned by glob() can be deleted/locked (rotation,
+        antivirus, manual cleanup) by the time stat() runs on it -- skip
+        such entries instead of letting the whole call raise.
+        """
+        best: Path | None = None
+        best_mtime = -1.0
+        for f in dscan_dir.glob("*.txt"):
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best_mtime = mtime
+                best = f
+        return best

@@ -24,6 +24,12 @@ logger = logging.getLogger("alert.neighbors")
 _DEFAULT_POLL_INTERVAL = 120
 # Minimum time between alerts for the same system (avoid spam)
 _SYSTEM_COOLDOWN = 600  # 10 min
+# #233: cap concurrent zKB requests per poll cycle -- at max_jumps=5 in
+# well-connected space, "nearby" can easily be 50-150 systems; firing them
+# all at once every poll risks zKB rate-limiting (which then degrades
+# every other zKB-backed feature: route advisor, alarm kill lookups,
+# heatmap).
+_MAX_CONCURRENT_ZKB_REQUESTS = 4
 
 
 class NeighborMonitor:
@@ -110,9 +116,17 @@ class NeighborMonitor:
         nearby = await cache.get_systems_within_jumps(origin_id, self._max_jumps)
         now = time.time()
 
-        # Concurrently fetch 15-minute kill counts for all nearby systems
+        # #233: bound concurrency -- at max_jumps=5 in well-connected space
+        # "nearby" can be 50-150 systems; firing them all at zKB at once
+        # every poll cycle risks rate-limiting.
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_ZKB_REQUESTS)
+
+        async def _bounded_kills(sys_id: int) -> int:
+            async with semaphore:
+                return await self._kills_15min(sys_id)
+
         tasks = {
-            sys_id: asyncio.create_task(self._kills_15min(sys_id)) for sys_id in nearby
+            sys_id: asyncio.create_task(_bounded_kills(sys_id)) for sys_id in nearby
         }
         for sys_id, task in tasks.items():
             try:

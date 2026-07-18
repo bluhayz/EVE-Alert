@@ -80,6 +80,13 @@ _SCOPES = " ".join(
 # to add a scope to an already-issued token.
 _location_scope_warning_shown = False
 
+# #231: set once per process the first time a refresh_token turns out to be
+# revoked/expired (invalid_grant -- e.g. the user changed their EVE
+# password or revoked the app at community.eveonline.com), so re-login
+# guidance is logged as a WARNING once rather than retried silently on
+# every get_token() call forever.
+_refresh_invalid_grant_warning_shown = False
+
 
 def _decode_character_from_jwt(access_token: str) -> tuple[int, str]:
     """Extract (character_id, name) from an EVE SSO v2 JWT access token.
@@ -191,16 +198,26 @@ class EsiAuth:
             self._token = token
             self._save_token()
             reset_location_scope_warning()  # #211: fresh consent may have granted it
+            reset_refresh_invalid_grant_warning()  # #231: fresh login supersedes any old revoked token
             return True
         return False
 
     async def get_token(self) -> str | None:
-        """Return a valid access token, refreshing if necessary."""
+        """Return a valid access token, refreshing if necessary.
+
+        Returns None -- rather than a known-expired access token -- when
+        the token is expired and the refresh attempt didn't produce a
+        fresh one (#231). Previously an expired token was returned
+        regardless of whether _refresh() actually succeeded, so every
+        downstream ESI call would just 401.
+        """
         if self._token is None:
             return None
         if time.time() > self._token.expires_at - 30:
             await self._refresh()
-        return self._token.access_token if self._token else None
+            if self._token is None or time.time() > self._token.expires_at - 30:
+                return None
+        return self._token.access_token
 
     def logout(self) -> None:
         self._token = None
@@ -276,6 +293,7 @@ class EsiAuth:
         return await self._build_token_info(data)
 
     async def _refresh(self) -> None:
+        global _refresh_invalid_grant_warning_shown  # noqa: PLW0603
         if not self._token:
             return
         payload = {
@@ -286,12 +304,36 @@ class EsiAuth:
         try:
             async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, headers=DEFAULT_HEADERS) as client:
                 resp = await client.post(_ESI_TOKEN_URL, data=payload)
+                if resp.status_code == 400:
+                    # #231: distinguish a revoked/expired refresh token
+                    # (invalid_grant -- e.g. password change or the app
+                    # being revoked at community.eveonline.com, which will
+                    # NEVER succeed on retry) from a transient failure. On
+                    # invalid_grant, clear the token and warn once instead
+                    # of silently retrying a dead refresh token forever.
+                    try:
+                        error_code = resp.json().get("error", "")
+                    except ValueError:
+                        error_code = ""
+                    if error_code == "invalid_grant":
+                        if not _refresh_invalid_grant_warning_shown:
+                            _refresh_invalid_grant_warning_shown = True
+                            logger.warning(
+                                "ESI token refresh failed: your refresh token was "
+                                "revoked or expired (e.g. EVE password changed, or "
+                                "the app was revoked at community.eveonline.com). "
+                                "Log in again via Settings -> Intel & ESI -> EVE SSO "
+                                "to restore ESI features."
+                            )
+                        self.logout()
+                        return
                 resp.raise_for_status()
                 data = resp.json()
             new_token = await self._build_token_info(data, self._token)
             if new_token:
                 self._token = new_token
                 self._save_token()
+                _refresh_invalid_grant_warning_shown = False
         except Exception as exc:
             logger.debug("Token refresh failed: %s", exc)
 
@@ -437,6 +479,14 @@ def reset_location_scope_warning() -> None:
     successful login so a subsequent scope regression can warn again)."""
     global _location_scope_warning_shown  # noqa: PLW0603
     _location_scope_warning_shown = False
+
+
+def reset_refresh_invalid_grant_warning() -> None:
+    """Clear the one-time invalid_grant warning flag (#231; used by tests,
+    and by a fresh successful login so a subsequent revocation can warn
+    again)."""
+    global _refresh_invalid_grant_warning_shown  # noqa: PLW0603
+    _refresh_invalid_grant_warning_shown = False
 
 
 async def get_fleet_membership(auth: EsiAuth) -> dict | None:

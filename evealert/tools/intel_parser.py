@@ -50,11 +50,15 @@ def _strip_header(line: str) -> tuple[str, str] | None:
 
 # EVE system names are 3-8 chars: letters, digits, hyphens.
 # Region-specific patterns: null-sec look like "3V8-LK", "D7-ZAC", "1DQ1-A".
-# We accept any token that looks like a plausible system name
-# (all-caps + hyphen, or standard null-sec format).
-_SYSTEM_RE = re.compile(
-    r"\b([A-Z0-9]{2,5}-[A-Z0-9]{1,5}|[A-Z][A-Z0-9]{2,7})\b"
-)
+# #230: matched against the message's ORIGINAL casing (the caller used to
+# upper-case the whole message first, which made every ordinary word
+# indistinguishable from a real system name -- "hostile sabre heading
+# north" resolved to system "HOSTILE"). The hyphenated null-sec/WH pattern
+# is distinctive enough to match case-insensitively; a bare alphanumeric
+# token is only accepted when it was ALREADY all-caps or digit-bearing in
+# the original text, which ordinary lowercase/sentence-case words never are.
+_SYSTEM_HYPHEN_RE = re.compile(r"\b([A-Za-z0-9]{2,5}-[A-Za-z0-9]{1,5})\b")
+_SYSTEM_PLAIN_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9]{2,7})\b")
 
 
 def _find_system(message: str) -> str | None:
@@ -62,10 +66,21 @@ def _find_system(message: str) -> str | None:
     # Skip common false-positives
     skip = {"WH", "WH1", "WH2", "T3", "CSP", "ESI", "KOS", "KMS", "GMT",
             "BLOPS", "HIC", "SABRE", "VNI", "ORCA"}
-    for m in _SYSTEM_RE.finditer(message):
+
+    for m in _SYSTEM_HYPHEN_RE.finditer(message):
         token = m.group(1)
-        if token not in skip and len(token) >= 4:
-            return token
+        upper = token.upper()
+        if upper not in skip and len(token) >= 4:
+            return upper
+
+    for m in _SYSTEM_PLAIN_RE.finditer(message):
+        token = m.group(1)
+        if token.upper() in skip or len(token) < 4:
+            continue
+        is_all_caps = token == token.upper() and token != token.lower()
+        has_digit = any(c.isdigit() for c in token)
+        if is_all_caps or has_digit:
+            return token.upper()
     return None
 
 
@@ -234,7 +249,7 @@ def parse_line(line: str) -> IntelReport | None:
         return None
 
     clear = _is_clear(message)
-    system = _find_system(message.upper())
+    system = _find_system(message)
     ships = _find_ships(message)
     mentioned = [] if clear else _find_mentioned_pilots(message, system, ships)
     return IntelReport(

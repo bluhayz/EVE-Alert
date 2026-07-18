@@ -38,6 +38,14 @@ class WebStatusHtmlTests(unittest.TestCase):
         except KeyError as exc:
             self.fail(f"_html_page raised KeyError: {exc}")
 
+    def test_log_line_html_is_escaped(self):
+        """#228: intel-channel chat text (attacker-controlled) flows into
+        the log buffer and must not execute as HTML/JS in the dashboard."""
+        append_to_log_buffer('<script>alert("xss")</script>')
+        html = self._server(True)._html_page()
+        self.assertNotIn("<script>alert(", html)
+        self.assertIn("&lt;script&gt;", html)
+
 
 if __name__ == "__main__":
     unittest.main()

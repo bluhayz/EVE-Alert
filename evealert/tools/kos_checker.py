@@ -53,7 +53,8 @@ class KosChecker:
         self._api_urls: list[str] = api_urls or []
         self._local: dict = local_hostile_list or {}  # {name_lower: tier}
         self._cva_enabled = cva_enabled
-        self._cache: dict[str, tuple[float, KosResult | None]] = {}
+        # Keyed by (pilot_lower, corp_lower, alliance_lower) -- see check().
+        self._cache: dict[tuple[str, str, str], tuple[float, KosResult | None]] = {}
         self._dead_sources: set[str] = set()  # URLs disabled this session
 
     def update_local_list(self, hostile_list: dict) -> None:
@@ -69,7 +70,11 @@ class KosChecker:
         if api_urls is not None:
             self._api_urls = list(api_urls)
         if local_hostile_list is not None:
-            self._local = local_hostile_list
+            # #229/#235: lower-case keys like update_local_list() does --
+            # _do_check() matches fragments against pilot.lower(), so a
+            # capitalized entry set via reconfigure() previously never
+            # matched anything.
+            self._local = {k.lower(): v for k, v in local_hostile_list.items()}
         if cva_enabled is not None:
             self._cva_enabled = cva_enabled
 
@@ -94,6 +99,18 @@ class KosChecker:
         tasks = [self.check(p, c, a) for p, c, a in pilots]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return [r for r in results if isinstance(r, KosResult)]
+
+    def purge_expired(self) -> int:
+        """Drop _cache entries past _CACHE_TTL (#229, follow-up to #177:
+        this is the second largest per-pilot cache -- one entry per
+        distinct (pilot, corp, alliance) KOS-checked -- and the TTL check
+        on read only skips a stale entry, it never evicts it). Returns the
+        number of entries removed."""
+        now = time.time()
+        stale = [k for k, (ts, _) in self._cache.items() if now - ts >= _CACHE_TTL]
+        for k in stale:
+            del self._cache[k]
+        return len(stale)
 
     async def _do_check(self, pilot: str, corp: str, alliance: str) -> KosResult | None:
         # 1. Local hostile list — instant, no network call

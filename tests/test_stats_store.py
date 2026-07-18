@@ -21,6 +21,23 @@ class TestGetPaths(unittest.TestCase):
         self.assertIsInstance(d, Path)
         self.assertTrue(d.is_dir())
 
+    def test_get_sessions_dir_honors_stats_path_override(self):
+        """#236: without this, every test exercising AlertAgent.stop()
+        (which calls save_session_report() unconditionally) wrote a real
+        session_YYYYMMDD_HHMMSS.json into the user's actual config
+        directory instead of the test's temp dir."""
+        import os
+        import tempfile
+
+        from evealert.settings.stats_store import get_sessions_dir
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            override = str(Path(tmpdir) / "statistics.json")
+            with patch.dict(os.environ, {"EVEALERT_STATS_PATH": override}):
+                d = get_sessions_dir()
+            self.assertEqual(d, Path(tmpdir) / "sessions")
+            self.assertTrue(d.is_dir())
+
 
 class TestLoadLifetimeStats(unittest.TestCase):
     def test_returns_empty_dict_when_file_missing(self):
@@ -121,6 +138,24 @@ class TestSaveSessionReport(unittest.TestCase):
         ):
             self.assertIn(key, data)
         self.assertEqual(data["session_alarms"], 1)
+
+    def test_respects_stats_path_override_without_mocking_get_sessions_dir(self):
+        """#236 end-to-end: this is exactly the path AlertAgent.stop() goes
+        through -- EVEALERT_STATS_PATH set (as every test's env is), but
+        get_sessions_dir() itself NOT explicitly mocked. Must land in the
+        temp dir, not the user's real config directory."""
+        import os
+        import tempfile
+
+        from evealert.settings.stats_store import save_session_report
+
+        stats = self._make_stats()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            override = str(Path(tmpdir) / "statistics.json")
+            with patch.dict(os.environ, {"EVEALERT_STATS_PATH": override}):
+                dest = save_session_report(stats, time.time())
+            self.assertEqual(dest.parent, Path(tmpdir) / "sessions")
+            self.assertTrue(dest.exists())
 
 
 class TestListSessionReports(unittest.TestCase):

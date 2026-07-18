@@ -107,6 +107,21 @@ class EsiLookup:
         self._cache.clear()
         self._zkb_cache.clear()
 
+    def purge_expired(self) -> int:
+        """Drop _cache/_zkb_cache entries past _CACHE_TTL (#229, follow-up
+        to #177: this is the largest per-pilot cache -- one entry per
+        distinct hostile ESI-checked -- and the TTL check on read only
+        skips a stale entry, it never evicts it. Returns the number of
+        entries removed."""
+        now = time.time()
+        stale_names = [k for k, (ts, _) in self._cache.items() if now - ts >= _CACHE_TTL]
+        for k in stale_names:
+            del self._cache[k]
+        stale_ids = [k for k, (ts, _) in self._zkb_cache.items() if now - ts >= _CACHE_TTL]
+        for k in stale_ids:
+            del self._zkb_cache[k]
+        return len(stale_names) + len(stale_ids)
+
     # ------------------------------------------------------------------
     # Internal helpers — character / corp / alliance
     # ------------------------------------------------------------------

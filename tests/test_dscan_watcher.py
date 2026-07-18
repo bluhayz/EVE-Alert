@@ -99,5 +99,107 @@ class EncodingDetectTests(unittest.TestCase):
             self.assertEqual(w._detect_encoding(), "utf-8")
 
 
+class LatestLogRaceConditionTests(unittest.TestCase):
+    """#234: a file glob() found can be deleted/locked (rotation,
+    antivirus, manual cleanup) by the time stat() runs on it -- must be
+    skipped, not let the whole call raise."""
+
+    def test_normal_case_returns_newest_file(self):
+        import tempfile
+        import time
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            older = Path(d) / "older.txt"
+            newer = Path(d) / "newer.txt"
+            older.write_text("x")
+            time.sleep(0.01)
+            newer.write_text("x")
+            result = DscanWatcher._latest_log(Path(d))
+        self.assertEqual(result, newer)
+
+    def test_empty_directory_returns_none(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            result = DscanWatcher._latest_log(Path(d))
+        self.assertIsNone(result)
+
+    def test_a_file_whose_stat_raises_is_skipped_not_fatal(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            good = Path(d) / "good.txt"
+            bad = Path(d) / "bad.txt"
+            good.write_text("x")
+            bad.write_text("x")
+
+            real_stat = Path.stat
+
+            def flaky_stat(self, *a, **kw):
+                if self.name == "bad.txt":
+                    raise OSError("file vanished")
+                return real_stat(self, *a, **kw)
+
+            with mock.patch.object(Path, "stat", flaky_stat):
+                result = DscanWatcher._latest_log(Path(d))
+
+        self.assertEqual(result, good)
+
+    def test_every_file_failing_stat_returns_none_not_raises(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "gone1.txt").write_text("x")
+            (Path(d) / "gone2.txt").write_text("x")
+
+            real_stat = Path.stat
+
+            def flaky_stat(self, *a, **kw):
+                if self.suffix == ".txt":
+                    raise OSError("gone")
+                return real_stat(self, *a, **kw)
+
+            with mock.patch.object(Path, "stat", flaky_stat):
+                result = DscanWatcher._latest_log(Path(d))
+        self.assertIsNone(result)
+
+
+class RunLoopResilienceTests(unittest.IsolatedAsyncioTestCase):
+    """#234: an OSError inside one poll iteration must not kill the whole
+    run() task -- D-scan monitoring would otherwise be gone silently for
+    the rest of the session."""
+
+    async def test_oserror_in_poll_does_not_stop_the_loop(self):
+        from pathlib import Path
+        from unittest import mock
+
+        w = DscanWatcher()
+        poll_count = {"n": 0}
+
+        async def fake_sleep(_):
+            poll_count["n"] += 1
+            if poll_count["n"] >= 3:
+                w._running = False
+
+        def flaky_latest_log(dscan_dir):
+            poll_count_now = poll_count["n"]
+            if poll_count_now == 0:
+                raise OSError("directory temporarily unavailable")
+            return None  # subsequent polls recover, no file found
+
+        with mock.patch.object(w, "_find_dscan_dir", return_value=Path("/fake/dscan")), \
+             mock.patch.object(w, "_latest_log", flaky_latest_log), \
+             mock.patch("evealert.tools.dscan_watcher.asyncio.sleep", new=fake_sleep):
+            await w.run()  # must return normally, not raise
+
+        self.assertGreaterEqual(poll_count["n"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

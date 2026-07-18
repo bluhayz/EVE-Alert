@@ -14,6 +14,7 @@ Endpoints:
 """
 
 import asyncio
+import html
 import json
 import logging
 import time
@@ -163,9 +164,13 @@ class WebStatusServer:
         m, s = divmod(r, 60)
         from evealert import __version__  # pylint: disable=import-outside-toplevel
 
+        # #228: log lines include raw intel-channel chat text (attacker
+        # controlled) -- escape before interpolating into HTML to prevent
+        # stored XSS against anyone viewing the dashboard.
         log_html = (
             "\n".join(
-                f'<div class="log-line">{line}</div>' for line in list(_LOG_BUFFER)
+                f'<div class="log-line">{html.escape(line)}</div>'
+                for line in list(_LOG_BUFFER)
             )
             or "<div>No log entries yet.</div>"
         )

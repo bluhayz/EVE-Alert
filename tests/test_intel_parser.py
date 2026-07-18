@@ -69,6 +69,25 @@ class ParseLineTests(unittest.TestCase):
         r = parse_line(self._line("EVE System", "some system message"))
         self.assertIsNone(r)
 
+    def test_natural_language_message_does_not_produce_false_system(self):
+        """#230: the message used to be upper-cased before system-name
+        detection ran, so ANY ordinary word became indistinguishable from
+        a real system name -- 'hostile' resolved to system 'HOSTILE'."""
+        r = parse_line(self._line("Some Pilot", "hostile sabre heading north"))
+        self.assertIsNotNone(r)
+        self.assertIsNone(r.system)
+
+    def test_lowercase_count_word_does_not_produce_false_system(self):
+        r = parse_line(self._line("Some Pilot", "2 reds camping gate"))
+        self.assertIsNotNone(r)
+        self.assertIsNone(r.system)
+        self.assertEqual(r.hostile_count, 2)
+
+    def test_hyphenated_system_still_detected_case_insensitively(self):
+        r = parse_line(self._line("Some Pilot", "d7-zac scimitar 2"))
+        self.assertIsNotNone(r)
+        self.assertEqual(r.system, "D7-ZAC")
+
 
 class IntelReportTests(unittest.TestCase):
     def test_report_defaults(self):

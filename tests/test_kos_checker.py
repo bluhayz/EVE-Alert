@@ -105,5 +105,47 @@ class DeadSourceTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class PurgeExpiredTests(unittest.TestCase):
+    """#229: KosChecker._cache only skips a stale entry on read -- must
+    actually be evicted, mirroring ZkillboardClient.purge_expired() (#177)."""
+
+    def test_purge_removes_only_stale_entries(self):
+        import time as time_mod
+
+        from evealert.tools.kos_checker import _CACHE_TTL
+
+        checker = KosChecker()
+        stale = time_mod.time() - _CACHE_TTL - 10
+        fresh = time_mod.time()
+        checker._cache[("stale", "", "")] = (stale, None)
+        checker._cache[("fresh", "", "")] = (fresh, None)
+
+        removed = checker.purge_expired()
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn(("stale", "", ""), checker._cache)
+        self.assertIn(("fresh", "", ""), checker._cache)
+
+
+class ReconfigureCasingTests(unittest.TestCase):
+    """#229/#235: reconfigure()'s local_hostile_list must be lower-cased
+    the same way update_local_list() already does -- _do_check() matches
+    fragments against pilot.lower(), so a capitalized entry set via
+    reconfigure() previously never matched anything."""
+
+    def test_reconfigure_lowercases_local_list_keys(self):
+        checker = KosChecker()
+        checker.reconfigure(local_hostile_list={"BadGuy Corp": "manual"})
+        self.assertIn("badguy corp", checker._local)
+        self.assertNotIn("BadGuy Corp", checker._local)
+
+    def test_capitalized_entry_set_via_reconfigure_actually_matches(self):
+        checker = KosChecker()
+        checker.reconfigure(local_hostile_list={"Evil Alliance": "manual"})
+        result = asyncio.run(checker.check("Some Pilot", "", "Evil Alliance"))
+        self.assertIsNotNone(result)
+        self.assertTrue(result.is_kos)
+
+
 if __name__ == "__main__":
     unittest.main()

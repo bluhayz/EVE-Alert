@@ -33,8 +33,19 @@ def get_stats_path() -> str:
 
 
 def get_sessions_dir() -> Path:
-    """Return the sessions/ subdirectory, creating it if needed."""
-    path = Path(user_config_dir("evealert")) / "sessions"
+    """Return the sessions/ subdirectory, creating it if needed.
+
+    #236: honors the same EVEALERT_STATS_PATH override as get_stats_path()
+    -- without this, every test exercising AlertAgent.stop() (which calls
+    save_session_report() unconditionally) wrote a real
+    session_YYYYMMDD_HHMMSS.json into the user's actual config directory.
+    """
+    override = os.environ.get("EVEALERT_STATS_PATH")
+    if override:
+        base = Path(override).parent
+    else:
+        base = Path(user_config_dir("evealert"))
+    path = base / "sessions"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
