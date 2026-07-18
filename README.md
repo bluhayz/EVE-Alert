@@ -401,6 +401,8 @@ Planned work is tracked as GitHub milestones with epic issues:
 | [v7.0 — Pilot Intelligence & Persistence](https://github.com/bluhayz/EVE-Alert/milestone/26) | Persistent SQLite sighting history (Local + intel), pilot summaries, pathing inference, historical threat scoring |
 | [v7.1 — Real-Time Intel Platform](https://github.com/bluhayz/EVE-Alert/milestone/23) | zKillboard RedisQ live killstream, gate-camp detection, route advisor, standings manager |
 | [v7.2 — Multiboxing & Performance](https://github.com/bluhayz/EVE-Alert/milestone/24) | Multi-client support, vision performance pass, dxcam capture backend |
+| [v7.3 — Combat Intelligence Data Foundation](https://github.com/bluhayz/EVE-Alert/milestone/27) | Killmail-derived combat activity store, sighting enrichment, analytics rollups, hostile watchlists |
+| [v7.4 — Enemy Analytics & Situational Awareness](https://github.com/bluhayz/EVE-Alert/milestone/28) | Pilot combat dossiers (ships/hunting grounds/active hours), group analytics, dossier-enriched alarms, Intel Analytics UI |
 | [v8.0 — Distribution & Ecosystem](https://github.com/bluhayz/EVE-Alert/milestone/25) | Auto-updater, signed installer + winget, crash reporting, plugin API v2 |
 
 Found a bug? Please [open an issue](https://github.com/bluhayz/EVE-Alert/issues) with a diagnostics bundle (**Settings → Alerts & Sound → Diagnostics → Export Diagnostics Bundle**).
