@@ -1,5 +1,52 @@
 # Changelog
 
+## [8.0.0] 2026-07-19
+
+### Added — Distribution & Ecosystem (#178-181)
+
+Makes EVE Alert installable, updatable, and extensible: a verified
+in-app updater, a Windows installer (+ winget packaging groundwork),
+opt-in local crash reporting, and a typed plugin API v2.
+
+- **Auto-updater (#178)**: the update-check/download/swap machinery
+  already existed; this closes the remaining gaps — downloads are now
+  verified against a sha256 `checksums.txt` published alongside every
+  release (a corrupted/truncated download aborts cleanly with nothing
+  replaced), the check now re-runs every 24h during a session (not just
+  at launch) behind a new `updates.auto_check` setting, and dismissing
+  an update notification persists a per-version "skip" so the same
+  release doesn't keep re-notifying.
+- **Signed installer + winget/chocolatey groundwork (#179)**: a new
+  Inno Setup installer (`packaging/installer.iss`, Start Menu shortcut,
+  off-by-default auto-start, uninstall that asks before deleting user
+  data) builds alongside the portable `.exe` in the release workflow —
+  best-effort on the self-hosted runner, never blocks a release if Inno
+  Setup isn't installed. Code-signing wiring is in place and activates
+  automatically once a signing identity is configured (see
+  `packaging/SIGNING.md` — this step requires repo-owner action to
+  procure). winget manifest templates and a submission walkthrough are
+  in `packaging/winget/` and `packaging/WINGET.md`; a Chocolatey nuspec
+  stretch starting point is in `packaging/choco/`.
+- **Opt-in crash reporting (#180)**: uncaught exceptions from any
+  context (main thread, background threads, the engine's asyncio loop)
+  are captured to a local, redacted crash bundle (reusing the existing
+  diagnostics-export redaction rules) — never sent anywhere
+  automatically. A dialog offers to open a pre-filled GitHub issue with
+  the traceback. New `diagnostics.crash_reports` setting (on by
+  default); local capture only, no telemetry.
+- **Plugin API v2 (#181)**: new `evealert/plugin_api.py` — typed hooks
+  (`on_start`/`on_stop`/`on_enemy`/`on_faction`/`on_intel`, plus new
+  `on_killmail` and `on_threat_score`) taking a `PluginContext`
+  (`log()`, `settings`, `speak()`, `fire_webhook()`) and a typed event
+  dataclass. Original v1 hook signatures keep working unchanged,
+  distinguished from v2 by parameter-name inspection. A plugin that
+  fails 3 consecutive calls to the same hook is quarantined until reset
+  from the new Settings → Plugins → Plugin Manager (list, per-plugin
+  enable/disable, quarantine reset). Also fixes `plugins.enabled` having
+  been dead config since introduction (defined in settings, never
+  actually read back). Full reference in `docs/PLUGINS.md`; three
+  runnable samples in `examples/plugins/`.
+
 ## [7.4.1] 2026-07-18
 
 ### Fixed — #151 peak-hours warning spam
