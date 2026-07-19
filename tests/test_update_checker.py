@@ -85,5 +85,106 @@ class TestCheckForUpdate(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
 
 
+class TestFetchChecksum(unittest.IsolatedAsyncioTestCase):
+    @respx.mock
+    async def test_returns_matching_hash(self):
+        from evealert.tools.update_checker import _RELEASE_TAG_URL, fetch_checksum
+
+        checksums_url = "https://example.com/checksums.txt"
+        respx.get(_RELEASE_TAG_URL.format(tag="v8.0.0")).mock(
+            return_value=Response(200, json={
+                "assets": [
+                    {"name": "EVE-Alert.exe", "browser_download_url": "https://example.com/exe"},
+                    {"name": "checksums.txt", "browser_download_url": checksums_url},
+                ]
+            })
+        )
+        respx.get(checksums_url).mock(
+            return_value=Response(
+                200, text="abc123def456  EVE-Alert.exe\ndeadbeef  other-file.txt\n"
+            )
+        )
+        result = await fetch_checksum("v8.0.0", "EVE-Alert.exe")
+        self.assertEqual(result, "abc123def456")
+
+    @respx.mock
+    async def test_returns_none_when_no_checksums_asset(self):
+        from evealert.tools.update_checker import _RELEASE_TAG_URL, fetch_checksum
+
+        respx.get(_RELEASE_TAG_URL.format(tag="v8.0.0")).mock(
+            return_value=Response(200, json={
+                "assets": [
+                    {"name": "EVE-Alert.exe", "browser_download_url": "https://example.com/exe"},
+                ]
+            })
+        )
+        result = await fetch_checksum("v8.0.0", "EVE-Alert.exe")
+        self.assertIsNone(result)
+
+    @respx.mock
+    async def test_returns_none_when_asset_not_listed_in_checksums(self):
+        from evealert.tools.update_checker import _RELEASE_TAG_URL, fetch_checksum
+
+        checksums_url = "https://example.com/checksums.txt"
+        respx.get(_RELEASE_TAG_URL.format(tag="v8.0.0")).mock(
+            return_value=Response(200, json={
+                "assets": [{"name": "checksums.txt", "browser_download_url": checksums_url}]
+            })
+        )
+        respx.get(checksums_url).mock(
+            return_value=Response(200, text="deadbeef  some-other-file.exe\n")
+        )
+        result = await fetch_checksum("v8.0.0", "EVE-Alert.exe")
+        self.assertIsNone(result)
+
+    @respx.mock
+    async def test_returns_none_on_http_error(self):
+        from evealert.tools.update_checker import _RELEASE_TAG_URL, fetch_checksum
+
+        respx.get(_RELEASE_TAG_URL.format(tag="v8.0.0")).mock(return_value=Response(500))
+        result = await fetch_checksum("v8.0.0", "EVE-Alert.exe")
+        self.assertIsNone(result)
+
+
+class TestVerifySha256(unittest.TestCase):
+    def test_matching_hash_returns_true(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+
+        from evealert.tools.update_checker import verify_sha256
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "file.bin"
+            data = b"hello world" * 1000
+            path.write_bytes(data)
+            expected = hashlib.sha256(data).hexdigest()
+            self.assertTrue(verify_sha256(path, expected))
+
+    def test_mismatched_hash_returns_false(self):
+        import tempfile
+        from pathlib import Path
+
+        from evealert.tools.update_checker import verify_sha256
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "file.bin"
+            path.write_bytes(b"hello world")
+            self.assertFalse(verify_sha256(path, "0" * 64))
+
+    def test_case_insensitive_comparison(self):
+        import hashlib
+        import tempfile
+        from pathlib import Path
+
+        from evealert.tools.update_checker import verify_sha256
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "file.bin"
+            path.write_bytes(b"data")
+            expected = hashlib.sha256(b"data").hexdigest().upper()
+            self.assertTrue(verify_sha256(path, expected))
+
+
 if __name__ == "__main__":
     unittest.main()

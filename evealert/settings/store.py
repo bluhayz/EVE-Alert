@@ -135,10 +135,21 @@ DEFAULT_SETTINGS: dict = {
         "fleet_monitor": False, "structure_alerts": False,
     },
     "ocr": {"enabled": False, "region": {"x1": 0, "y1": 0, "x2": 0, "y2": 0}},
-    "diagnostics": {"enabled": False},
+    # #180: crash_reports is local-capture-only (writes a redacted crash
+    # bundle on an uncaught exception) -- distinct from "enabled" above,
+    # which gates the diagnostic-context logging feature. Neither ever
+    # sends anything over the network on its own.
+    "diagnostics": {"enabled": False, "crash_reports": True},
     "alerts": {"rearm_minutes": 0},
     "automation": {"enabled": False, "webhook_url": ""},
     "ui": {"onboarding_completed": False},
+    # #178 (v8.0): auto_check gates BOTH the on-launch and the periodic
+    # 24h re-check; skipped_version persists a user's "skip this
+    # release" choice so the same tag doesn't keep re-notifying. channel
+    # is reserved for a future pre-release/beta feed -- only "stable" is
+    # implemented today (GitHub's /releases/latest endpoint already only
+    # returns non-prerelease, non-draft releases).
+    "updates": {"auto_check": True, "channel": "stable", "skipped_version": ""},
 }
 
 

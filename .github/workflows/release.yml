@@ -44,11 +44,94 @@ jobs:
           --add-data "evealert/ui/theme.qss;ui"
           main.py
 
+      - name: Sign portable .exe
+        # #179: signs when a signing identity is configured (see
+        # packaging/SIGNING.md), otherwise this step is skipped entirely
+        # -- an unsigned build still publishes normally. Uses a
+        # traditional PFX cert via signtool (Windows SDK, present on
+        # windows-latest / most self-hosted Windows runners); switch to
+        # azure/trusted-signing-action here if using Option A instead
+        # (see SIGNING.md).
+        if: ${{ secrets.SIGN_PFX_BASE64 != '' }}
+        shell: powershell
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "signing-cert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
+          if (-not $signtool) { $signtool = "signtool.exe" }
+          & $signtool sign /f $pfxPath /p $env:SIGN_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 dist\EVE-Alert.exe
+          Remove-Item $pfxPath -Force
+
+      - name: Build installer (Inno Setup)
+        id: build_installer
+        # #179: best-effort -- this self-hosted runner may not have Inno
+        # Setup installed. When it's missing, this step logs a notice
+        # and the job continues with just the portable .exe, exactly as
+        # it did before #179 -- it must never fail the release.
+        shell: powershell
+        continue-on-error: true
+        run: |
+          $iscc = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $candidate = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (Test-Path $candidate) { $iscc = $candidate }
+          }
+          if (-not $iscc) {
+            Write-Host "Inno Setup (ISCC.exe) not found on this runner -- skipping installer build. See packaging/installer.iss."
+            "built=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          & $iscc "packaging\installer.iss" "/DMyAppVersion=$version"
+          "built=true" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Sign installer .exe
+        if: ${{ steps.build_installer.outputs.built == 'true' && secrets.SIGN_PFX_BASE64 != '' }}
+        shell: powershell
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.SIGN_PFX_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "signing-cert.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue | Select-Object -Last 1).FullName
+          if (-not $signtool) { $signtool = "signtool.exe" }
+          Get-ChildItem "dist\EVE-Alert-Setup-*.exe" | ForEach-Object {
+            & $signtool sign /f $pfxPath /p $env:SIGN_PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $_.FullName
+          }
+          Remove-Item $pfxPath -Force
+
+      - name: Generate checksums
+        # #178: self-updater verifies the downloaded .exe against this
+        # sha256sum-style ("<hex>  <filename>") file before ever handing
+        # it to the swap script. Computed AFTER signing so the checksum
+        # matches exactly what gets published. shell: powershell (not
+        # pwsh) since this runner is self-hosted -- Windows PowerShell
+        # is guaranteed present, PowerShell Core may not be installed.
+        shell: powershell
+        run: |
+          $lines = @()
+          $lines += (Get-FileHash -Path dist\EVE-Alert.exe -Algorithm SHA256).Hash.ToLower() + "  EVE-Alert.exe"
+          Get-ChildItem "dist\EVE-Alert-Setup-*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
+            $lines += (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower() + "  $($_.Name)"
+          }
+          Set-Content -Path dist\checksums.txt -Value $lines -Encoding ascii
+
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
           name: EVE-Alert-Windows
-          path: dist/EVE-Alert.exe
+          # The installer glob matches nothing (and uploads nothing extra)
+          # when the Inno Setup step above was skipped -- upload-artifact
+          # tolerates a non-matching path in a multi-line path list.
+          path: |
+            dist/EVE-Alert.exe
+            dist/checksums.txt
+            dist/EVE-Alert-Setup-*.exe
 
   release:
     name: Create GitHub Release
@@ -65,5 +148,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/EVE-Alert.exe
+          files: |
+            artifacts/EVE-Alert.exe
+            artifacts/checksums.txt
+            artifacts/EVE-Alert-Setup-*.exe
           generate_release_notes: true

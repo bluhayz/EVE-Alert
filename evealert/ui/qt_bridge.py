@@ -25,6 +25,9 @@ class QtBridge(QObject):
     context_changed = Signal()
     # Emitted when a newer GitHub release is detected — carries the tag string
     update_available = Signal(str)
+    # Emitted when a crash bundle is written mid-session (#180) — carries
+    # the bundle directory path as a string.
+    crash_detected = Signal(str)
 
     def log(self, text: str, color: str = "normal") -> None:
         self.log_message.emit(text, color)
@@ -42,3 +45,6 @@ class QtBridge(QObject):
 
     def refresh_context_line(self) -> None:
         self.context_changed.emit()
+
+    def notify_crash(self, bundle_dir: str) -> None:
+        self.crash_detected.emit(bundle_dir)

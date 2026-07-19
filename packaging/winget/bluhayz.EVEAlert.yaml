@@ -1,0 +1,10 @@
+# winget version manifest -- see ../WINGET.md for how to fill in and
+# submit this (with the other two manifest files in this directory) to
+# microsoft/winget-pkgs for a given release.
+#
+# PLACEHOLDER: replace __VERSION__ before submitting -- see WINGET.md.
+PackageIdentifier: bluhayz.EVEAlert
+PackageVersion: __VERSION__
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

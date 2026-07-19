@@ -158,6 +158,17 @@ FIELDS: list = [
     # --- Diagnostics (Alerts & Sound tab) ------------------------------------
     FieldSpec("diagnostics.enabled", "bool", "Alerts & Sound", "Diagnostics",
               "Enable diagnostic (verbose) logging", "diagnostics_enabled_var", False),
+    FieldSpec("diagnostics.crash_reports", "bool", "Alerts & Sound", "Diagnostics",
+              "Save a local crash report on unexpected errors (never sent automatically)",
+              "diagnostics_crash_reports_var", True),
+    # --- Plugins (#181, v8.0) -------------------------------------------------
+    FieldSpec("plugins.enabled", "bool", "Alerts & Sound", "Plugins",
+              "Enable plugins (loaded from your plugins folder on start)",
+              "plugins_enabled_var", True),
+    # --- Updates (#178, v8.0) --------------------------------------------------
+    FieldSpec("updates.auto_check", "bool", "Alerts & Sound", "Updates",
+              "Automatically check for updates (on start and every 24h)",
+              "updates_auto_check_var", True),
 ]
 
 TAB_ORDER = [

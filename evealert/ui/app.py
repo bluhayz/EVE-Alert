@@ -25,8 +25,28 @@ def create_app() -> QApplication:
 
 def run() -> int:
     app = create_app()
+
+    from evealert.settings.store import get_settings_store  # noqa: PLC0415
+    from evealert.tools.crash_reporter import install, install_qt_handler  # noqa: PLC0415
+
+    settings = get_settings_store().load()
+    crash_reports_enabled = bool(
+        settings.get("diagnostics", {}).get("crash_reports", True)
+    )
+    install_qt_handler()
+    # Hooks go live immediately (no dialog callback yet) so even a crash
+    # during MainWindow construction is captured to a bundle.
+    install(enabled=crash_reports_enabled)
+
     from evealert.ui.main_window import MainWindow  # noqa: PLC0415
 
     win = MainWindow()
+
+    if crash_reports_enabled:
+        install(on_crash=lambda bundle_dir: win.bridge.notify_crash(str(bundle_dir)))
+        from evealert.ui.crash_dialog import maybe_show_pending_crash  # noqa: PLC0415
+
+        maybe_show_pending_crash(win)
+
     win.show()
     return app.exec()

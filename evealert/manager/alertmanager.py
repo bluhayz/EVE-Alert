@@ -170,6 +170,11 @@ def _peak_hours_sleep_seconds(minutes_to_next: int) -> int:
     return max(minutes_to_next * 60, 60)
 
 
+# #178 (v8.0): how often _update_check_monitor() re-checks GitHub
+# Releases after the on-launch check.
+_UPDATE_CHECK_INTERVAL_SECONDS = 24 * 3600
+
+
 def _normalize_intel_line(line: str) -> str:
     """#171: normalize a raw intel-channel line for cross-channel dedup.
 
@@ -532,6 +537,28 @@ class AlertAgent:
         except Exception as exc:
             logger.debug("_ui dispatch error (%s): %s", getattr(fn, "__name__", fn), exc)
 
+    def _call_plugin_hook(self, hook: str, event=None, **v1_kwargs) -> None:
+        """Dispatch a plugin hook, supplying the v2 PluginContext
+        essentials (#181) alongside the original v1 kwargs so both
+        plugin generations keep working from one call site.
+
+        *event*, when given, is the typed dataclass (AlarmEvent /
+        IntelReport / KillmailEvent / ThreatScoreEvent) passed to a v2
+        plugin's second parameter.
+        """
+        try:
+            from evealert.tools.plugin_loader import get_plugin_manager  # noqa: PLC0415
+
+            get_plugin_manager().call(
+                hook,
+                ctx_settings=self._settings_store.load(),
+                log_fn=lambda text: self._ui(self.main.write_message, text, "cyan"),
+                event=event,
+                **v1_kwargs,
+            )
+        except Exception as exc:
+            logger.debug("Plugin hook '%s' dispatch failed: %s", hook, exc)
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -827,6 +854,22 @@ class AlertAgent:
             )
             self._ui(self.main.write_message, msg, "yellow")
 
+            # #181: on_killmail is a v2-only hook (no v1 equivalent), so
+            # no v1_kwargs are needed here.
+            from evealert.plugin_api import KillmailEvent  # noqa: PLC0415
+
+            self._call_plugin_hook(
+                "on_killmail",
+                event=KillmailEvent(
+                    killmail_id=killmail.killmail_id,
+                    system_id=killmail.solar_system_id,
+                    system_name=system_name,
+                    victim_ship_type_id=killmail.victim_ship_type_id,
+                    attacker_character_ids=tuple(killmail.attacker_character_ids),
+                    jump_distance=jump_dist,
+                ),
+            )
+
             if jump_dist is not None and jump_dist <= self._r2z2_alarm_jumps:
                 await self.play_sound(ALARM_SOUND, "Enemy")
         except Exception as exc:
@@ -948,6 +991,18 @@ class AlertAgent:
         """Start the detection engine in this (daemon) thread."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
+        # #180: route uncaught exceptions on this dedicated engine loop
+        # through the same crash-bundle path as the main-thread/Qt/
+        # background-thread hooks -- gated behind the same
+        # diagnostics.crash_reports toggle app.run() checks, and never
+        # allowed to prevent the engine from starting.
+        try:
+            if self._settings_store.get("diagnostics.crash_reports", True):
+                from evealert.tools.crash_reporter import install_asyncio_handler  # noqa: PLC0415
+
+                install_asyncio_handler(self.loop)
+        except Exception:
+            logger.debug("Crash reporter: could not install asyncio handler", exc_info=True)
 
         self.loop.run_until_complete(self.vision_check())
         if self.check:
@@ -975,8 +1030,9 @@ class AlertAgent:
 
             self.running = True
             self._ui(self.main.write_message, "System: EVE Alert started.", "green")
-            # Fire background update check — non-blocking, silent on failure
-            self.loop.create_task(self._check_for_update())
+            # Background update check — non-blocking, silent on failure,
+            # re-checks every 24h for the rest of the session (#178).
+            self.loop.create_task(self._update_check_monitor())
             # v3.2: pipe/pocket classification + sovereignty display (one-shot at start)
             self.loop.create_task(self._display_system_info())
             # v7.1 (#169): live kill feed (R2Z2) supersedes the adjacent-system
@@ -1073,14 +1129,7 @@ class AlertAgent:
                 self._cache_maintenance_task()
             )
             # Notify plugins that detection has started
-            try:
-                from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
-                    get_plugin_manager,
-                )
-
-                get_plugin_manager().call("on_start")
-            except Exception:
-                pass
+            self._call_plugin_hook("on_start")
             self.loop.run_forever()
             logger.debug("Alert loop terminated.")
             return True
@@ -1148,14 +1197,7 @@ class AlertAgent:
         # alert thread that owns the mss OS handles (#190).
         if self.loop is not None and self.loop.is_running():
             self.loop.call_soon_threadsafe(self._shutdown_loop)
-        try:
-            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
-                get_plugin_manager,
-            )
-
-            get_plugin_manager().call("on_stop")
-        except Exception:
-            pass
+        self._call_plugin_hook("on_stop")
         # Wrap the rest of cleanup so one failure doesn't abort stats persistence
         try:
             self._web_server = None
@@ -1297,6 +1339,12 @@ class AlertAgent:
                 intel.get("pilot_history_retention_days", 180)
             )
             self._pilot_history_enabled = bool(intel.get("pilot_history_enabled", True))
+
+            # #181 fix: plugins.enabled was defined in DEFAULT_SETTINGS
+            # and read at __init__ time but never re-read here, so the
+            # Settings toggle (once one existed) would always be a no-op
+            # against the hardcoded True default.
+            self._plugins_enabled = bool(settings.get("plugins", {}).get("enabled", True))
 
             # ESI augmentation settings
             esi = settings.get("esi", {})
@@ -1929,14 +1977,16 @@ class AlertAgent:
 
         # Notify plugins
         try:
-            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
-                get_plugin_manager,
-            )
+            from evealert.plugin_api import AlarmEvent  # noqa: PLC0415
 
             system = self._settings_store.get("server.system", "")
             ts = time.strftime("%H:%M:%S")
             hook = "on_enemy" if alarm_type == "Enemy" else "on_faction"
-            get_plugin_manager().call(hook, system=system, timestamp=ts)
+            self._call_plugin_hook(
+                hook,
+                event=AlarmEvent(alarm_type=alarm_type, system=system, timestamp=ts),
+                system=system, timestamp=ts,
+            )
         except Exception as exc:
             logger.debug("Plugin on_enemy/on_faction hook failed: %s", exc)
 
@@ -2006,13 +2056,15 @@ class AlertAgent:
             return
         channel_tag = f"[{channel}] " if channel else ""
         self._ui(self.main.write_message, f"Intel: {channel_tag}{stripped}", "cyan")
-        # Notify plugins
+        # Notify plugins. system/pilot aren't parsed at this call site
+        # (that's _on_intel_report's job, downstream) -- v2 plugins get
+        # an IntelReport with just the raw line filled in.
         try:
-            from evealert.tools.plugin_loader import (  # pylint: disable=import-outside-toplevel
-                get_plugin_manager,
-            )
+            from evealert.plugin_api import IntelReport  # noqa: PLC0415
 
-            get_plugin_manager().call("on_intel", line=stripped)
+            self._call_plugin_hook(
+                "on_intel", event=IntelReport(line=stripped), line=stripped
+            )
         except Exception as exc:
             logger.debug("Plugin on_intel hook failed: %s", exc)
 
@@ -2884,6 +2936,18 @@ class AlertAgent:
             )
             colour = {"CRITICAL": "red", "HIGH": "yellow", "CAUTION": "cyan"}[assessment.label]
             self._ui(self.main.write_message, str(assessment), colour)
+
+            # #181: on_threat_score is a v2-only hook (no v1 equivalent).
+            from evealert.plugin_api import ThreatScoreEvent  # noqa: PLC0415
+
+            self._call_plugin_hook(
+                "on_threat_score",
+                event=ThreatScoreEvent(
+                    score=assessment.score, label=assessment.label,
+                    reasons=tuple(assessment.reasons),
+                    behavioral_label=assessment.behavioral_label,
+                ),
+            )
         except Exception as exc:
             logger.debug("Threat score computation failed: %s", exc)
 
@@ -3489,18 +3553,33 @@ class AlertAgent:
                 )
 
     async def _check_for_update(self) -> None:
-        """Non-blocking startup version check against GitHub Releases."""
+        """One version check against GitHub Releases -- non-blocking,
+        silent on failure. Skips entirely when updates.auto_check is
+        off, and doesn't re-notify for a release the user already
+        clicked "skip" on (#178)."""
         try:
             from evealert import __version__  # pylint: disable=import-outside-toplevel
             from evealert.tools.update_checker import (  # pylint: disable=import-outside-toplevel
                 check_for_update,
             )
 
+            if not self._settings_store.get("updates.auto_check", True):
+                return
             tag = await check_for_update(__version__)
-            if tag:
+            skipped = self._settings_store.get("updates.skipped_version", "")
+            if tag and tag != skipped:
                 self._ui(self.main.notify_update, tag)
         except Exception as exc:
             logger.debug("Update check error: %s", exc)
+
+    async def _update_check_monitor(self) -> None:
+        """Check for an update on launch, then again every
+        _UPDATE_CHECK_INTERVAL_SECONDS (#178) for the rest of the
+        session -- catches a release that ships mid-session without
+        requiring a restart to find out about it."""
+        while self.running:
+            await self._check_for_update()
+            await asyncio.sleep(_UPDATE_CHECK_INTERVAL_SECONDS)
 
     async def _fetch_and_report_kills(self, system_name: str) -> None:
         """Background task: fetch Zkillboard data and post results to the log."""

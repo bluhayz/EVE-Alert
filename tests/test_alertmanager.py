@@ -3616,6 +3616,142 @@ class PeakHoursMonitorDangerWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self._danger_window_calls()), 0)
 
 
+class CheckForUpdateTests(unittest.IsolatedAsyncioTestCase):
+    """#178 (v8.0): auto_check gate and skipped_version persistence for
+    the background update check."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.mock_main.notify_update = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        self.settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(self.settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(self.settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_notifies_when_update_available(self):
+        with patch(
+            "evealert.tools.update_checker.check_for_update",
+            new=AsyncMock(return_value="v99.0.0"),
+        ):
+            await self.agent._check_for_update()
+        self.mock_main.notify_update.assert_called_once_with("v99.0.0")
+
+    async def test_auto_check_disabled_skips_network_call(self):
+        with open(self.settings_path, "w") as f:
+            json.dump({"updates": {"auto_check": False}}, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+
+        with patch(
+            "evealert.tools.update_checker.check_for_update",
+            new=AsyncMock(return_value="v99.0.0"),
+        ) as mock_check:
+            await self.agent._check_for_update()
+        mock_check.assert_not_awaited()
+        self.mock_main.notify_update.assert_not_called()
+
+    async def test_skipped_version_does_not_renotify(self):
+        with open(self.settings_path, "w") as f:
+            json.dump({"updates": {"skipped_version": "v99.0.0"}}, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+
+        with patch(
+            "evealert.tools.update_checker.check_for_update",
+            new=AsyncMock(return_value="v99.0.0"),
+        ):
+            await self.agent._check_for_update()
+        self.mock_main.notify_update.assert_not_called()
+
+    async def test_different_new_version_still_notifies_despite_old_skip(self):
+        with open(self.settings_path, "w") as f:
+            json.dump({"updates": {"skipped_version": "v98.0.0"}}, f)
+        reset_settings_store(self.settings_path)
+        self.agent.load_settings()
+
+        with patch(
+            "evealert.tools.update_checker.check_for_update",
+            new=AsyncMock(return_value="v99.0.0"),
+        ):
+            await self.agent._check_for_update()
+        self.mock_main.notify_update.assert_called_once_with("v99.0.0")
+
+
+class UpdateCheckMonitorTests(unittest.IsolatedAsyncioTestCase):
+    """#178: the update check re-runs periodically (not just on launch)."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_checks_repeatedly_while_running(self):
+        self.agent.running = True
+        call_count = {"n": 0}
+
+        async def fake_sleep(_):
+            call_count["n"] += 1
+            if call_count["n"] >= 3:
+                self.agent.running = False
+
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._check_for_update",
+            new=AsyncMock(),
+        ) as mock_check, patch(
+            "evealert.manager.alertmanager.asyncio.sleep", new=fake_sleep
+        ):
+            await self.agent._update_check_monitor()
+
+        self.assertEqual(mock_check.await_count, 3)
+
+    async def test_sleeps_the_full_interval_between_checks(self):
+        from evealert.manager.alertmanager import _UPDATE_CHECK_INTERVAL_SECONDS
+
+        self.agent.running = True
+        sleep_durations = []
+
+        async def fake_sleep(duration):
+            sleep_durations.append(duration)
+            if len(sleep_durations) >= 1:
+                self.agent.running = False
+
+        with patch(
+            "evealert.manager.alertmanager.AlertAgent._check_for_update",
+            new=AsyncMock(),
+        ), patch("evealert.manager.alertmanager.asyncio.sleep", new=fake_sleep):
+            await self.agent._update_check_monitor()
+
+        self.assertEqual(sleep_durations, [_UPDATE_CHECK_INTERVAL_SECONDS])
+
+
 class PeakHoursZkbWarningDedupTests(unittest.IsolatedAsyncioTestCase):
     """#151 regression: the zKB-heatmap-backed "PEAK HOURS APPROACHING"
     line used to re-fire on every wakeup once inside its 15-minute

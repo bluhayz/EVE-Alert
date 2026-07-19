@@ -108,6 +108,7 @@ class MainWindow(QMainWindow):
         self.bridge.error.connect(self._on_engine_error)
         self.bridge.update_available.connect(self._on_update_available)
         self.bridge.context_changed.connect(self.refresh_context_line)
+        self.bridge.crash_detected.connect(self._on_crash_detected)
         # Alarm flash signal — wired after tray is built (see _build_tray)
 
         self._build_ui()
@@ -184,7 +185,8 @@ class MainWindow(QMainWindow):
         self._update_btn.setStyleSheet("color:#4ade80;")
         self._update_dismiss = QPushButton("✕")
         self._update_dismiss.setFixedWidth(28)
-        self._update_dismiss.clicked.connect(lambda: self._update_bar.hide())
+        # Wired per-tag in _on_update_available() (persists "skip this
+        # version") rather than here -- the tag isn't known yet at build time.
         _update_row.addWidget(self._update_label, 1)
         _update_row.addWidget(self._update_btn)
         _update_row.addWidget(self._update_dismiss)
@@ -453,6 +455,23 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(url))
 
     @Slot(str)
+    def _on_crash_detected(self, bundle_dir: str) -> None:
+        """Show the crash dialog immediately for a mid-session, non-fatal
+        crash (a Qt slot or the engine's asyncio loop caught something --
+        the app is still running). The fatal-main-thread-crash case is
+        instead handled at next launch (see crash_dialog.maybe_show_pending_crash,
+        called from app.run())."""
+        from pathlib import Path  # noqa: PLC0415
+
+        from evealert.tools.crash_reporter import mark_acknowledged  # noqa: PLC0415
+        from evealert.ui.crash_dialog import CrashDialog  # noqa: PLC0415
+
+        path = Path(bundle_dir)
+        dlg = CrashDialog(self, path)
+        dlg.exec()
+        mark_acknowledged(path)
+
+    @Slot(str)
     def _on_update_available(self, tag: str) -> None:
         """Show the update notification bar and wire the Update button."""
         self._reset_update_button()  # re-enable the check button if it was spinning
@@ -477,7 +496,20 @@ class MainWindow(QMainWindow):
                 # Dialog called launch_swap_and_exit(); now we exit the app
                 self.exit_app()
 
+        def _skip_update() -> None:
+            # #178: persist "skip this version" so the same tag doesn't
+            # re-notify on the next launch or 24h re-check -- distinct
+            # from just hiding the bar for the rest of this session.
+            try:
+                settings = self.store.load()
+                settings["updates"]["skipped_version"] = tag
+                self.store.save(settings)
+            except Exception:
+                pass
+            self._update_bar.hide()
+
         self._update_btn.clicked.connect(_open_update)
+        self._update_dismiss.clicked.connect(_skip_update)
         # On non-updatable platforms show the bar as info-only (no button)
         self._update_btn.setVisible(is_updatable())
         self._update_bar.show()

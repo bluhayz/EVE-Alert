@@ -34,7 +34,14 @@ from evealert.tools.self_updater import (
     temp_download_path,
     write_swap_script,
 )
-from evealert.tools.update_checker import download_release, fetch_latest_asset_url
+from evealert.tools.update_checker import (
+    download_release,
+    fetch_checksum,
+    fetch_latest_asset_url,
+    verify_sha256,
+)
+
+_ASSET_NAME = "EVE-Alert.exe"
 
 logger = logging.getLogger("alert.update")
 
@@ -53,10 +60,11 @@ class _DownloadWorker(QObject):
     finished = Signal(Path)       # destination path on success
     failed = Signal(str)          # error message on failure
 
-    def __init__(self, asset_url: str, dest: Path) -> None:
+    def __init__(self, asset_url: str, dest: Path, expected_sha256: str | None = None) -> None:
         super().__init__()
         self._asset_url = asset_url
         self._dest = dest
+        self._expected_sha256 = expected_sha256
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -72,8 +80,20 @@ class _DownloadWorker(QObject):
             asyncio.run(download_release(self._asset_url, self._dest, _cb))
             if self._cancelled:
                 cleanup_temp_download()
-            else:
-                self.finished.emit(self._dest)
+                return
+            # #178: verify the download against the release's published
+            # sha256 before ever handing it to the swap script -- a
+            # corrupted/truncated download must never replace the
+            # running binary. No checksum available (older release) ->
+            # proceed unverified rather than block the update entirely.
+            if self._expected_sha256 and not verify_sha256(self._dest, self._expected_sha256):
+                cleanup_temp_download()
+                self.failed.emit(
+                    "Downloaded file failed checksum verification -- aborted, "
+                    "nothing was replaced. Try again or update manually."
+                )
+                return
+            self.finished.emit(self._dest)
         except Exception as exc:
             cleanup_temp_download()
             self.failed.emit(str(exc))
@@ -95,6 +115,11 @@ class UpdateDialog(QDialog):
         self.setMinimumWidth(440)
         self._new_tag = new_tag
         self._asset_url: str | None = None
+        # #178: best-effort -- None means "no checksums.txt for this
+        # release" (e.g. one published before #178), in which case the
+        # download proceeds unverified rather than blocking updates
+        # entirely on an older release.
+        self._expected_sha256: str | None = None
         self._dest: Path = temp_download_path()
         self._thread: QThread | None = None
         self._worker: _DownloadWorker | None = None
@@ -156,18 +181,29 @@ class UpdateDialog(QDialog):
     # URL resolution — runs on a daemon thread, marshals back via signal
 
     def _resolve_url(self) -> None:
+        async def _resolve() -> tuple[str | None, str | None]:
+            url = await fetch_latest_asset_url(self._new_tag)
+            checksum = await fetch_checksum(self._new_tag, _ASSET_NAME)
+            return url, checksum
+
         try:
-            url = asyncio.run(fetch_latest_asset_url(self._new_tag))
+            url, checksum = asyncio.run(_resolve())
         except Exception as exc:
             logger.debug("Asset URL resolution failed: %s", exc)
-            url = None
-        self._url_ready.emit(url)
+            url, checksum = None, None
+        self._url_ready.emit((url, checksum))
 
     @Slot(object)
-    def _on_url_resolved(self, url: str | None) -> None:
+    def _on_url_resolved(self, payload: tuple) -> None:
+        url, checksum = payload
         if url:
             self._asset_url = url
-            self._status.setText("Ready to download.")
+            self._expected_sha256 = checksum
+            self._status.setText(
+                "Ready to download."
+                if checksum
+                else "Ready to download (no checksum published for this release)."
+            )
             self._btn_update.setEnabled(True)
         else:
             self._status.setText(
@@ -187,7 +223,7 @@ class UpdateDialog(QDialog):
         self._progress.show()
         self._status.setText("Downloading…")
 
-        self._worker = _DownloadWorker(self._asset_url, self._dest)
+        self._worker = _DownloadWorker(self._asset_url, self._dest, self._expected_sha256)
         self._thread = QThread(self)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

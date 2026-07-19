@@ -1,0 +1,137 @@
+"""Crash notification dialog for EVE Alert (#180, v8.0).
+
+Shown either immediately (a non-fatal error caught in a Qt slot or the
+engine's asyncio loop -- the app is still running) or on the next launch
+(a fatal main-thread crash killed the previous session before a dialog
+could show). Mirrors bug_reporter.py's GitHub-issue-prefill pattern, but
+sources its report from a written crash bundle instead of the live log
+pane.
+"""
+
+from __future__ import annotations
+
+import json
+import textwrap
+import urllib.parse
+from pathlib import Path
+
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+)
+
+from evealert import __version__
+
+_GITHUB_NEW_ISSUE = "https://github.com/bluhayz/EVE-Alert/issues/new"
+_MAX_BODY_CHARS = 6_000  # keep the prefilled URL well under GitHub's ~8KB limit
+
+
+class CrashDialog(QDialog):
+    """"EVE Alert hit an error" — view the report, open a GitHub issue, or dismiss."""
+
+    def __init__(self, parent, bundle_dir: Path) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("EVE Alert — Unexpected Error")
+        self.setMinimumWidth(560)
+        self.setMinimumHeight(400)
+        self._bundle_dir = bundle_dir
+        self._build_ui()
+        self._populate()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            "EVE Alert hit an unexpected error. A local diagnostic report was "
+            "saved -- nothing was sent anywhere. You can review it below, open "
+            "a pre-filled GitHub issue (opens your browser; you can edit or "
+            "cancel it before submitting), or just dismiss this."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        self._report_view = QPlainTextEdit()
+        self._report_view.setReadOnly(True)
+        layout.addWidget(self._report_view, 1)
+
+        btn_row = QHBoxLayout()
+        btn_open_folder = QPushButton("View Report Folder")
+        btn_open_folder.clicked.connect(self._open_folder)
+        btn_github = QPushButton("Open GitHub Issue")
+        btn_github.clicked.connect(self._open_github_issue)
+        btn_dismiss = QPushButton("Dismiss")
+        btn_dismiss.clicked.connect(self.accept)
+        btn_row.addWidget(btn_open_folder)
+        btn_row.addWidget(btn_github)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_dismiss)
+        layout.addLayout(btn_row)
+
+    def _populate(self) -> None:
+        self._traceback = self._read(self._bundle_dir / "traceback.txt")
+        self._context = self._read(self._bundle_dir / "context.json")
+        self._report_view.setPlainText(
+            f"{self._traceback}\n\n--- context ---\n{self._context}"
+        )
+
+    @staticmethod
+    def _read(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return "(not available)"
+
+    def _open_folder(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._bundle_dir)))
+
+    def _crash_summary(self) -> str:
+        """First line of the traceback's exception (e.g. "ValueError:
+        bad thing happened"), or a generic fallback."""
+        for line in reversed(self._traceback.strip().splitlines()):
+            if line and not line.startswith(" "):
+                return line
+        return "Unhandled exception"
+
+    def github_url(self) -> str:
+        tb = self._traceback[:_MAX_BODY_CHARS]
+        body = textwrap.dedent(f"""\
+            ## Environment
+            ```
+            EVE Alert version: {__version__}
+            ```
+
+            ## What happened
+            <!-- What were you doing when this happened? -->
+
+            ## Traceback
+            ```
+            {tb}
+            ```
+        """)
+        title = f"Crash: {self._crash_summary()}"[:250]
+        params = urllib.parse.urlencode({"title": title, "body": body})
+        return f"{_GITHUB_NEW_ISSUE}?{params}"
+
+    def _open_github_issue(self) -> None:
+        QDesktopServices.openUrl(QUrl(self.github_url()))
+
+
+def maybe_show_pending_crash(parent) -> None:
+    """Check for an unacknowledged crash bundle from a previous session
+    (the fatal-main-thread-crash case) and show CrashDialog for it if
+    found. Call once at startup, after the main window exists.
+    """
+    from evealert.tools.crash_reporter import find_unacknowledged_crash, mark_acknowledged  # noqa: PLC0415
+
+    bundle_dir = find_unacknowledged_crash()
+    if bundle_dir is None:
+        return
+    dlg = CrashDialog(parent, bundle_dir)
+    dlg.exec()
+    mark_acknowledged(bundle_dir)

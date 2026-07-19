@@ -173,6 +173,7 @@ class SettingsDialog(QDialog):
         self._build_ocr_check_button()
         self._build_tts_check_button()
         self._build_notification_wizard_button()
+        self._build_plugin_manager_button()
 
         # Footer buttons
         buttons = QDialogButtonBox(
@@ -650,6 +651,24 @@ class SettingsDialog(QDialog):
                 w.setMinimumWidth(300)
                 form.addRow(spec.label + ":", w)
             self._controls[spec.path] = w
+
+    def _build_plugin_manager_button(self) -> None:
+        """Append a "Plugin Manager..." button to the Plugins section
+        (#181, v8.0) -- lists loaded plugins with enable/disable and
+        quarantine reset, see evealert.ui.plugin_manager_dialog."""
+        key = "Alerts & Sound/Plugins"
+        if key not in self._sections:
+            return  # section not created yet (no plugins fields in FIELDS)
+        form = self._sections[key][1]
+        btn = QPushButton("Plugin Manager…")
+        btn.clicked.connect(self._open_plugin_manager)
+        form.addRow("Loaded plugins:", btn)
+
+    def _open_plugin_manager(self) -> None:
+        from evealert.ui.plugin_manager_dialog import PluginManagerDialog  # noqa: PLC0415
+
+        dlg = PluginManagerDialog(self)
+        dlg.exec()
 
     def _build_ocr_check_button(self) -> None:
         """Append OCR health-check and live-test rows to the OCR Name Detection section."""

@@ -1,0 +1,23 @@
+# winget installer manifest -- see ../WINGET.md for how to fill in and
+# submit this (with the other two manifest files in this directory) to
+# microsoft/winget-pkgs for a given release.
+#
+# PLACEHOLDERS to replace before submitting -- see WINGET.md:
+#   __VERSION__       e.g. 8.0.0 (matches the git tag without the "v")
+#   __INSTALLER_SHA256__  sha256 of EVE-Alert-Setup-__VERSION__.exe,
+#                         from that release's checksums.txt asset
+PackageIdentifier: bluhayz.EVEAlert
+PackageVersion: __VERSION__
+InstallerLocale: en-US
+InstallerType: inno
+Scope: user
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/bluhayz/EVE-Alert/releases/download/v__VERSION__/EVE-Alert-Setup-__VERSION__.exe
+    InstallerSha256: __INSTALLER_SHA256__
+    InstallerSwitches:
+      Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+      SilentWithProgress: /SILENT /SUPPRESSMSGBOXES /NORESTART
+UpgradeBehavior: install
+ManifestType: installer
+ManifestVersion: 1.6.0

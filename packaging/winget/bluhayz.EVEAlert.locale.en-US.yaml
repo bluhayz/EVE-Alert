@@ -1,0 +1,30 @@
+# winget default-locale manifest -- see ../WINGET.md for how to fill in
+# and submit this (with the other two manifest files in this directory)
+# to microsoft/winget-pkgs for a given release.
+#
+# PLACEHOLDER: replace __VERSION__ before submitting -- see WINGET.md.
+PackageIdentifier: bluhayz.EVEAlert
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: bluhayz
+PublisherUrl: https://github.com/bluhayz
+PublisherSupportUrl: https://github.com/bluhayz/EVE-Alert/issues
+PackageName: EVE Alert
+PackageUrl: https://github.com/bluhayz/EVE-Alert
+License: GPL-3.0
+LicenseUrl: https://github.com/bluhayz/EVE-Alert/blob/master/LICENSE
+ShortDescription: Windows PvP alert tool for EVE Online -- detects hostile pilots in Local and plays an audible alarm.
+Description: >-
+  EVE Alert watches your EVE Online client for hostile pilots appearing
+  in the Local chat window and sounds an alarm so you never get caught
+  AFK. Includes ESI/zKillboard pilot lookups, D-scan monitoring, a live
+  killmail feed, pilot combat dossiers, hunting-ground analytics, and a
+  plugin API for custom integrations.
+Tags:
+  - eve-online
+  - gaming
+  - pvp
+  - alert
+  - security
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

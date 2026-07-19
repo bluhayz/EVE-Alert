@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Chocolatey package spec for EVE Alert (#179, v8.0 stretch goal).
+  Not yet published -- see ../WINGET.md's "Chocolatey" section for why
+  this is lower priority than winget, and PLACEHOLDER markers below for
+  what to fill in per-release (mirrors packaging/winget/'s pattern).
+
+  Build: choco pack packaging\choco\eve-alert.nuspec
+  Publish: choco push eve-alert.__VERSION__.nupkg --source https://push.chocolatey.org/
+-->
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>eve-alert</id>
+    <version>__VERSION__</version>
+    <title>EVE Alert</title>
+    <authors>bluhayz</authors>
+    <owners>bluhayz</owners>
+    <projectUrl>https://github.com/bluhayz/EVE-Alert</projectUrl>
+    <licenseUrl>https://github.com/bluhayz/EVE-Alert/blob/master/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/bluhayz/EVE-Alert</projectSourceUrl>
+    <bugTrackerUrl>https://github.com/bluhayz/EVE-Alert/issues</bugTrackerUrl>
+    <tags>eve-online gaming pvp alert security</tags>
+    <summary>Windows PvP alert tool for EVE Online</summary>
+    <description>
+EVE Alert watches your EVE Online client for hostile pilots appearing in
+the Local chat window and sounds an alarm so you never get caught AFK.
+Includes ESI/zKillboard pilot lookups, D-scan monitoring, a live
+killmail feed, pilot combat dossiers, hunting-ground analytics, and a
+plugin API for custom integrations.
+    </description>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
