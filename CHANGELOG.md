@@ -1,5 +1,20 @@
 # Changelog
 
+## [8.0.1] 2026-07-19
+
+### Fixed — v8.0.0's release workflow never ran
+
+`v8.0.0`'s tag push produced zero CI runs: two of the new `packaging`/
+signing steps in `.github/workflows/release.yml` referenced the
+`secrets` context directly in a step-level `if:` condition, which
+GitHub Actions rejects at workflow-validation time (before any job
+runs) — not just for that step, for the entire file. Fixed by routing
+the signing-identity check through a job-level `env:` boolean instead.
+Verified with `actionlint` this time, across every workflow file in the
+repo, not just the changed one. `v8.0.0`'s tag is left as-is (a
+release that never actually built); this version carries the same
+#178-181 feature set with a working pipeline.
+
 ## [8.0.0] 2026-07-19
 
 ### Added — Distribution & Ecosystem (#178-181)
