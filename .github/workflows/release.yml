@@ -17,6 +17,13 @@ jobs:
     name: Build Windows .exe
     needs: [test]
     runs-on: self-hosted
+    env:
+      # #179: step-level `if:` can't reference the "secrets" context
+      # directly (actionlint/Actions restriction) -- route it through a
+      # job-level env var instead so the signing steps below can check
+      # "is a signing identity configured" without ever putting the
+      # secret's own value in an `if:` condition.
+      SIGN_CONFIGURED: ${{ secrets.SIGN_PFX_BASE64 != '' }}
 
     steps:
       - uses: actions/checkout@v7
@@ -52,7 +59,7 @@ jobs:
         # windows-latest / most self-hosted Windows runners); switch to
         # azure/trusted-signing-action here if using Option A instead
         # (see SIGNING.md).
-        if: ${{ secrets.SIGN_PFX_BASE64 != '' }}
+        if: ${{ env.SIGN_CONFIGURED == 'true' }}
         shell: powershell
         env:
           SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
@@ -90,7 +97,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Sign installer .exe
-        if: ${{ steps.build_installer.outputs.built == 'true' && secrets.SIGN_PFX_BASE64 != '' }}
+        if: ${{ steps.build_installer.outputs.built == 'true' && env.SIGN_CONFIGURED == 'true' }}
         shell: powershell
         env:
           SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
