@@ -111,10 +111,12 @@ class TestPurgeExpired(unittest.TestCase):
         self.assertNotIn("stale", client._cache)
 
     def test_purge_keeps_fresh_entries(self):
-        from evealert.tools.zkillboard import ZkillboardClient
+        from evealert.tools.zkillboard import ZkillboardClient, _CACHE_TTL
 
         client = ZkillboardClient()
-        client._cache["fresh"] = (time.time(), [])
+        # #253: cache tuples are (expires_at, result) -- a "fresh" entry
+        # must have a not-yet-reached expiry, not the current time.
+        client._cache["fresh"] = (time.time() + _CACHE_TTL, [])
 
         removed = client.purge_expired()
 
@@ -138,6 +140,73 @@ class TestPurgeExpired(unittest.TestCase):
         from evealert.tools.zkillboard import ZkillboardClient
 
         self.assertEqual(ZkillboardClient().purge_expired(), 0)
+
+
+class FailureRetryTests(unittest.TestCase):
+    """#253: a lookup FAILURE must use the short _FAILURE_RETRY_SECONDS
+    window, not the full _CACHE_TTL, so a transient hiccup doesn't pin
+    "no data" in front of the user for 2 minutes."""
+
+    def test_unresolvable_system_cached_with_short_ttl_not_full_ttl(self):
+        import asyncio
+
+        from evealert.tools.zkillboard import (
+            ZkillboardClient,
+            _CACHE_TTL,
+            _FAILURE_RETRY_SECONDS,
+        )
+
+        client = ZkillboardClient()
+        with respx.mock:
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(200, json={"systems": []})
+            )
+            asyncio.run(client.get_recent_kills("UnknownSystem"))
+
+        expires_at, cached_result = client._cache["unknownsystem"]
+        self.assertIsNone(cached_result)
+        remaining = expires_at - time.time()
+        self.assertLessEqual(remaining, _FAILURE_RETRY_SECONDS + 1)
+        self.assertLess(remaining, _CACHE_TTL)
+
+    def test_failed_system_id_resolution_not_cached_permanently(self):
+        """_resolve_system_id must not pin None into _system_id_cache --
+        only a successful resolution should ever be cached there."""
+        import asyncio
+
+        from evealert.tools.zkillboard import ZkillboardClient
+
+        client = ZkillboardClient()
+        with respx.mock:
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(500)
+            )
+            result = asyncio.run(client._resolve_system_id("Jita"))
+
+        self.assertIsNone(result)
+        self.assertNotIn("jita", client._system_id_cache)
+
+    def test_successful_result_cached_with_full_ttl(self):
+        import asyncio
+
+        from evealert.tools.zkillboard import ZkillboardClient, _CACHE_TTL
+
+        client = ZkillboardClient()
+        with respx.mock:
+            respx.post("https://esi.evetech.net/latest/universe/ids/").mock(
+                return_value=Response(
+                    200, json={"systems": [{"id": 30000142, "name": "Jita"}]}
+                )
+            )
+            respx.get(
+                "https://zkillboard.com/api/kills/solarSystemID/30000142/"
+            ).mock(return_value=Response(200, json=[None]))
+            asyncio.run(client.get_recent_kills("Jita", limit=1))
+
+        expires_at, cached_result = client._cache["jita"]
+        self.assertEqual(cached_result, [])
+        remaining = expires_at - time.time()
+        self.assertGreater(remaining, _CACHE_TTL - 1)
 
 
 class TestGetRecentKills(unittest.TestCase):

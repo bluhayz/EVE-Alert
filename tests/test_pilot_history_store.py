@@ -286,6 +286,26 @@ class SearchPilotNamesTests(PilotHistoryStoreTestCase):
 
         self.assertEqual(search_pilot_names("Nobody"), [])
 
+    def test_underscore_is_treated_as_literal_not_wildcard(self):
+        """#249 regression: an unescaped "_" in the query used to match
+        any single character (SQL LIKE semantics), so searching "_"
+        matched every pilot of the right length instead of pilots whose
+        name literally contains an underscore."""
+        from evealert.tools.pilot_history_store import record_sighting, search_pilot_names
+
+        record_sighting("Bad_Guy", source="local")
+        record_sighting("BadXGuy", source="local")  # same length, no underscore
+
+        self.assertEqual(search_pilot_names("Bad_Guy"), ["Bad_Guy"])
+
+    def test_percent_is_treated_as_literal_not_wildcard(self):
+        from evealert.tools.pilot_history_store import record_sighting, search_pilot_names
+
+        record_sighting("100% Hostile", source="local")
+        record_sighting("Someone Else", source="local")
+
+        self.assertEqual(search_pilot_names("100%"), ["100% Hostile"])
+
 
 if __name__ == "__main__":
     unittest.main()

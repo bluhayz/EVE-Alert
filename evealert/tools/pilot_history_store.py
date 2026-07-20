@@ -231,12 +231,17 @@ def search_pilot_names(query: str, limit: int = 50) -> list[str]:
     """
     if not query.strip():
         return []
+    # #249: escape LIKE's own wildcard characters -- an unescaped "_"
+    # (matches any one character) or "%" (matches any run) in the user's
+    # query was being interpreted as a wildcard instead of a literal,
+    # e.g. searching "_" matched every pilot name of the right length.
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     with closing(_connect()) as conn:
         rows = conn.execute(
             "SELECT DISTINCT pilot_name FROM sightings "
-            "WHERE LOWER(pilot_name) LIKE LOWER(?) "
+            "WHERE LOWER(pilot_name) LIKE LOWER(?) ESCAPE '\\' "
             "ORDER BY pilot_name LIMIT ?",
-            (f"%{query}%", limit),
+            (f"%{escaped}%", limit),
         ).fetchall()
     return [r[0] for r in rows]
 

@@ -209,6 +209,24 @@ class SearchPilotNamesTests(CombatActivityStoreTestCase):
 
         self.assertEqual(search_pilot_names("Nobody"), [])
 
+    def test_underscore_is_treated_as_literal_not_wildcard(self):
+        """#249 regression -- see the identical test in
+        test_pilot_history_store.py."""
+        from evealert.tools.combat_activity_store import record_activity, search_pilot_names
+
+        record_activity(1, "Bad_Guy", role="attacker")
+        record_activity(2, "BadXGuy", role="attacker")
+
+        self.assertEqual(search_pilot_names("Bad_Guy"), ["Bad_Guy"])
+
+    def test_percent_is_treated_as_literal_not_wildcard(self):
+        from evealert.tools.combat_activity_store import record_activity, search_pilot_names
+
+        record_activity(1, "100% Hostile", role="attacker")
+        record_activity(2, "Someone Else", role="attacker")
+
+        self.assertEqual(search_pilot_names("100%"), ["100% Hostile"])
+
 
 class BackfillFromZkillboardTests(CombatActivityStoreTestCase):
     """#237 ingest path 2: on-demand backfill from zKillboard."""

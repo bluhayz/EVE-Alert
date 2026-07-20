@@ -83,6 +83,42 @@ class CrashDialogGithubUrlTests(CrashDialogTestCase):
         self.assertIn("ValueError%3A+boom", dlg.github_url())
         dlg.deleteLater()
 
+    def test_huge_traceback_still_produces_url_under_budget(self):
+        """#252 regression: capping raw traceback CHARACTERS (the old
+        _MAX_BODY_CHARS = 6000) still let percent-encoding inflate the
+        URL past GitHub's ~8KB new-issue limit -- the check must be on
+        the ENCODED length."""
+        from evealert.ui.crash_dialog import CrashDialog, _MAX_URL_BYTES
+
+        huge_tb = "\n".join(
+            f'  File "C:\\Users\\test\\some\\deep\\path\\module_{i}.py", line {i}, in func_{i}'
+            for i in range(500)
+        ) + "\nValueError: boom"
+        bundle_dir = _make_bundle(self.temp_dir, traceback_text=huge_tb)
+        dlg = CrashDialog(None, bundle_dir)
+        url = dlg.github_url()
+        self.assertLessEqual(len(url.encode("utf-8")), _MAX_URL_BYTES)
+        dlg.deleteLater()
+
+    def test_truncated_body_notes_full_traceback_location(self):
+        from evealert.ui.crash_dialog import CrashDialog
+
+        huge_tb = "\n".join(f"line {i} of a very long traceback body" for i in range(2000))
+        bundle_dir = _make_bundle(self.temp_dir, traceback_text=huge_tb)
+        dlg = CrashDialog(None, bundle_dir)
+        url = dlg.github_url()
+        self.assertIn("truncated", url.lower())
+        dlg.deleteLater()
+
+    def test_small_traceback_not_marked_truncated(self):
+        from evealert.ui.crash_dialog import CrashDialog
+
+        bundle_dir = _make_bundle(self.temp_dir, traceback_text="ValueError: boom\n")
+        dlg = CrashDialog(None, bundle_dir)
+        url = dlg.github_url()
+        self.assertNotIn("truncated", url.lower())
+        dlg.deleteLater()
+
 
 class MaybeShowPendingCrashTests(CrashDialogTestCase):
     def test_no_pending_crash_does_not_open_dialog(self):

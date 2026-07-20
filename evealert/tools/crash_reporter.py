@@ -71,6 +71,42 @@ def _get_settings_snapshot() -> dict | None:
         return None
 
 
+# #251: cap the same-second collision retry -- if this many crashes land
+# in the same second, something is very wrong elsewhere and an unbounded
+# loop here would just add a hang on top of it.
+_MAX_BUNDLE_DIR_ATTEMPTS = 50
+
+
+def _make_bundle_dir() -> Path:
+    """Create and return a fresh, never-before-existing crash bundle
+    directory named after the current timestamp.
+
+    #251: two crashes within the same second (a broken component
+    throwing repeatedly, or a main-thread crash and a background-thread
+    crash landing together) used to silently share one directory --
+    mkdir(..., exist_ok=True) let the second crash's files overwrite the
+    first's. Collide on a numeric suffix instead, keeping the
+    timestamp-sortable prefix find_unacknowledged_crash() relies on.
+    """
+    crash_dir = get_crash_dir()
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    candidate = crash_dir / ts
+    attempt = 1
+    while True:
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            attempt += 1
+            if attempt > _MAX_BUNDLE_DIR_ATTEMPTS:
+                # Give up colliding and just take the entry -- a crash
+                # bundle overwriting another is still better than losing
+                # this crash's report entirely because mkdir keeps failing.
+                candidate.mkdir(parents=True, exist_ok=True)
+                return candidate
+            candidate = crash_dir / f"{ts}_{attempt}"
+
+
 def write_crash_bundle(
     exc_type, exc_value, exc_tb, *, context: str = "unknown", settings: dict | None = None
 ) -> Path | None:
@@ -87,9 +123,7 @@ def write_crash_bundle(
     try:
         from evealert.settings.diagnostics import _redact_settings, gather_context  # noqa: PLC0415
 
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        bundle_dir = get_crash_dir() / ts
-        bundle_dir.mkdir(parents=True, exist_ok=True)
+        bundle_dir = _make_bundle_dir()
 
         tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         (bundle_dir / "traceback.txt").write_text(tb_text, encoding="utf-8")

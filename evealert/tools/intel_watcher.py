@@ -31,6 +31,14 @@ _POLL_INTERVAL = 2.0
 # Maximum bytes to read per poll cycle (prevents runaway memory on huge appends)
 _MAX_READ = 65_536
 
+# #250: the on-disk newline byte sequence per detected encoding, used to
+# find the last COMPLETE line in a raw read before decoding.
+_NEWLINE_BYTES = {
+    "utf-16-le": b"\n\x00",
+    "utf-16-be": b"\x00\n",
+    "utf-8": b"\n",
+}
+
 # EVE log filenames are '<ChannelName>_<YYYYMMDD>_<HHMMSS>_<ownerID>.txt'
 # (the trailing owner/character ID segment is present on real EVE clients;
 # the two-part '<YYYYMMDD>_<HHMMSS>.txt' suffix is kept optional for older
@@ -255,8 +263,23 @@ class IntelWatcher:
         # so we never split a surrogate pair across poll cycles.
         if encoding.startswith("utf-16") and len(raw) % 2:
             raw = raw[:-1]
-        chunk = raw.decode(encoding, errors="replace")
-        self._file_pos += len(raw)
+
+        # #250: only consume up to the last COMPLETE line in this read.
+        # EVE can flush a line's bytes to disk before the poll interval
+        # elapses but after only part of it (or none of the trailing
+        # newline) has been written -- without this, the trailing partial
+        # line was parsed and forwarded as if complete, then its
+        # remainder was read again next poll and forwarded a *second*
+        # time as a separate (also-garbled) line. Search the RAW bytes
+        # for the encoding's newline sequence (not the decoded text) so
+        # a mid-multi-byte-sequence split can't shift the boundary.
+        newline_bytes = _NEWLINE_BYTES.get(encoding, b"\n")
+        last_newline = raw.rfind(newline_bytes)
+        if last_newline == -1:
+            return  # no complete line yet -- wait for more data next poll
+        consumed = last_newline + len(newline_bytes)
+        chunk = raw[:consumed].decode(encoding, errors="replace")
+        self._file_pos += consumed
 
         for line in chunk.splitlines():
             line = line.strip()

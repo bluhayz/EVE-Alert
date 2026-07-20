@@ -185,8 +185,14 @@ class MainWindow(QMainWindow):
         self._update_btn.setStyleSheet("color:#4ade80;")
         self._update_dismiss = QPushButton("✕")
         self._update_dismiss.setFixedWidth(28)
-        # Wired per-tag in _on_update_available() (persists "skip this
-        # version") rather than here -- the tag isn't known yet at build time.
+        # #246: connected once, here, to methods that read
+        # self._pending_update_tag -- NOT per-tag in _on_update_available()
+        # (which used to reconnect fresh closures on every call and never
+        # disconnected the old ones, so a long session with the #178
+        # 24h re-check accumulated one stacked handler per notification).
+        self._pending_update_tag: str | None = None
+        self._update_btn.clicked.connect(self._open_pending_update)
+        self._update_dismiss.clicked.connect(self._skip_pending_update)
         _update_row.addWidget(self._update_label, 1)
         _update_row.addWidget(self._update_btn)
         _update_row.addWidget(self._update_dismiss)
@@ -483,36 +489,39 @@ class MainWindow(QMainWindow):
 
         from evealert.tools.self_updater import is_updatable  # noqa: PLC0415
 
+        self._pending_update_tag = tag
         self._update_label.setText(f"EVE Alert {tag} is available.")
         self.append_log(
             f"Update available: {tag} — click '↑ Update' in the toolbar to install.",
             "yellow",
         )
 
-        def _open_update() -> None:
-            from evealert.ui.update_dialog import UpdateDialog  # noqa: PLC0415
-            dlg = UpdateDialog(self, tag)
-            if dlg.exec():
-                # Dialog called launch_swap_and_exit(); now we exit the app
-                self.exit_app()
-
-        def _skip_update() -> None:
-            # #178: persist "skip this version" so the same tag doesn't
-            # re-notify on the next launch or 24h re-check -- distinct
-            # from just hiding the bar for the rest of this session.
-            try:
-                settings = self.store.load()
-                settings["updates"]["skipped_version"] = tag
-                self.store.save(settings)
-            except Exception:
-                pass
-            self._update_bar.hide()
-
-        self._update_btn.clicked.connect(_open_update)
-        self._update_dismiss.clicked.connect(_skip_update)
         # On non-updatable platforms show the bar as info-only (no button)
         self._update_btn.setVisible(is_updatable())
         self._update_bar.show()
+
+    def _open_pending_update(self) -> None:
+        if not self._pending_update_tag:
+            return
+        from evealert.ui.update_dialog import UpdateDialog  # noqa: PLC0415
+
+        dlg = UpdateDialog(self, self._pending_update_tag)
+        if dlg.exec():
+            # Dialog called launch_swap_and_exit(); now we exit the app
+            self.exit_app()
+
+    def _skip_pending_update(self) -> None:
+        # #178: persist "skip this version" so the same tag doesn't
+        # re-notify on the next launch or 24h re-check -- distinct from
+        # just hiding the bar for the rest of this session.
+        if self._pending_update_tag:
+            try:
+                settings = self.store.load()
+                settings["updates"]["skipped_version"] = self._pending_update_tag
+                self.store.save(settings)
+            except Exception:
+                pass
+        self._update_bar.hide()
 
     def _check_for_updates_manual(self) -> None:
         """Manual update check triggered by the 'Check for Updates' button."""

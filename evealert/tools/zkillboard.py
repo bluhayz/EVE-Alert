@@ -32,6 +32,13 @@ _ZKB_BASE = "https://zkillboard.com/api"
 _ZKB_LIMIT = 5
 # Seconds before a cached result expires
 _CACHE_TTL = 120
+# #253: a resolution/fetch FAILURE (network hiccup, transient ESI/zKB
+# error) is cached for this much shorter window than a genuine success --
+# same reasoning as universe.py's _SOV_FAILURE_RETRY_SECONDS (#232): a
+# real "no data" result is stable and safe to trust for the full TTL, but
+# a failure shouldn't pin "no data" in front of the user for 2 minutes
+# after the API has already recovered.
+_FAILURE_RETRY_SECONDS = 20
 # HTTP timeout in seconds
 _HTTP_TIMEOUT = 10.0
 
@@ -48,9 +55,12 @@ class ZkillboardClient:
     """Async client for ESI + Zkillboard lookups with a simple TTL cache."""
 
     def __init__(self) -> None:
-        # Cache: {system_name: (fetch_time_float, list[KillSummary] | None)}
+        # Cache: {system_name: (expires_at_float, list[KillSummary] | None)}.
+        # #253: keyed by expiry time (not fetch time) so a failed lookup
+        # can use a shorter TTL than a genuine result -- see
+        # _FAILURE_RETRY_SECONDS.
         self._cache: dict[str, tuple[float, list[KillSummary] | None]] = {}
-        self._system_id_cache: dict[str, int | None] = {}
+        self._system_id_cache: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -59,27 +69,33 @@ class ZkillboardClient:
     async def get_recent_kills(
         self, system_name: str, limit: int = _ZKB_LIMIT
     ) -> list[KillSummary] | None:
-        """Return up to *limit* recent kills for *system_name*, or None on error.
+        """Return up to *limit* recent kills for *system_name*, or None on
+        a lookup/fetch FAILURE (network error, unresolvable system name).
+        An empty list means the query succeeded and found nothing.
 
-        Results are cached for ``_CACHE_TTL`` seconds so rapid calls (e.g. on
-        every alarm trigger) don't spam the public APIs.
+        Successful results are cached for ``_CACHE_TTL`` seconds so rapid
+        calls (e.g. on every alarm trigger) don't spam the public APIs.
+        A failure is cached only for ``_FAILURE_RETRY_SECONDS`` (#253) so
+        a transient hiccup doesn't pin "no data" in front of the user for
+        the full TTL after the API has already recovered.
         """
         if not _HTTPX_AVAILABLE:
             logger.warning("httpx not installed; Zkillboard integration disabled.")
             return None
 
         key = system_name.lower()
-        cached_at, cached_result = self._cache.get(key, (0.0, None))
-        if time.time() - cached_at < _CACHE_TTL:
+        expires_at, cached_result = self._cache.get(key, (0.0, None))
+        if time.time() < expires_at:
             return cached_result
 
         system_id = await self._resolve_system_id(system_name)
         if system_id is None:
-            self._cache[key] = (time.time(), None)
+            self._cache[key] = (time.time() + _FAILURE_RETRY_SECONDS, None)
             return None
 
         kills = await self._fetch_kills(system_id, limit)
-        self._cache[key] = (time.time(), kills)
+        ttl = _CACHE_TTL if kills is not None else _FAILURE_RETRY_SECONDS
+        self._cache[key] = (time.time() + ttl, kills)
         return kills
 
     def clear_cache(self) -> None:
@@ -87,7 +103,7 @@ class ZkillboardClient:
         self._system_id_cache.clear()
 
     def purge_expired(self) -> int:
-        """Drop cache entries past _CACHE_TTL (#177 soak reliability).
+        """Drop cache entries past their expiry (#177 soak reliability).
 
         Without this, a system looked up once and never again (e.g. a
         one-off zKB check while passing through) sits in _cache forever
@@ -97,7 +113,7 @@ class ZkillboardClient:
         Returns the number of entries removed.
         """
         now = time.time()
-        stale = [k for k, (ts, _) in self._cache.items() if now - ts >= _CACHE_TTL]
+        stale = [k for k, (expires_at, _) in self._cache.items() if now >= expires_at]
         for key in stale:
             del self._cache[key]
         return len(stale)
@@ -107,7 +123,13 @@ class ZkillboardClient:
     # ------------------------------------------------------------------
 
     async def _resolve_system_id(self, system_name: str) -> int | None:
-        """Look up solar system ID via ESI ``/universe/ids/`` (#110)."""
+        """Look up solar system ID via ESI ``/universe/ids/`` (#110).
+
+        #253: only a SUCCESSFUL resolution is cached -- _system_id_cache
+        has no expiry mechanism of its own, so caching a None here used
+        to pin "unresolvable" on that system name forever (for the life
+        of the process), even after a purely transient ESI hiccup.
+        """
         key = system_name.lower()
         if key in self._system_id_cache:
             return self._system_id_cache[key]
@@ -119,7 +141,8 @@ class ZkillboardClient:
         )
 
         system_id = await resolve_single_id(system_name, "systems")
-        self._system_id_cache[key] = system_id
+        if system_id is not None:
+            self._system_id_cache[key] = system_id
         return system_id
 
     async def _fetch_kills(
@@ -158,7 +181,13 @@ class ZkillboardClient:
             if isinstance(s, KillSummary):
                 results.append(s)
 
-        return results or None
+        # #253: the zKB list query itself succeeded (we know *entries* is
+        # non-empty) -- an empty *results* here means every per-killmail
+        # ESI detail fetch failed or was skipped, not that zKB reported
+        # zero kills. Either way this is a real (if incomplete) result,
+        # not a lookup failure -- callers use None specifically to mean
+        # "couldn't get an answer at all" (see get_recent_kills).
+        return results
 
     async def _fetch_killmail_detail(self, entry: dict) -> KillSummary | None:
         """Fetch ESI killmail detail and return a KillSummary."""

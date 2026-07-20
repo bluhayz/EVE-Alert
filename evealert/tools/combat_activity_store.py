@@ -271,12 +271,15 @@ def search_pilot_names(query: str, limit: int = 50) -> list[str]:
     """
     if not query.strip():
         return []
+    # #249: escape LIKE's own wildcard characters -- see the identical
+    # fix/comment in pilot_history_store.search_pilot_names().
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     with closing(_connect()) as conn:
         rows = conn.execute(
             "SELECT DISTINCT pilot_name FROM combat_activity "
-            "WHERE LOWER(pilot_name) LIKE LOWER(?) "
+            "WHERE LOWER(pilot_name) LIKE LOWER(?) ESCAPE '\\' "
             "ORDER BY pilot_name LIMIT ?",
-            (f"%{query}%", limit),
+            (f"%{escaped}%", limit),
         ).fetchall()
     return [r[0] for r in rows]
 

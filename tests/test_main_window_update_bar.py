@@ -65,6 +65,47 @@ class OnUpdateAvailableTests(MainWindowUpdateBarTestCase):
         with patch.object(self.win.store, "save", side_effect=OSError("disk full")):
             self.win._update_dismiss.click()  # must not raise
 
+    def test_repeated_notifications_do_not_stack_open_dialogs(self):
+        """#246 regression: _on_update_available() used to reconnect a
+        fresh closure to _update_btn.clicked on every call without
+        disconnecting the previous one -- after N notifications (e.g.
+        the #178 24h re-check firing repeatedly across a long session),
+        one click opened N stacked UpdateDialogs."""
+        for _ in range(3):
+            self.win._on_update_available("v99.0.0")
+
+        with patch("evealert.ui.update_dialog.UpdateDialog") as mock_dialog_cls:
+            mock_dialog_cls.return_value.exec.return_value = False
+            self.win._update_btn.click()
+
+        mock_dialog_cls.assert_called_once_with(self.win, "v99.0.0")
+
+    def test_repeated_notifications_skip_only_persists_once_per_click(self):
+        for _ in range(3):
+            self.win._on_update_available("v99.0.0")
+
+        with patch.object(self.win.store, "save") as mock_save:
+            self.win._update_dismiss.click()
+
+        mock_save.assert_called_once()
+
+    def test_second_notification_updates_pending_tag(self):
+        self.win._on_update_available("v98.0.0")
+        self.win._on_update_available("v99.0.0")
+        self.win._update_dismiss.click()
+
+        settings = self.win.store.load()
+        self.assertEqual(settings["updates"]["skipped_version"], "v99.0.0")
+
+    def test_dismiss_with_no_pending_tag_is_a_noop(self):
+        self.win._update_dismiss.click()  # never notified -- must not raise
+        self.assertFalse(self.win._update_bar.isVisibleTo(self.win))
+
+    def test_open_update_with_no_pending_tag_is_a_noop(self):
+        with patch("evealert.ui.update_dialog.UpdateDialog") as mock_dialog_cls:
+            self.win._update_btn.click()  # never notified -- must not raise
+        mock_dialog_cls.assert_not_called()
+
 
 class OnCrashDetectedTests(MainWindowUpdateBarTestCase):
     def test_opens_crash_dialog_and_acknowledges(self):

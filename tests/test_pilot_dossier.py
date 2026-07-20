@@ -117,6 +117,44 @@ class BuildDossierTests(PilotDossierTestCase):
         self.assertEqual(dossier.top_ships, [])
         self.assertIsNotNone(dossier.sighting_summary)
 
+    async def test_unresolved_ship_names_excluded_from_percentage_denominator(self):
+        """#254: rows whose ship type failed ESI resolution (ship_name is
+        None) must not count against the percentage denominator -- 6 of
+        10 rows are Sabre, the other 4 have no resolved ship name, so
+        Sabre should show 100% (share of *identified* ships), not 60%."""
+        from evealert.tools.combat_activity_store import record_activity
+        from evealert.tools.pilot_dossier import build_dossier
+
+        for i in range(6):
+            record_activity(
+                200 + i, "Bad Guy", role="attacker", ship_name="Sabre",
+                system_name="Jita", gang_size=1,
+            )
+        for i in range(4):
+            record_activity(
+                300 + i, "Bad Guy", role="attacker", ship_name=None,
+                system_name="Jita", gang_size=1,
+            )
+        dossier = await build_dossier("Bad Guy")
+        self.assertEqual(dossier.top_ships, [("Sabre", 100.0)])
+
+    async def test_rollup_path_unresolved_ships_excluded_from_denominator(self):
+        """Same #254 fix, rollup-path variant: PilotRollup.kill_count +
+        loss_count can exceed the sum of top_ships counts when some
+        killmail rows never got a resolved ship name."""
+        from evealert.tools import intel_rollups
+        from evealert.tools.pilot_dossier import build_dossier
+
+        rollup = intel_rollups.PilotRollup(
+            pilot_name="Bad Guy", sighting_count=0, kill_count=8, loss_count=2,
+            top_ships=[("Sabre", 6)], top_systems=[("Jita", 6)],
+            hour_histogram=[0] * 24, avg_gang_size=1.0,
+            last_active_at=time.time(), updated_at=time.time(),
+        )
+        intel_rollups._store_pilot_rollup(rollup)  # noqa: SLF001
+        dossier = await build_dossier("Bad Guy")
+        self.assertEqual(dossier.top_ships, [("Sabre", 100.0)])
+
     async def test_uses_stored_rollup_when_present(self):
         """When a PilotRollup is already cached, build_dossier uses it
         instead of recomputing from raw activity -- verified by seeding a

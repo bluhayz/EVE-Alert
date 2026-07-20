@@ -240,6 +240,89 @@ class TestIntelWatcherTailOnce(unittest.TestCase):
         watcher._tail_once()
 
 
+class TestIntelWatcherPartialLineSplit(unittest.TestCase):
+    """#250 regression: a poll landing mid-write (before the trailing
+    newline is flushed) must not forward the truncated line, and must
+    not lose or duplicate it once the rest arrives."""
+
+    def test_partial_trailing_line_not_forwarded_yet(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        watcher = IntelWatcher(channel_pattern="Intel", callback=received.append)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            # "line one" is complete; "line tw" has no trailing newline yet
+            # -- simulates a poll landing between the two writes.
+            log.write_text("line one\nline tw")
+            watcher._log_path = log
+            watcher._file_pos = 0
+
+            watcher._tail_once()
+
+        self.assertEqual(received, ["line one"])
+
+    def test_partial_line_completed_next_poll_is_forwarded_once_whole(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        watcher = IntelWatcher(channel_pattern="Intel", callback=received.append)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text("line one\nline tw")
+            watcher._log_path = log
+            watcher._file_pos = 0
+            watcher._tail_once()  # "line one" only
+
+            # The rest of the line (plus its newline) arrives.
+            with open(log, "a", encoding="utf-8") as f:
+                f.write("o\nline three\n")
+            watcher._tail_once()
+
+        self.assertEqual(received, ["line one", "line two", "line three"])
+
+    def test_no_complete_line_at_all_does_not_advance_file_pos(self):
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        watcher = IntelWatcher(channel_pattern="Intel", callback=received.append)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            log.write_text("no newline yet")
+            watcher._log_path = log
+            watcher._file_pos = 0
+
+            watcher._tail_once()
+
+        self.assertEqual(received, [])
+        self.assertEqual(watcher._file_pos, 0)
+
+    def test_utf16_partial_line_not_split(self):
+        """The same fix must hold for EVE's real UTF-16 LE chat-log
+        encoding, not just the UTF-8 fallback path."""
+        from evealert.tools.intel_watcher import IntelWatcher
+
+        received = []
+        watcher = IntelWatcher(channel_pattern="Intel", callback=received.append)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log = Path(tmpdir) / "Intel_test.txt"
+            text = "line one\nline tw"
+            log.write_bytes(b"\xff\xfe" + text.encode("utf-16-le"))
+            watcher._log_path = log
+            # Real usage never tails from byte 0 of a BOM'd file -- run()
+            # seeks to the end of a newly-detected file before tailing.
+            # Start past the 2-byte BOM to match.
+            watcher._file_pos = 2
+
+            watcher._tail_once()
+
+        self.assertEqual(received, ["line one"])
+
+
 class TestIntelWatcherChannelTagging(unittest.TestCase):
     """#171: IntelWatcher tags each parsed IntelReport with its channel."""
 

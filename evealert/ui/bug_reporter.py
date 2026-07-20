@@ -31,6 +31,14 @@ from evealert import __version__
 
 _GITHUB_NEW_ISSUE = "https://github.com/bluhayz/EVE-Alert/issues/new"
 _MAX_LOG_CHARS = 3_000  # GitHub URL length limit is ~8 KB; keep body manageable
+# #252: github_url() re-checks the fully percent-ENCODED length against
+# this byte budget and trims further if needed -- _MAX_LOG_CHARS alone
+# caps raw characters, but encoding inflates size (spaces, brackets,
+# colons in log timestamps), so a body under _MAX_LOG_CHARS could still
+# produce a URL past GitHub's ~8KB new-issue limit, especially once the
+# user's own edits/pastes are added in the editable body field.
+_MAX_URL_BYTES = 7_500
+_TRIM_STEP_CHARS = 500
 
 
 class BugReporterDialog(QDialog):
@@ -193,5 +201,17 @@ class BugReporterDialog(QDialog):
 
         title = self._title_edit.toPlainText().strip() or "Bug report"
         body = self._body_edit.toPlainText()
-        params = urllib.parse.urlencode({"title": title, "body": body})
-        return f"{_GITHUB_NEW_ISSUE}?{params}"
+
+        def _url_for(text: str) -> str:
+            params = urllib.parse.urlencode({"title": title, "body": text})
+            return f"{_GITHUB_NEW_ISSUE}?{params}"
+
+        url = _url_for(body)
+        # #252: cap the ENCODED url length, not raw body characters -- see
+        # _MAX_URL_BYTES. Trim from the end: the environment/repro-steps
+        # sections at the top are short and matter most; the log dump
+        # (the largest chunk) sits later in the body.
+        while len(url.encode("utf-8")) > _MAX_URL_BYTES and body:
+            body = body[: max(0, len(body) - _TRIM_STEP_CHARS)]
+            url = _url_for(body)
+        return url

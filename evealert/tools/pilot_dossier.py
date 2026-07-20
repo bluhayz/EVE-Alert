@@ -79,7 +79,7 @@ async def build_dossier(
 
     rollup = intel_rollups.get_pilot_rollup_nonblocking(pilot_name)
     if rollup is not None:
-        top_ships = _ships_with_pct(rollup.top_ships, rollup.kill_count + rollup.loss_count)
+        top_ships = _ships_with_pct(rollup.top_ships)
         top_hunt_systems = rollup.top_systems
         active_hours = rollup.hour_histogram
         kill_count = rollup.kill_count
@@ -97,8 +97,7 @@ async def build_dossier(
             active_hours[time.gmtime(a.occurred_at).tm_hour] += 1
         kill_count = sum(1 for a in recent_activity if a.role == "attacker")
         loss_count = sum(1 for a in recent_activity if a.role == "victim")
-        total = kill_count + loss_count
-        top_ships = _ships_with_pct(ship_counts.most_common(5), total)
+        top_ships = _ships_with_pct(ship_counts.most_common(5))
         top_hunt_systems = system_counts.most_common(5)
         last_active_candidates = [a.occurred_at for a in recent_activity]
 
@@ -149,9 +148,15 @@ async def build_dossier(
     )
 
 
-def _ships_with_pct(
-    counts: list[tuple[str, int]], total: int
-) -> list[tuple[str, float]]:
+def _ships_with_pct(counts: list[tuple[str, int]]) -> list[tuple[str, float]]:
+    """Percentages are share of *identified* ships (#254) -- rows whose
+    ship type failed ESI resolution never make it into *counts* at all
+    (see ship_counts filters upstream), so summing *counts* itself as the
+    denominator is correct. The old caller-supplied total was
+    kill_count + loss_count, which also included those unresolved rows,
+    understating every percentage whenever any resolution had failed.
+    """
+    total = sum(count for _, count in counts)
     if total <= 0:
         return []
     return [(name, round(100.0 * count / total, 1)) for name, count in counts]

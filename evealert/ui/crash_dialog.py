@@ -29,7 +29,13 @@ from PySide6.QtWidgets import (
 from evealert import __version__
 
 _GITHUB_NEW_ISSUE = "https://github.com/bluhayz/EVE-Alert/issues/new"
-_MAX_BODY_CHARS = 6_000  # keep the prefilled URL well under GitHub's ~8KB limit
+# #252: this is a byte budget on the fully percent-ENCODED URL, not a
+# character cap on the raw traceback -- percent-encoding inflates size
+# roughly 3x for the newlines/quotes/backslashes tracebacks are full of
+# (especially Windows paths), so capping raw characters first still let
+# URLs sail past GitHub's ~8KB new-issue-URL limit for large tracebacks.
+_MAX_URL_BYTES = 7_500
+_TRIM_STEP_CHARS = 500
 
 
 class CrashDialog(QDialog):
@@ -98,9 +104,14 @@ class CrashDialog(QDialog):
                 return line
         return "Unhandled exception"
 
-    def github_url(self) -> str:
-        tb = self._traceback[:_MAX_BODY_CHARS]
-        body = textwrap.dedent(f"""\
+    def _body_for(self, tb_text: str, *, truncated: bool) -> str:
+        note = (
+            f"\n<!-- Traceback truncated to fit the URL length limit -- "
+            f"full traceback is in {self._bundle_dir}/traceback.txt -->\n"
+            if truncated
+            else ""
+        )
+        return textwrap.dedent(f"""\
             ## Environment
             ```
             EVE Alert version: {__version__}
@@ -111,12 +122,30 @@ class CrashDialog(QDialog):
 
             ## Traceback
             ```
-            {tb}
+            {tb_text}
             ```
-        """)
+            {note}"""
+        )
+
+    def github_url(self) -> str:
         title = f"Crash: {self._crash_summary()}"[:250]
-        params = urllib.parse.urlencode({"title": title, "body": body})
-        return f"{_GITHUB_NEW_ISSUE}?{params}"
+        tb = self._traceback
+        truncated = False
+
+        def _url_for(text: str) -> str:
+            params = urllib.parse.urlencode(
+                {"title": title, "body": self._body_for(text, truncated=truncated)}
+            )
+            return f"{_GITHUB_NEW_ISSUE}?{params}"
+
+        url = _url_for(tb)
+        # #252: cap the ENCODED url length, not the raw traceback -- see
+        # _MAX_URL_BYTES.
+        while len(url.encode("utf-8")) > _MAX_URL_BYTES and tb:
+            tb = tb[: max(0, len(tb) - _TRIM_STEP_CHARS)]
+            truncated = True
+            url = _url_for(tb)
+        return url
 
     def _open_github_issue(self) -> None:
         QDesktopServices.openUrl(QUrl(self.github_url()))

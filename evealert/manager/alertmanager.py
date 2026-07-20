@@ -549,7 +549,16 @@ class AlertAgent:
         try:
             from evealert.tools.plugin_loader import get_plugin_manager  # noqa: PLC0415
 
-            get_plugin_manager().call(
+            pm = get_plugin_manager()
+            # #247: on_intel/on_killmail fire once per intel line / live
+            # kill -- several times a second on a busy channel. Skip the
+            # settings.json disk read (load() re-reads, re-merges, and
+            # deep-copies on every call -- not a cache hit) entirely when
+            # no loaded plugin even registered this hook, which is the
+            # common case (no plugins installed at all).
+            if pm.hook_count(hook) == 0:
+                return
+            pm.call(
                 hook,
                 ctx_settings=self._settings_store.load(),
                 log_fn=lambda text: self._ui(self.main.write_message, text, "cyan"),
@@ -3598,6 +3607,18 @@ class AlertAgent:
         system_display = make_link(
             system_name, f"https://dotlan.net/system/{system_name.replace(' ', '_')}"
         )
+        # #253: None means the lookup itself failed (network/resolution
+        # error) -- distinct from an empty list, which means the query
+        # succeeded and genuinely found nothing. Previously both showed
+        # the same reassuring "No recent kills found" message even when
+        # the check had actually failed to run at all.
+        if kills is None:
+            self._ui(
+                self.main.write_message,
+                f"Intel: Zkillboard lookup failed for {system_display}",
+                "yellow",
+            )
+            return
         if not kills:
             self._ui(
                 self.main.write_message,

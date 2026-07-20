@@ -93,6 +93,66 @@ class WriteCrashBundleTests(CrashReporterTestCase):
         self.assertIsNone(result)
 
 
+class SameSecondCollisionTests(CrashReporterTestCase):
+    """#251 regression: two crashes in the same second must not share
+    (and silently overwrite) one bundle directory."""
+
+    def test_two_crashes_same_second_get_distinct_directories(self):
+        from evealert.tools.crash_reporter import write_crash_bundle
+
+        with patch("evealert.tools.crash_reporter.time.strftime", return_value="20260719_120000"):
+            exc_info = self._raise_and_capture()
+            first = write_crash_bundle(*exc_info, context="first")
+            second = write_crash_bundle(*exc_info, context="second")
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.is_dir())
+        self.assertTrue(second.is_dir())
+
+    def test_neither_bundles_content_is_lost(self):
+        from evealert.tools.crash_reporter import write_crash_bundle
+
+        with patch("evealert.tools.crash_reporter.time.strftime", return_value="20260719_120000"):
+            try:
+                raise ValueError("first crash")
+            except ValueError:
+                first = write_crash_bundle(*sys.exc_info(), context="first")
+            try:
+                raise RuntimeError("second crash")
+            except RuntimeError:
+                second = write_crash_bundle(*sys.exc_info(), context="second")
+
+        first_tb = (first / "traceback.txt").read_text(encoding="utf-8")
+        second_tb = (second / "traceback.txt").read_text(encoding="utf-8")
+        self.assertIn("first crash", first_tb)
+        self.assertIn("second crash", second_tb)
+
+    def test_make_bundle_dir_keeps_timestamp_sortable_prefix(self):
+        from evealert.tools.crash_reporter import _make_bundle_dir
+
+        with patch("evealert.tools.crash_reporter.time.strftime", return_value="20260719_120000"):
+            first = _make_bundle_dir()
+            second = _make_bundle_dir()
+
+        self.assertEqual(first.name, "20260719_120000")
+        self.assertTrue(second.name.startswith("20260719_120000_"))
+
+    def test_exhausting_retry_attempts_falls_back_to_shared_dir_without_raising(self):
+        from evealert.tools.crash_reporter import _make_bundle_dir, get_crash_dir
+
+        with patch("evealert.tools.crash_reporter.time.strftime", return_value="20260719_120000"):
+            # Pre-create every candidate name _make_bundle_dir would try.
+            get_crash_dir().joinpath("20260719_120000").mkdir(parents=True)
+            for attempt in range(2, 60):
+                get_crash_dir().joinpath(f"20260719_120000_{attempt}").mkdir()
+
+            result = _make_bundle_dir()  # must not raise
+
+        self.assertTrue(result.is_dir())
+
+
 class AcknowledgeTests(CrashReporterTestCase):
     def test_find_unacknowledged_returns_none_when_empty(self):
         from evealert.tools.crash_reporter import find_unacknowledged_crash

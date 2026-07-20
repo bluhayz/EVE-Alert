@@ -73,6 +73,25 @@ class PluginManagerDialogTests(PluginManagerDialogTestCase):
         self.assertEqual(dlg._table.item(0, 3).text(), "enabled")
         dlg.deleteLater()
 
+    def test_reload_after_empty_state_clears_span_and_shows_all_columns(self):
+        """#248 regression: the empty-state row's 1x4 span used to
+        persist after a later reload populated real rows, hiding every
+        column but the first for row 0."""
+        from evealert.tools.plugin_loader import get_plugin_manager
+        from evealert.ui.plugin_manager_dialog import PluginManagerDialog
+
+        dlg = PluginManagerDialog(None)  # starts empty -> sets the span
+        self.assertGreater(dlg._table.columnSpan(0, 0), 1)
+
+        _write_plugin(self.temp_dir, "p", V1_PLUGIN)
+        get_plugin_manager().load_plugins(self.temp_dir)
+        dlg._reload_all()
+
+        self.assertEqual(dlg._table.columnSpan(0, 0), 1)
+        self.assertEqual(dlg._table.item(0, 1).text(), "1.0")
+        self.assertEqual(dlg._table.item(0, 2).text(), "on_start, on_enemy")
+        dlg.deleteLater()
+
     def test_toggle_selected_disables_plugin(self):
         from evealert.tools.plugin_loader import get_plugin_manager
         from evealert.ui.plugin_manager_dialog import PluginManagerDialog

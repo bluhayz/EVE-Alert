@@ -95,6 +95,12 @@ class PluginManagerDialog(QDialog):
 
     def _refresh(self) -> None:
         records = get_plugin_manager().list_plugins()
+        # #248: clearSpans() before repopulating -- a span set by the
+        # empty-state branch below persists across setRowCount()/setItem()
+        # calls (Qt table spans aren't reset by either), so a later
+        # refresh with real rows left row 0's other three columns hidden
+        # under the leftover 1x4 span.
+        self._table.clearSpans()
         self._table.setRowCount(len(records))
         if not records:
             self._table.setRowCount(1)

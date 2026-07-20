@@ -3424,7 +3424,10 @@ class CacheMaintenanceTaskTests(unittest.IsolatedAsyncioTestCase):
 
         now = time.time()
         get_universe_cache()._kill_count_cache[30000142] = (now, 5)
-        get_client()._cache["fresh-system"] = (now, None)
+        # #253: zKB cache tuples are (expires_at, result) -- "fresh" means
+        # a not-yet-reached expiry, unlike the other two caches here which
+        # still use (cached_at, result) semantics.
+        get_client()._cache["fresh-system"] = (now + 120, None)
         threat_heatmap._CACHE[("FRESH", 7)] = (now, {})
 
         await self._run_one_cycle()
@@ -3844,6 +3847,71 @@ class PeakHoursZkbWarningDedupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.agent._peak_hours_warned_for)
 
 
+class CallPluginHookTests(unittest.IsolatedAsyncioTestCase):
+    """#247 regression: _call_plugin_hook() must not touch settings.json
+    on disk when no loaded plugin registered the hook being dispatched."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_no_registered_plugins_skips_settings_load(self):
+        with patch.object(
+            self.agent._settings_store, "load", wraps=self.agent._settings_store.load
+        ) as mock_load:
+            self.agent._call_plugin_hook("on_intel", line="hostile spotted")
+        mock_load.assert_not_called()
+
+    async def test_no_registered_plugins_still_calls_pm_call_zero_times(self):
+        with patch(
+            "evealert.tools.plugin_loader.get_plugin_manager"
+        ) as mock_get_pm:
+            mock_pm = MagicMock()
+            mock_pm.hook_count.return_value = 0
+            mock_get_pm.return_value = mock_pm
+            self.agent._call_plugin_hook("on_intel", line="hostile spotted")
+        mock_pm.call.assert_not_called()
+
+    async def test_registered_plugin_still_gets_settings_and_dispatch(self):
+        with patch(
+            "evealert.tools.plugin_loader.get_plugin_manager"
+        ) as mock_get_pm, patch.object(
+            self.agent._settings_store, "load", wraps=self.agent._settings_store.load
+        ) as mock_load:
+            mock_pm = MagicMock()
+            mock_pm.hook_count.return_value = 1
+            mock_get_pm.return_value = mock_pm
+            self.agent._call_plugin_hook("on_intel", line="hostile spotted")
+
+        mock_load.assert_called_once()
+        mock_pm.call.assert_called_once()
+        self.assertEqual(mock_pm.call.call_args.args[0], "on_intel")
+        self.assertEqual(mock_pm.call.call_args.kwargs["line"], "hostile spotted")
+
+    async def test_hook_dispatch_failure_never_raises(self):
+        with patch(
+            "evealert.tools.plugin_loader.get_plugin_manager",
+            side_effect=RuntimeError("boom"),
+        ):
+            self.agent._call_plugin_hook("on_intel", line="x")  # must not raise
+
+
 class PeakHoursSleepSecondsTests(unittest.TestCase):
     """#151 fix: once inside the 15-minute pre-hour warning window, sleep
     until the hour actually rolls over instead of a tight 60s loop."""
@@ -4212,6 +4280,51 @@ class PilotHistoryStabilizationAccumulationTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(len(anchor_sightings), 3)
         self.assertEqual(get_sightings("litbitofgoop"), [])
         self.assertEqual(get_sightings("titbitofgoop"), [])
+
+
+class FetchAndReportKillsTests(unittest.IsolatedAsyncioTestCase):
+    """#253 regression: a Zkillboard lookup FAILURE (None) must produce a
+    distinct message from a successful-but-empty lookup ([])."""
+
+    def setUp(self):
+        self.mock_main = MagicMock()
+        self.mock_main.write_message = MagicMock()
+        self.temp_dir = tempfile.mkdtemp()
+        settings_path = Path(self.temp_dir) / "settings.json"
+        os.environ["EVEALERT_STATS_PATH"] = str(Path(self.temp_dir) / "statistics.json")
+        os.environ["EVEALERT_PILOT_HISTORY_PATH"] = str(Path(self.temp_dir) / "pilot_history.db")
+        with open(settings_path, "w") as f:
+            json.dump({}, f)
+        reset_settings_store(settings_path)
+        with patch("evealert.manager.alertmanager.AlertAgent._validate_audio_files"):
+            self.agent = AlertAgent(self.mock_main)
+
+    def tearDown(self):
+        import shutil
+
+        os.environ.pop("EVEALERT_STATS_PATH", None)
+        os.environ.pop("EVEALERT_PILOT_HISTORY_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    async def test_none_result_reports_lookup_failed(self):
+        mock_client = MagicMock()
+        mock_client.get_recent_kills = AsyncMock(return_value=None)
+        with patch("evealert.tools.zkillboard.get_client", return_value=mock_client):
+            await self.agent._fetch_and_report_kills("Jita")
+
+        messages = [c.args[0] for c in self.mock_main.write_message.call_args_list]
+        self.assertTrue(any("lookup failed" in m.lower() for m in messages))
+        self.assertFalse(any("no recent kills found" in m.lower() for m in messages))
+
+    async def test_empty_list_reports_no_recent_kills(self):
+        mock_client = MagicMock()
+        mock_client.get_recent_kills = AsyncMock(return_value=[])
+        with patch("evealert.tools.zkillboard.get_client", return_value=mock_client):
+            await self.agent._fetch_and_report_kills("Jita")
+
+        messages = [c.args[0] for c in self.mock_main.write_message.call_args_list]
+        self.assertTrue(any("no recent kills found" in m.lower() for m in messages))
+        self.assertFalse(any("lookup failed" in m.lower() for m in messages))
 
 
 if __name__ == "__main__":
