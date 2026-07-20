@@ -1,5 +1,51 @@
 # Changelog
 
+## [8.0.2] 2026-07-19
+
+### Fixed — post-v8.0 bug sweep (#246-254)
+
+Nine bugs found in a full-codebase review after the v8.0 release, all
+fixed with regression tests:
+
+- **#246**: the update-notification bar reconnected a fresh button
+  handler on every `_on_update_available()` call instead of once, so a
+  session with several update checks stacked N duplicate "Open update"
+  dialogs (and N duplicate "skip" writes) per click.
+- **#247**: `_call_plugin_hook()` loaded `settings.json` from disk on
+  every alarm/intel event regardless of whether any plugin had
+  registered for that hook — now short-circuits via `hook_count()`
+  before touching disk.
+- **#248**: the Plugin Manager dialog's table span from an earlier
+  empty-state render persisted across reloads (`QTableWidget.setSpan()`
+  isn't cleared by `setRowCount()`), corrupting the column layout once a
+  plugin was later installed.
+- **#249**: pilot-name search in the pilot history and combat activity
+  stores didn't escape SQL `LIKE` wildcards (`%`, `_`) in the query
+  text, so a search for e.g. `some_guy` matched anything with any
+  character in that position.
+- **#250**: `IntelWatcher`'s file-tail could split a single log line
+  across two poll cycles at the raw-byte level on UTF-16 log files
+  (Local/intel channel logs), corrupting the parsed text. `DscanWatcher`
+  was checked too and already handles this correctly.
+- **#251**: two crashes in the same second produced colliding crash
+  bundle directory names (second-resolution timestamp), silently
+  discarding the first crash's report.
+- **#252**: crash and bug reports capped the raw traceback/log
+  character count before percent-encoding it into the GitHub issue URL
+  — encoding inflation from newlines, paths, and timestamps could still
+  push the final URL past GitHub's ~8KB limit. Now trims based on the
+  actually-encoded length.
+- **#253**: `ZkillboardClient` cached a failed lookup (network error,
+  unresolvable system) for the same 120s TTL as a genuine "no kills
+  found" result, and permanently cached a failed system-ID resolution
+  for the life of the process. Failures now retry after 20s, and the UI
+  shows a distinct "lookup failed" message instead of the reassuring
+  "no recent kills" one.
+- **#254**: pilot dossier ship percentages used total kill+loss count as
+  the denominator while only counting rows with a resolved ship name in
+  the numerator, understating every percentage whenever an ESI ship-type
+  lookup had failed. Percentages are now share-of-identified-ships.
+
 ## [8.0.1] 2026-07-19
 
 ### Fixed — v8.0.0's release workflow never ran
